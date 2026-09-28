@@ -10,6 +10,7 @@ plugins {
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.compose) apply false
+    id("io.realm.kotlin") version "1.16.0" apply false
     // Android Gradle Plugin 9.x (pairs with Gradle 9.x); applied by the Android modules themselves.
     // AGP 9 ships built-in Kotlin, so no kotlin-android plugin; KMP modules use the kmp-library plugin.
     alias(libs.plugins.android.application) apply false
