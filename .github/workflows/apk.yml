@@ -46,8 +46,27 @@ jobs:
           mkdir -p ~/.gradle
           echo "kotlin.incremental=false" >> ~/.gradle/gradle.properties
 
+
+       # 1. Decode saved Base64 keystore back to .jks file
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | base64 -d > release.jks
+
+      # 2. Build the APK using Gradle
       - name: Build debug APK
         run: ./gradlew :ide-android:assembleDebug --console=plain --stacktrace
+
+      # 3. Sign the generated APK with custom keystore
+      - name: Sign APK
+        run: |
+          BUILD_TOOLS_DIR=$ANDROID_HOME/build-tools/36.0.0
+          APK_PATH=$(find app/ide-android/build/outputs/apk/debug/ -name "*.apk" | head -n 1)
+          
+          $BUILD_TOOLS_DIR/apksigner sign --ks release.jks \
+            --ks-pass pass:${{ secrets.KEY_STORE_PASSWORD }} \
+            --ks-key-alias ${{ secrets.ALIAS }} \
+            --key-pass pass:${{ secrets.KEY_PASSWORD }} \
+            $APK_PATH
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
