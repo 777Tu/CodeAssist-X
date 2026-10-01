@@ -47,11 +47,13 @@ jobs:
           echo "kotlin.incremental=false" >> ~/.gradle/gradle.properties
 
 
-       # 1. Decode saved Base64 keystore back to .jks file
+      # 1. Decode base64 keystore using Python (avoids base64 formatting errors)
       - name: Decode Keystore
         run: |
-          echo "${{ secrets.SIGNING_KEY }}" | base64 -d > release.jks
-
+          python3 -c "import base64, os; data = os.environ['SIGNING_KEY'].replace('\n', '').replace('\r', '').strip(); open('release.jks', 'wb').write(base64.b64decode(data))"
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          
       # 2. Build the APK using Gradle
       - name: Build debug APK
         run: ./gradlew :ide-android:assembleDebug --console=plain --stacktrace
