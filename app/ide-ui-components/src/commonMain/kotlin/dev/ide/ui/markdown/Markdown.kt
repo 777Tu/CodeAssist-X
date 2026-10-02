@@ -1,6 +1,7 @@
 package dev.ide.ui.markdown
 
 import dev.ide.ui.theme.Ide
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -70,8 +71,10 @@ fun Markdown(
         ),
         link = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline),
     )
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(spacing)) {
-        for (block in blocks) MarkdownBlock(block, styles, paragraphStyle, color, headingStyle, codeBlock)
+    SelectionContainer{
+        Column(modifier, verticalArrangement = Arrangement.spacedBy(spacing)) {
+            for (block in blocks) MarkdownBlock(block, styles, paragraphStyle, color, headingStyle, codeBlock)
+        }
     }
 }
 
