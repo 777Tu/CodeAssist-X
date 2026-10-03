@@ -27,8 +27,23 @@ interface ToolArgs {
     fun raw(): String
 }
 
-/** The outcome of a tool call. [content] is returned to the model as the tool result. */
-data class ToolExecutionResult(val content: String, val isError: Boolean = false) {
+/** The outcome of a tool call. [content] is returned to the model as the tool result, along with any [images]
+ *  the tool produced (base64, see [ContentPart.Image]). */
+data class ToolExecutionResult(
+    val content: String,
+    val isError: Boolean = false,
+    val images: List<ContentPart.Image> = emptyList(),
+    /** An event the loop forwards to the host after the call, for a tool whose effect is on the UI (a plan). */
+    val event: AgentEvent? = null,
+) {
+    // The pre-[images] signatures, kept in the bytecode for plugins compiled against them.
+    @Deprecated("Binary compatibility with plugins built against SPI 3.0", level = DeprecationLevel.HIDDEN)
+    constructor(content: String, isError: Boolean = false) : this(content, isError, emptyList(), null)
+
+    @Deprecated("Binary compatibility with plugins built against SPI 3.0", level = DeprecationLevel.HIDDEN)
+    fun copy(content: String = this.content, isError: Boolean = this.isError): ToolExecutionResult =
+        ToolExecutionResult(content, isError, images, event)
+
     companion object {
         fun ok(content: String): ToolExecutionResult = ToolExecutionResult(content, isError = false)
         fun error(message: String): ToolExecutionResult = ToolExecutionResult(message, isError = true)
@@ -44,6 +59,10 @@ interface AgentTool {
 
     /** A short human-readable summary of a pending call, shown in the permission prompt and transcript. */
     fun summarize(args: ToolArgs): String = spec.name
+
+    /** What a mutating call would change, computed without changing anything, so the permission prompt can show
+     *  a diff. Empty when the tool cannot say in advance. */
+    suspend fun preview(args: ToolArgs): List<FileChange> = emptyList()
 
     suspend fun execute(args: ToolArgs): ToolExecutionResult
 }
