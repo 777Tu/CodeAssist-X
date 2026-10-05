@@ -22,10 +22,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * The OpenAI Chat Completions provider. A configurable base URL makes the same adapter serve
- * OpenAI-compatible gateways (OpenRouter, Ollama, LocalAI, and similar). The official endpoint takes
- * `max_completion_tokens`; compatible gateways generally take `max_tokens`, so the parameter name is
- * chosen from whether a custom base URL was set.
+ * The OpenAI provider. The official endpoint is driven through the Responses API ([OpenAiResponses]); a
+ * configurable base URL makes the same adapter serve OpenAI-compatible gateways (OpenRouter, Ollama, LocalAI, and
+ * similar) over Chat Completions, which is what they implement, with the `max_tokens` they generally take.
  *
  * [explicitPromptCaching] switches on the breakpoint markers that gateways fronting Anthropic models require:
  * OpenAI caches long prefixes by itself, but a Claude model reached through a gateway caches nothing unless
@@ -50,27 +49,39 @@ class OpenAiProvider(
         // is what lifts the automatic prefix cache's hit rate; it is a routing hint only, never an identifier.
         val cacheKey = "codeassist-" + java.util.UUID.randomUUID().toString()
         return LlmClient { request ->
-            val official = config.baseUrl.isNullOrBlank()
-            val base = config.baseUrl?.trimEnd('/') ?: DEFAULT_BASE
-            val sse = SseRequest(
-                url = "$base/v1/chat/completions",
-                headers = mapOf(
-                    "Authorization" to "Bearer ${config.apiKey}",
-                    "content-type" to "application/json",
-                ),
-                jsonBody = buildBody(request, official, cacheKey),
-                caCertificatePem = config.caCertificatePem,
-            )
-            stream(sse)
+            val base = normalizeBase(config.baseUrl) ?: DEFAULT_BASE
+            val official = base == DEFAULT_BASE
+            val headers = authHeaders(config.apiKey) + ("content-type" to "application/json")
+            if (official) {
+                // OpenAI itself speaks the Responses API, which takes reasoning and function tools together.
+                val sse = SseRequest(
+                    url = base + OpenAiResponses.PATH,
+                    headers = headers,
+                    jsonBody = OpenAiResponses.body(request, cacheKey),
+                    caCertificatePem = config.caCertificatePem,
+                )
+                streamResponses(sse)
+            } else {
+                // Compatible gateways implement Chat Completions, not the Responses API.
+                val sse = SseRequest(
+                    url = "$base/v1/chat/completions",
+                    headers = headers,
+                    jsonBody = buildBody(request),
+                    caCertificatePem = config.caCertificatePem,
+                )
+                stream(sse)
+            }
         }
     }
 
     override suspend fun listModels(config: ProviderConfig): List<LlmModelInfo> = runCatching {
-        val base = config.baseUrl?.trimEnd('/') ?: DEFAULT_BASE
-        val body = transport.get("$base/v1/models", mapOf("Authorization" to "Bearer ${config.apiKey}"), config.caCertificatePem)
+        val base = normalizeBase(config.baseUrl) ?: DEFAULT_BASE
+        val official = base == DEFAULT_BASE
+        val body = transport.get("$base/v1/models", authHeaders(config.apiKey), config.caCertificatePem)
         val data = AgentJson.parseToJsonElement(body).asObj()?.get("data").asArr() ?: return@runCatching models
+        // OpenAI's own list mixes in embedding, audio and image models; a gateway's list is what it serves.
         data.mapNotNull { it.asObj()?.get("id").asStr() }
-            .filter { it.startsWith("gpt") || it.startsWith("o1") || it.startsWith("o3") || it.startsWith("o4") || it.startsWith("chatgpt") }
+            .filter { !official || it.startsWith("gpt") || it.startsWith("o1") || it.startsWith("o3") || it.startsWith("o4") || it.startsWith("chatgpt") }
             .sorted()
             .map { LlmModelInfo(it, it) }
             .ifEmpty { models }
@@ -82,11 +93,16 @@ class OpenAiProvider(
         if (!decoder.completed) decoder.finish().forEach { emit(it) }
     }.catch { e -> emit(LlmStreamEvent.Failed(e.message ?: "OpenAI stream error", e)) }
 
-    private fun buildBody(request: LlmRequest, official: Boolean, cacheKey: String): String = buildJsonObject {
+    private fun streamResponses(sse: SseRequest): Flow<LlmStreamEvent> = flow {
+        val decoder = OpenAiResponsesDecoder()
+        transport.sse(sse).collect { data -> decoder.decode(data).forEach { emit(it) } }
+        if (!decoder.completed) decoder.finish(null, null).forEach { emit(it) }
+    }.catch { e -> emit(LlmStreamEvent.Failed(e.message ?: "OpenAI stream error", e)) }
+
+    private fun buildBody(request: LlmRequest): String = buildJsonObject {
         put("model", request.model)
         put("stream", true)
-        if (official) put("prompt_cache_key", cacheKey)
-        put(if (official) "max_completion_tokens" else "max_tokens", request.maxTokens)
+        put("max_tokens", request.maxTokens)
         // A reasoning model applies a default reasoning effort even when none is sent; on chat completions
         // that default plus function tools is rejected, so forwarding "none" is how a tool-using agent runs
         // against such a model. Non-reasoning models ignore the field. Sent only when explicitly requested.
@@ -215,6 +231,29 @@ class OpenAiProvider(
 
     companion object {
         const val DEFAULT_BASE = "https://api.openai.com"
+
+        private val URL_TOKEN = Regex("""https?://\S+""", RegexOption.IGNORE_CASE)
+        private val ENDPOINT_SUFFIXES = listOf("/chat/completions", "/completions", "/responses", "/models")
+
+        /**
+         * The server root that `/v1/...` paths are appended to, from what a user typed or pasted. Gateways document
+         * their base URL in the OpenAI SDK's form, which already ends in `/v1` (Ollama's is
+         * `http://localhost:11434/v1`), and some users paste a full endpoint; both would otherwise double up into
+         * `/v1/v1/...`. A paste that carries more than the URL (a "Base URL: ... / API Key: ..." block) keeps only
+         * the first URL in it: OkHttp silently drops line breaks, so the rest used to end up in the request path.
+         */
+        fun normalizeBase(raw: String?): String? {
+            val text = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            var base = URL_TOKEN.find(text)?.value ?: text.substringBefore('\n').trim().substringBefore(' ')
+            base = base.trimEnd('/')
+            ENDPOINT_SUFFIXES.firstOrNull { base.endsWith(it, ignoreCase = true) }?.let { base = base.dropLast(it.length).trimEnd('/') }
+            if (base.endsWith("/v1", ignoreCase = true)) base = base.dropLast(3)
+            return base.takeIf { it.isNotEmpty() }
+        }
+
+        /** A local server (Ollama, LM Studio, llama.cpp) needs no key; an empty bearer is not sent at all. */
+        internal fun authHeaders(apiKey: String): Map<String, String> =
+            apiKey.trim().takeIf { it.isNotEmpty() }?.let { mapOf("Authorization" to "Bearer $it") } ?: emptyMap()
 
         /** Model-id fragments that identify an Anthropic model behind an OpenAI-dialect gateway. */
         val ANTHROPIC_MODEL_MARKERS = listOf("anthropic/", "claude")

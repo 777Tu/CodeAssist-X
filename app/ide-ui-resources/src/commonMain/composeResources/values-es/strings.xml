@@ -269,6 +269,11 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
 
     <!-- Code actions -->
     <string name="codeaction_show_context_actions">Mostrar acciones de contexto</string>
+    <string name="literal_tweak_decrease">Disminuir</string>
+    <string name="literal_tweak_increase">Aumentar</string>
+    <string name="literal_tweak_scrub">Arrastra para ajustar</string>
+    <string name="literal_tweak_pick_color">Elegir color</string>
+    <string name="literal_tweak_toggle">Alternar valor</string>
     <string name="codeaction_preview_composable">Previsualizar este composable</string>
     <string name="codeaction_dismiss">Descartar</string>
     <string name="codeaction_severity_error">Error</string>
@@ -1125,6 +1130,12 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="respreview_no_colors">No hay colores declarados en este archivo</string>
     <string name="respreview_unresolved">(sin resolver)</string>
     <string name="respreview_decode_image_failed">No se pudo decodificar esta imagen</string>
+    <string name="respreview_anim_play">Reproducir</string>
+    <string name="respreview_anim_pause">Pausar</string>
+    <string name="respreview_anim_restart">Reiniciar</string>
+    <string name="respreview_anim_frames">%1$d fotogramas</string>
+    <string name="respreview_anim_length">%1$d ms por reproducción</string>
+    <string name="respreview_anim_forever">Se repite sin fin</string>
 
     <!-- Module config consumer -->
     <string name="modcfg_consumer_suffix">%1$s · consumidor</string>

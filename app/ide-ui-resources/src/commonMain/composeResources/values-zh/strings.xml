@@ -367,6 +367,11 @@
 
     <!-- edpop (CodeActionsPopup/CompletionPopup/SignatureHelpPopup/EditorSheets/EditorSymbolBar/EditorBottomNav/EditorBreadcrumbBar) -->
     <string name="codeaction_show_context_actions">显示上下文操作</string>
+    <string name="literal_tweak_decrease">减少</string>
+    <string name="literal_tweak_increase">增加</string>
+    <string name="literal_tweak_scrub">拖动以调整</string>
+    <string name="literal_tweak_pick_color">选择颜色</string>
+    <string name="literal_tweak_toggle">切换值</string>
     <string name="codeaction_preview_composable">预览此 Composable</string>
     <string name="codeaction_dismiss">关闭</string>
     <string name="codeaction_severity_error">错误</string>
@@ -1672,6 +1677,12 @@
     <string name="respreview_no_colors">此文件未声明任何颜色</string>
     <string name="respreview_unresolved">（未解析）</string>
     <string name="respreview_decode_image_failed">无法解码此图片</string>
+    <string name="respreview_anim_play">播放</string>
+    <string name="respreview_anim_pause">暂停</string>
+    <string name="respreview_anim_restart">重新开始</string>
+    <string name="respreview_anim_frames">%1$d 帧</string>
+    <string name="respreview_anim_length">每次播放 %1$d 毫秒</string>
+    <string name="respreview_anim_forever">无限循环</string>
     <!-- Module config: keep-rule file build-type descriptor -->
     <string name="modcfg_consumer_suffix">%1$s · 消费者</string>
     <!-- Block editor palette items -->

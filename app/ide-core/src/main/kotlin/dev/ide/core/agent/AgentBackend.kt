@@ -248,7 +248,11 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         /** An optional additional CA certificate (PEM) to trust for a custom endpoint behind a private/regional
          *  CA (e.g. GigaChat's Russian Trusted Root CA). Only the custom [GATEWAY] endpoint uses it. */
         val caCertificatePem: String? = null,
-    )
+    ) {
+        /** A custom gateway is often a local server (Ollama, LM Studio) that takes no key; its URL is what it needs. */
+        val ready: Boolean
+            get() = if (selectedId == GATEWAY) !baseUrl.isNullOrBlank() else !apiKey.isNullOrBlank()
+    }
 
     private fun resolveConfig(): ResolvedConfig {
         val selected = pref("provider") ?: registry.providers.firstOrNull()?.id ?: "anthropic"
@@ -298,6 +302,18 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
     /** Models that failed this session for want of quota, so a suggestion never points back at one. */
     private val exhaustedModels = ConcurrentHashMap.newKeySet<String>()
 
+    /**
+     * Models the provider answered "not found" for this session. Gemini keeps listing models it has closed to
+     * new projects (2.5 Pro), so the live list alone would keep offering a model that can never answer.
+     */
+    private val missingModels = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Whether [models] came from the custom gateway itself. When its `/v1/models` cannot be read the list falls
+     * back to the OpenAI defaults, which a local server does not serve, so those are never offered as a fix.
+     */
+    @Volatile private var gatewayModelsLive = false
+
     /** One pacer per key + model, which is the scope a provider counts its per-minute limits against. */
     private val pacers = ConcurrentHashMap<String, RequestPacer>()
 
@@ -336,7 +352,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         }
         // A synthetic "Custom gateway" entry (OpenAI-compatible endpoint); its client is the OpenAI provider.
         val gateway = UiAgentProvider(GATEWAY, "Custom gateway", emptyList(), "", apiKey = pref("gatewayKey").orEmpty())
-        val configured = !cfg.apiKey.isNullOrBlank() && (cfg.selectedId != GATEWAY || !cfg.baseUrl.isNullOrBlank())
+        val configured = cfg.ready
         return UiAgentConfig(
             providers = builtins + gateway,
             selectedProvider = cfg.selectedId,
@@ -380,16 +396,18 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
     override fun refreshModels() {
         val cfg = resolveConfig()
         val provider = registry.provider(cfg.clientProviderId) ?: return
-        val key = cfg.apiKey
-        if (key.isNullOrBlank()) {
+        val key = cfg.apiKey.orEmpty()
+        if (!cfg.ready) {
             _models.value = provider.models.map { UiAgentModel(it.id, it.displayName) }
             return
         }
         scope.launch {
             val fetched = runCatching { provider.listModels(ProviderConfig(key, cfg.baseUrl, cfg.caCertificatePem)) }
                 .getOrDefault(provider.models)
-            rememberPreferred(cfg.selectedId, provider, fetched)
-            _models.value = fetched.map { UiAgentModel(it.id, it.displayName) }
+            gatewayModelsLive = cfg.selectedId == GATEWAY && fetched !== provider.models
+            val usable = fetched.filter { it.id !in missingModels }.ifEmpty { fetched }
+            rememberPreferred(cfg.selectedId, provider, usable)
+            _models.value = usable.map { UiAgentModel(it.id, it.displayName) }
         }
     }
 
@@ -476,8 +494,11 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
             appendError("Unknown AI provider '${cfg.selectedId}'.")
             return null
         }
-        if (cfg.apiKey.isNullOrBlank()) {
-            appendError("Add an API key to use the agent. Tap the key icon to manage providers.")
+        if (!cfg.ready) {
+            appendError(
+                if (cfg.selectedId == GATEWAY) "Add the gateway's base URL to use the agent. Tap the key icon to manage providers."
+                else "Add an API key to use the agent. Tap the key icon to manage providers.",
+            )
             return null
         }
         val model = cfg.model.ifBlank { provider.defaultModel }
@@ -497,7 +518,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         val restored = pendingHistory
         val carried = restored ?: existing?.snapshot()
         val modelChanged = restored != null || (loopClientSignature != null && loopClientSignature != clientSignature)
-        val client = provider.client(ProviderConfig(cfg.apiKey, cfg.baseUrl, cfg.caCertificatePem))
+        val client = provider.client(ProviderConfig(cfg.apiKey.orEmpty(), cfg.baseUrl, cfg.caCertificatePem))
         val built = AgentLoop(
             client, model, tools, gate, ::systemPrompt,
             sessionContext = ::sessionContext,
@@ -710,19 +731,40 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
     }
 
     /**
-     * For an error a different model fixes (no quota for this model, or its daily allowance spent), the model
-     * to offer instead: the provider's pick from the account's live list, then its default, then anything else
-     * it lists, skipping every model that has already failed this way.
+     * For an error a different model fixes (no quota for this model, its daily allowance spent, or the model
+     * retired or closed to the account), the model to offer instead: the provider's pick from the account's live
+     * list, then its default, then anything else it lists, skipping every model that has already failed this way.
+     * A model picked once stays picked across launches, so without this offer a retired pick failed every send.
      */
     private fun suggestionFor(kind: String?): String? {
-        if (kind != LlmErrorKind.MODEL_NOT_ON_PLAN.name && kind != LlmErrorKind.DAILY_LIMIT.name) return null
+        val missing = kind == LlmErrorKind.NOT_FOUND.name
+        if (!missing && kind != LlmErrorKind.MODEL_NOT_ON_PLAN.name && kind != LlmErrorKind.DAILY_LIMIT.name) return null
         val cfg = resolveConfig()
-        if (cfg.selectedId == GATEWAY) return null
+        if (cfg.selectedId == GATEWAY) return gatewaySuggestion(missing, cfg.model)
         val provider = registry.provider(cfg.clientProviderId) ?: return null
         exhaustedModels += cfg.model
+        if (missing) {
+            missingModels += cfg.model
+            _models.update { list -> list.filterNot { it.id == cfg.model } }
+        }
         val listed = _models.value.map { it.id }.ifEmpty { provider.models.map { it.id } }
         val candidates = listOfNotNull(preferredModels[cfg.selectedId], provider.defaultModel) + listed
         return candidates.firstOrNull { it !in exhaustedModels }
+    }
+
+    /**
+     * A gateway has no default to fall back on, but when it lists its models a "not found" for the typed name
+     * (often a file name such as `Qwen3.5-2B-Q4_0.gguf` where the server's id differs) can offer one it serves:
+     * the closest by name, else the first.
+     */
+    private fun gatewaySuggestion(missing: Boolean, model: String): String? {
+        if (!missing || !gatewayModelsLive) return null
+        missingModels += model
+        val listed = _models.value.map { it.id }.filter { it != model && it !in missingModels }
+        if (listed.isEmpty()) return null
+        val stem = model.substringAfterLast('/').substringBeforeLast(".gguf").lowercase()
+        return listed.firstOrNull { it.lowercase().contains(stem) || stem.contains(it.substringAfterLast('/').lowercase()) }
+            ?: listed.first()
     }
 
     private fun todoStatus(status: String): UiAgentTodoStatus = when (status) {

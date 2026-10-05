@@ -368,6 +368,11 @@ We never collect your code, file or project names, which features you use, or an
 
     <!-- edpop (CodeActionsPopup/CompletionPopup/SignatureHelpPopup/EditorSheets/EditorSymbolBar/EditorBottomNav/EditorBreadcrumbBar) -->
     <string name="codeaction_show_context_actions">Show context actions</string>
+    <string name="literal_tweak_decrease">Decrease</string>
+    <string name="literal_tweak_increase">Increase</string>
+    <string name="literal_tweak_scrub">Drag to adjust</string>
+    <string name="literal_tweak_pick_color">Pick color</string>
+    <string name="literal_tweak_toggle">Toggle value</string>
     <string name="codeaction_preview_composable">Preview this composable</string>
     <string name="codeaction_dismiss">Dismiss</string>
     <string name="codeaction_severity_error">Error</string>
@@ -1674,6 +1679,12 @@ We never collect your code, file or project names, which features you use, or an
     <string name="respreview_no_colors">No colors declared in this file</string>
     <string name="respreview_unresolved">(unresolved)</string>
     <string name="respreview_decode_image_failed">Couldn't decode this image</string>
+    <string name="respreview_anim_play">Play</string>
+    <string name="respreview_anim_pause">Pause</string>
+    <string name="respreview_anim_restart">Restart</string>
+    <string name="respreview_anim_frames">%1$d frames</string>
+    <string name="respreview_anim_length">%1$d ms per play</string>
+    <string name="respreview_anim_forever">Repeats forever</string>
     <!-- Module config: keep-rule file build-type descriptor -->
     <string name="modcfg_consumer_suffix">%1$s · consumer</string>
     <!-- Block editor palette items -->

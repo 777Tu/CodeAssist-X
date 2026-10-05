@@ -120,6 +120,9 @@ class AgentTest {
         assertEquals(5, usage.outputTokens)
     }
 
+    /** A custom base URL: the OpenAI-compatible gateway path, which speaks Chat Completions. */
+    private val gateway = ProviderConfig("k", baseUrl = "https://gateway.example")
+
     @Test
     fun openAiDecodesTextAndToolCall() {
         val provider = OpenAiProvider(
@@ -134,7 +137,7 @@ class AgentTest {
                 ),
             ),
         )
-        val events = runBlocking { provider.client(ProviderConfig("k")).chat(request()).toList() }
+        val events = runBlocking { provider.client(gateway).chat(request()).toList() }
 
         assertEquals("Hi", events.filterIsInstance<LlmStreamEvent.TextDelta>().joinToString("") { it.text })
         val call = events.filterIsInstance<LlmStreamEvent.ToolCallCompleted>().single()
@@ -186,7 +189,7 @@ class AgentTest {
     @Test
     fun openAiSendsReasoningEffortOnlyWhenRequested() {
         val transport = CapturingTransport(payloads = listOf("[DONE]"))
-        val client = OpenAiProvider(transport).client(ProviderConfig("k"))
+        val client = OpenAiProvider(transport).client(gateway)
 
         runBlocking {
             client.chat(LlmRequest("gpt-5.6-luna", null, listOf(LlmMessage.user("hi")), effort = "none")).toList()
@@ -326,6 +329,16 @@ class AgentTest {
         val rateLimited = LlmErrors.parseHttp(429, """{"error":{"type":"rate_limit_error","message":"slow down"}}""", "12")
         assertEquals(LlmErrorKind.RATE_LIMIT, rateLimited.kind)
         assertEquals(12000L, rateLimited.retryAfterMs)
+
+        // Gemini: a model closed to new projects is a 404 the chat answers by offering another model.
+        val retired = LlmErrors.parseHttp(
+            404,
+            """{"error":{"code":404,"status":"NOT_FOUND","message":"This model models/gemini-2.5-pro is no longer available to new users."}}""",
+            null,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+        )
+        assertEquals(LlmErrorKind.NOT_FOUND, retired.kind)
+        assertTrue(retired.message.contains("no longer available to new users"), retired.message)
     }
 
     /** Builds [rounds] tool-call rounds, each with a [size]-character tool result. */
