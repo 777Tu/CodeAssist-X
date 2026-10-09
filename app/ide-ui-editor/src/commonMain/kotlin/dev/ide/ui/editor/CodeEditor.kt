@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -259,6 +261,8 @@ private fun CodeEditorContent(
     var isFocused by remember { mutableStateOf(false) }
     val engaged = isFocused && !obscured
     var blinkOn by remember { mutableStateOf(true) }
+    // Where the code area starts below the sticky headers, as the editor's last draw left it for the caret's.
+    val caretClip = remember { CaretClip() }
     LaunchedEffect(editorSession.editCount, editorSession.selection.start, isFocused) {
         blinkOn = true // caret solid through every edit or cursor move; blink only at rest
         while (isFocused) {
@@ -1042,7 +1046,7 @@ private fun CodeEditorContent(
                             mn to mx
                         } else null
                     } else null
-                    drawEditor(
+                    caretClip.codeTop = drawEditor(
                         session = editorSession,
                         metrics = metrics,
                         gutterWidth = gutterWidthPx,
@@ -1070,11 +1074,30 @@ private fun CodeEditorContent(
                         indentColsFor = renderState::indentColsFor,
                         stickyHeadersFor = { renderState.stickyHeadersFor(geometry.editorStructure.value, it) },
                         colors = drawColors,
-                        caretVisible = isFocused && (blinkOn || !editorSession.selection.collapsed),
-                        caretContent = interaction.caretContent, // animated, content-space; read here → redraw per frame
                         handlesVisible = interaction.handlesVisible && interaction.lastInputWasTouch,
                         handleColor = colors.accent,
                         animatedSelection = animatedSel,
+                    )
+                },
+        )
+
+        // The caret, in a layer of its own (see [drawCaret]). The blink is read in the layer block, so it changes
+        // the layer's alpha without drawing anything again; the animated position is read in the draw, so a
+        // glide redraws only the caret.
+        Spacer(
+            Modifier
+                .matchParentSize()
+                .graphicsLayer { alpha = if (isFocused && blinkOn && editorSession.selection.collapsed) 1f else 0f }
+                .drawBehind {
+                    if (!editorSession.selection.collapsed) return@drawBehind
+                    drawCaret(
+                        caretContent = interaction.caretContent,
+                        vOff = geometry.vOffset.floatValue,
+                        hOff = geometry.hOffset.floatValue,
+                        gutterWidth = gutterWidthPx,
+                        codeTop = caretClip.codeTop,
+                        lineHeight = metrics.lineHeight,
+                        color = drawColors.caret,
                     )
                 },
         )
@@ -1103,14 +1126,6 @@ private fun CodeEditorContent(
             visibleLinesOf = { geometry.visibleLineRange() },
         )
 
-        SelectionToolbarLayer(
-            session = editorSession,
-            geometry = geometry,
-            interaction = interaction,
-            onDocs = { showQuickDoc() },
-            onMenu = { interaction.handlesVisible = false; openNavMenu() },
-        )
-
         // completion popup, anchored at the token start (extracted so ART can compile these emission blocks).
         CompletionPopupLayer(
             completion = completion,
@@ -1125,36 +1140,6 @@ private fun CodeEditorContent(
             paneBottomInWindow = paneBottomInWindow,
             safeSelected = safeSelected,
             onAccept = { accept(it) },
-        )
-
-        SignatureHelpLayer(
-            sig = sig,
-            engaged = engaged,
-            caretOffset = caretOffset,
-            caretGeometry = { geometry.caretGeometry(it) },
-            gutterWidthPx = gutterWidthPx,
-        )
-        LightbulbLayer(
-            acts = acts,
-            interaction = interaction,
-            showPopup = showPopup,
-            engaged = engaged,
-            caretOffset = caretOffset,
-            caretGeometry = { geometry.caretGeometry(it) },
-            gutterWidthPx = gutterWidthPx,
-        )
-
-        // Literal tweak chip (number scrub / color pick / boolean flip) in a file with @Preview composables. Gives way
-        // to the completion popup and the quick-fix bulb/menu, and stacks above the touch selection toolbar.
-        LiteralTweakLayer(
-            session = editorSession,
-            visible = engaged && !showPopup && !acts.menuOpen &&
-                !(acts.available.isNotEmpty() && acts.caretDiagnostic != null),
-            caretGeometry = { geometry.caretGeometry(it) },
-            gutterWidthPx = gutterWidthPx,
-            liftPx = if (interaction.handlesVisible && interaction.lastInputWasTouch) {
-                interaction.selectionToolbarHeightPx + with(LocalDensity.current) { 8.dp.roundToPx() }
-            } else 0,
         )
 
         PreviewGutterIconsLayer(
@@ -1194,6 +1179,48 @@ private fun CodeEditorContent(
             caretOffset = caretOffset,
             caretGeometry = { geometry.caretGeometry(it) },
             metrics = metrics,
+            gutterWidthPx = gutterWidthPx,
+        )
+
+        // The overlays placed in the pane rather than as popups (see [aboveLineInPane]). After the gutter and plugin
+        // layers so they draw and take taps over them, before the cards below, which cover them; the bulb last.
+        SignatureHelpLayer(
+            sig = sig,
+            engaged = engaged,
+            caretOffset = caretOffset,
+            caretGeometry = { geometry.caretGeometry(it) },
+            lineHeightPx = metrics.lineHeight,
+            gutterWidthPx = gutterWidthPx,
+        )
+        // Literal tweak chip (number scrub / color pick / boolean flip) in a file with @Preview composables. Gives way
+        // to the completion popup and the quick-fix bulb/menu, and stacks above the touch selection toolbar.
+        LiteralTweakLayer(
+            session = editorSession,
+            visible = engaged && !showPopup && !acts.menuOpen &&
+                !(acts.available.isNotEmpty() && acts.caretDiagnostic != null),
+            caretGeometry = { geometry.caretGeometry(it) },
+            lineHeightPx = metrics.lineHeight,
+            gutterWidthPx = gutterWidthPx,
+            liftPx = if (interaction.handlesVisible && interaction.lastInputWasTouch) {
+                interaction.selectionToolbarHeightPx + with(LocalDensity.current) { 8.dp.roundToPx() }
+            } else 0,
+        )
+        SelectionToolbarLayer(
+            session = editorSession,
+            geometry = geometry,
+            interaction = interaction,
+            lineHeightPx = metrics.lineHeight,
+            onDocs = { showQuickDoc() },
+            onMenu = { interaction.handlesVisible = false; openNavMenu() },
+        )
+        LightbulbLayer(
+            acts = acts,
+            interaction = interaction,
+            showPopup = showPopup,
+            engaged = engaged,
+            caretOffset = caretOffset,
+            caretGeometry = { geometry.caretGeometry(it) },
+            lineHeightPx = metrics.lineHeight,
             gutterWidthPx = gutterWidthPx,
         )
 
@@ -1387,32 +1414,31 @@ private fun SignatureHelpLayer(
     engaged: Boolean,
     caretOffset: Int,
     caretGeometry: (Int) -> Triple<Int, Float, Float>,
+    lineHeightPx: Float,
     gutterWidthPx: Float,
 ) {
     val sigHelp = sig.help
     if (sigHelp != null && !sig.dismissed && engaged && sigHelp.signatures.isNotEmpty()) {
-        val density = LocalDensity.current
-        val (_, sigX, sigTop) = caretGeometry(caretOffset)
-        val gapPx = with(density) { 6.dp.roundToPx() }
-        val positionProvider = remember(sigX, sigTop, gapPx) {
-            AboveAnchorPositionProvider(
-                sigX.roundToInt().coerceAtLeast(gutterWidthPx.roundToInt()),
-                sigTop.roundToInt(),
-                gapPx,
-            )
-        }
-        Popup(
-            popupPositionProvider = positionProvider,
-            onDismissRequest = { sig.dismiss() },
-            properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-        ) {
-            SignatureHelpPopup(sigHelp, mobile = isMobilePlatform)
-        }
+        val gapPx = with(LocalDensity.current) { 6.dp.roundToPx() }
+        // In the pane, not a `Popup` (see [aboveLineInPane]): it stays up for as long as the caret is in a call.
+        SignatureHelpPopup(
+            sigHelp,
+            mobile = isMobilePlatform,
+            modifier = Modifier.aboveLineInPane(
+                anchor = { caretGeometry(caretOffset).let { (_, x, top) -> x to top } },
+                lineHeightPx = lineHeightPx,
+                gapPx = gapPx,
+                minX = gutterWidthPx.roundToInt(),
+            ),
+        )
     }
 }
 
 /** Lightbulb floating just ABOVE the caret — only when the caret is on a diagnostic that has fixes, the
- *  completion popup isn't showing, and the fix menu isn't already open. Tap → the fix list. */
+ *  completion popup isn't showing, and the fix menu isn't already open. Tap → the fix list.
+ *
+ *  In the pane, not a `Popup` (see [aboveLineInPane]): the bulb stays up for as long as the caret rests on
+ *  an error. */
 @Composable
 private fun LightbulbLayer(
     acts: EditorActionsController,
@@ -1421,11 +1447,11 @@ private fun LightbulbLayer(
     engaged: Boolean,
     caretOffset: Int,
     caretGeometry: (Int) -> Triple<Int, Float, Float>,
+    lineHeightPx: Float,
     gutterWidthPx: Float,
 ) {
     if (acts.available.isNotEmpty() && acts.caretDiagnostic != null && !showPopup && !acts.menuOpen && engaged) {
         val density = LocalDensity.current
-        val (_, bulbX, bulbTop) = caretGeometry(caretOffset)
         val gapPx = with(density) { 6.dp.roundToPx() }
         // The touch selection toolbar anchors above this same line; when it's up, stack the bulb above it
         // (toolbar height + its 8dp gap) so a quick-fix like auto-import stays reachable.
@@ -1433,16 +1459,16 @@ private fun LightbulbLayer(
             if (interaction.handlesVisible && interaction.lastInputWasTouch) {
                 interaction.selectionToolbarHeightPx + with(density) { 8.dp.roundToPx() }
             } else 0
-        val positionProvider = remember(bulbX, bulbTop, gapPx, toolbarLift) {
-            AboveAnchorPositionProvider(
-                bulbX.roundToInt().coerceAtLeast(gutterWidthPx.roundToInt()),
-                bulbTop.roundToInt() - toolbarLift,
-                gapPx,
-            )
-        }
-        Popup(popupPositionProvider = positionProvider) {
-            FloatingLightbulb(onClick = { acts.openMenu() })
-        }
+        FloatingLightbulb(
+            onClick = { acts.openMenu() },
+            modifier = Modifier.aboveLineInPane(
+                anchor = { caretGeometry(caretOffset).let { (_, x, top) -> x to top } },
+                lineHeightPx = lineHeightPx,
+                gapPx = gapPx,
+                minX = gutterWidthPx.roundToInt(),
+                liftPx = toolbarLift,
+            ),
+        )
     }
 }
 
@@ -1529,6 +1555,12 @@ private fun NavMenuLayer(
 }
 
 /** Whole-word matches of [word] in [doc], and the exact document and word they were computed from. */
+/** Where the code area starts below the sticky headers, written by the editor's draw and read by the caret's,
+ *  which runs after it in the same frame. Not snapshot state: a draw must not write state another draw reads. */
+private class CaretClip {
+    var codeTop = 0f
+}
+
 private class OccurrenceResult(val doc: EditorDocument, val word: String, val matches: List<Match>)
 
 /** How long the caret and the text must stay put before the identifier under the caret is highlighted. */

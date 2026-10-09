@@ -431,7 +431,9 @@ class IdeServices private constructor(
     private val analyzedLanguages: Set<LanguageId> by lazy {
         val fromAnalyzers = platform.extensions.extensions(ANALYZER_EP).flatMap { it.languages }
         val fromProviders = platform.extensions.extensions(DIAGNOSTIC_PROVIDER_EP).flatMap { it.languages }
-        (fromAnalyzers + fromProviders).toHashSet()
+        // A declaration provider reads the same target, so a language it names needs the gate open too.
+        val fromNavigation = platform.extensions.extensions(dev.ide.analysis.DECLARATION_PROVIDER_EP).flatMap { it.languages }
+        (fromAnalyzers + fromProviders + fromNavigation).toHashSet()
     }
 
     /** File-name-suffix → [LanguageId] mappings contributed via [FILE_TYPE_EP] (built-ins in [BuiltInPlugins]),
@@ -479,9 +481,16 @@ class IdeServices private constructor(
             // Maven caches) instead of re-indexing the same AndroidX/Compose/stdlib jars per project. The
             // in-memory source side stays per-project regardless of where this points.
             (sharedCachesRoot ?: store.rootPath).resolve("caches").resolve("index"),
-            // On-device (androidTools present) ART has a tight heap, so use a smaller hot-block cache; desktop keeps the default.
-            blockCacheBytes = if (androidTools != null) IndexServiceImpl.CONSTRAINED_BLOCK_CACHE_BYTES
-            else IndexServiceImpl.DEFAULT_BLOCK_CACHE_BYTES,
+            // On-device (androidTools present) ART has a tight heap, so the index builds narrowly there. Its hot
+            // block cache is the desktop size unless the device is low on memory: completion's class-name
+            // queries thrash a smaller one, re-reading blocks from disk on every keystroke.
+            blockCacheBytes = if (androidTools != null) {
+                DeviceMemory.pick(
+                    normal = IndexServiceImpl.DEFAULT_BLOCK_CACHE_BYTES,
+                    low = IndexServiceImpl.CONSTRAINED_BLOCK_CACHE_BYTES,
+                )
+            } else IndexServiceImpl.DEFAULT_BLOCK_CACHE_BYTES,
+            constrainedHeap = androidTools != null,
             // The source side IS per-project (not shareable), so persist its per-file partitions under the
             // project's own caches — a re-open then re-parses only the source files that changed since last time.
             sourceCacheRoot = store.rootPath.resolve(".platform/caches/source-index"),
@@ -2097,6 +2106,7 @@ class IdeServices private constructor(
                 replacementRange = replaceRange,
                 parse = { analyzer?.let { runCatching { it.incrementalParser.parseFull(snapshot) }.getOrNull() } },
                 typeResolver = analyzer?.let { a -> { node -> runCatching { a.resolveType(node) }.getOrNull() } },
+                module = module,
             )
             completionEngine.complete(
                 params,
@@ -2415,7 +2425,7 @@ class IdeServices private constructor(
     ): List<dev.ide.lang.kotlin.NavTarget> {
         val targets = kotlinEditor.navigationTargets(file, text, offset, kind)
         if (targets.isNotEmpty() || kind != dev.ide.lang.kotlin.NavKind.DECLARATION) return targets
-        return resourceDeclaration(file, text, offset) ?: emptyList()
+        return resourceDeclaration(file, text, offset) ?: pluginDeclarations(file, text, offset)
     }
 
     /**
@@ -2432,6 +2442,14 @@ class IdeServices private constructor(
         val opts = kotlinEditor.navigationOptions(file, text, offset).toMutableList()
         if (opts.none { it.first == dev.ide.lang.kotlin.NavKind.DECLARATION }) {
             resourceDeclaration(file, text, offset)?.let { opts.add(dev.ide.lang.kotlin.NavKind.DECLARATION to it) }
+        }
+        // The menu lists every declaration, so a plugin's join the built-in ones rather than waiting for there
+        // to be none: a Java `native` method resolves to itself, and its C++ body is the one worth listing.
+        val contributed = pluginDeclarations(file, text, offset)
+        if (contributed.isNotEmpty()) {
+            val i = opts.indexOfFirst { it.first == dev.ide.lang.kotlin.NavKind.DECLARATION }
+            if (i < 0) opts.add(dev.ide.lang.kotlin.NavKind.DECLARATION to contributed)
+            else opts[i] = opts[i].first to (opts[i].second + contributed).distinctBy { it.file.path to it.offset }
         }
         return opts.sortedBy { it.first.ordinal }
     }
@@ -2475,6 +2493,30 @@ class IdeServices private constructor(
         // Else decompile in the class's natural language (a built-in has no bytecode → the stub; fall back).
         return if (decompiler.isKotlin(fqn)) kotlin() ?: builtin() ?: java()
         else builtin() ?: java() ?: kotlin()
+    }
+
+    private val navigationLog by lazy { Log.logger("ide.navigation") }
+
+    /**
+     * The go-to-declaration targets plugins contribute for [offset] in [file] ([text] = live buffer), through
+     * [dev.ide.analysis.DECLARATION_PROVIDER_EP]. A direct jump asks them only once the built-in navigation
+     * found nothing, so a plugin cannot shadow a declaration a backend knows; the Go-to menu lists them beside
+     * the built-in ones. A provider that throws is logged and skipped.
+     */
+    private fun pluginDeclarations(file: Path, text: String, offset: Int): List<dev.ide.lang.kotlin.NavTarget> {
+        val language = languageFor(file)
+        val providers = platform.extensions.extensions(dev.ide.analysis.DECLARATION_PROVIDER_EP)
+            .filter { it.languages.isEmpty() || language in it.languages }
+        if (providers.isEmpty()) return emptyList()
+        if (moduleForEditableFile(file) != null) updateDocument(file, text)
+        val target = runCatching {
+            runSync { analysisEnvironment.targetFor(store.vfs.fileFor(file), needsBindings = false) }
+        }.getOrNull() ?: return emptyList()
+        return providers.flatMap { provider ->
+            runCatching { runSync { provider.declarations(target, offset) } }
+                .onFailure { navigationLog.warn("declaration provider '${provider.id}' failed on $file", it) }
+                .getOrDefault(emptyList())
+        }.map { dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(Paths.get(it.path)), it.offset, it.label, "declaration") }
     }
 
     /** A single-element DECLARATION target list for the Android resource reference under [offset], or null. */

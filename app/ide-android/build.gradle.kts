@@ -437,8 +437,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // versionCode must exceed the last published release (the previous-codebase app reached ~29).
-        versionCode = 101
-        versionName = "3.24.0"
+        versionCode = 102
+        versionName = "3.25.0"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -562,6 +562,9 @@ android {
             // locally when no release keystore is present.
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release")
+            // Lets the shell attach simpleperf, Perfetto heap/CPU profiling and `am profile` to this
+            // non-debuggable build without the debuggable slowdown.
+            isProfileable = true
             // This build is for on-device perf testing, so keep TEST ads (initWith(release) copied the real
             // ids — undo that) — a tester must never click a live ad.
             manifestPlaceholders["admobAppId"] = testAdmobAppId

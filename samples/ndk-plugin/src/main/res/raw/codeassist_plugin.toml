@@ -1,20 +1,23 @@
 [plugin]
 id = "dev.codeassist.ndk"
 name = "NDK (C/C++)"
-version = "1.0.0"
+version = "1.2.0"
 apiVersion = 4
-description = "Compiles C and C++ on the device. Carries a clang and an lld built to run on Android arm64, colors C/C++ in the editor, reports errors from the same compiler that builds the code, and adds a Native C++ project template."
+description = "Compiles C and C++ on the device with a bundled clang and lld for Android arm64: C/C++ editing with the compiler's own errors and completion, JNI between Java/Kotlin and C++ (missing-function checks with a fix, navigation both ways), and Native C++ app, activity and library templates."
 entryPoints = ["dev.codeassist.ndk.NdkPlugin"]
 uiEntryPoints = ["dev.codeassist.ndk.NdkUiPlugin"]
 capabilities = [
     "ui.action",
     "ui.editorLanguage",
+    "ui.editorDecoration",
+    "ui.newFileTemplate",
     "lang.backend",
     "build.task",
     "model.facet",
     "fs.read",
     "fs.write",
 ]
-# ui.editorLanguage and PluginRegistration.nativeLibrary both arrived in SPI 2.10.0. Without the second one
-# the plugin cannot find the compiler it ships, so this floor is load-bearing rather than cautious.
-minHostVersion = "3.14.0"
+# Built against plugin API 4, which IDE 3.21.0 introduced; an older IDE refuses the plugin at that gate anyway,
+# and this says so in terms of a version the user can look up. What SPI 3.1.0 adds (packaging a build
+# directory's native libraries, the module in completion) is used when present and falls back without it.
+minHostVersion = "3.21.0"
