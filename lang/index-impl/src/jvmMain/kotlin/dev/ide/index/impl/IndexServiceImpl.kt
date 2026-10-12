@@ -25,6 +25,12 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.yield
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -88,6 +94,14 @@ class IndexServiceImpl(
      */
     private val readOnly: Boolean = false,
     /**
+     * Build library SOURCE archives (`-sources.jar`, JDK `src.zip`, Android `sources/`) in the background after
+     * each pass instead of inside it. They feed only the source-doc indexes (parameter names, javadoc), yet
+     * were the costliest artifacts in the field; deferred, they no longer delay readiness or the next pass.
+     * Off by default so a caller that queries docs right after [ensureUpToDate] keeps that guarantee; such a
+     * caller can also [awaitDeferredWork].
+     */
+    private val deferSourceArchives: Boolean = false,
+    /**
      * Collapse the parallel index build to a SINGLE background thread. Set on 32-bit ARM ART devices (via
      * [dev.ide.platform.RuntimeInfo.is32Bit]), where a wide (4-8 coroutine) library/SDK index build allocating
      * heavily WHILE the editor parses/resolves on the `ide-engine` thread provokes a native torn-reference
@@ -104,9 +118,36 @@ class IndexServiceImpl(
         /** Static (SDK + library) partitions, read from disk on demand. CopyOnWrite ⇒ lock-free query reads. */
         val segments = CopyOnWriteArrayList<Segment>()
 
-        /** Content hashes whose segment is already open, so a repeated build doesn't open it twice. Concurrent
-         *  because artifacts are indexed in parallel (each adds its OWN distinct key, so no key races). */
-        val openHashes: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        /** The open segment for each artifact key. A pass keeps these open across passes and closes only the
+         *  keys that left the scope. Concurrent because artifacts are indexed in parallel (each adds its OWN
+         *  distinct key, so no key races). Always mutated together with [segments]. */
+        val open = ConcurrentHashMap<String, Segment>()
+
+        /** Keys whose segment is EMPTY (the extension accepted nothing in that artifact). Stored on disk as a
+         *  zero-length file, so it is known from a size check alone and never opened or queried. Most of an
+         *  artifact's segments are empty: only about a third of the extensions accept `.class` inputs. */
+        val emptyKeys: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        fun isOpen(key: String): Boolean = open.containsKey(key) || key in emptyKeys
+
+        /** Every key this extension currently covers, open or empty. */
+        fun openKeys(): Set<String> = open.keys + emptyKeys
+
+        fun addOpen(key: String, seg: Segment) {
+            open[key] = seg; segments.add(seg)
+        }
+
+        fun addEmpty(key: String) {
+            emptyKeys.add(key)
+        }
+
+        /** Close and forget the segment for [key], if open. */
+        fun closeOpen(key: String) {
+            emptyKeys.remove(key)
+            val seg = open.remove(key) ?: return
+            segments.remove(seg)
+            runCatching { seg.close() }
+        }
 
         /** Project source: in-memory + incremental, the SINGLE store (no separate per-file value map). It is
          *  file-partitioned internally by the interned integer file id (see [FileIdTable]), so an edit updates
@@ -141,6 +182,10 @@ class IndexServiceImpl(
      * instead of repeating the full absolute path in every extension's partition; the path string is held
      * exactly ONCE here, alongside its [SourceSig]. Freed ids (deleted files) are recycled so the id space
      * stays dense across delete/add churn. This is the master file list the diff walks.
+     *
+     * Every member is synchronized: queries resolve ids through [pathOf] from any thread while a pass or a
+     * save rewrites the table. Multi-step sequences that must stay consistent with [IndexData] additionally
+     * run under [sourceMutex].
      */
     private class FileIdTable {
         private val pathToId = HashMap<String, Int>()
@@ -155,23 +200,24 @@ class IndexServiceImpl(
         private val freeIds = ArrayDeque<Int>()
         private var nextId = 0
 
-        val ids: Set<Int> get() = idToPath.keys
-        fun isEmpty() = idToPath.isEmpty()
-        fun pathOf(id: Int): String? = idToPath[id]
-        fun sigOf(id: Int): SourceSig? = sigById[id]
-        fun setSig(id: Int, sig: SourceSig) {
+        /** A snapshot, so a caller can iterate it while the table changes. */
+        val ids: Set<Int> @Synchronized get() = HashSet(idToPath.keys)
+        @Synchronized fun isEmpty() = idToPath.isEmpty()
+        @Synchronized fun pathOf(id: Int): String? = idToPath[id]
+        @Synchronized fun sigOf(id: Int): SourceSig? = sigById[id]
+        @Synchronized fun setSig(id: Int, sig: SourceSig) {
             sigById[id] = sig
         }
 
         /** The id for [path], allocating (reusing a freed id when possible) if unseen. Leaves the fingerprint
          *  untouched — callers set it via [setSig] once they have actually (re)indexed the file. */
-        fun idFor(path: String): Int = pathToId.getOrPut(path) {
+        @Synchronized fun idFor(path: String): Int = pathToId.getOrPut(path) {
             val id = freeIds.removeLastOrNull() ?: nextId++
             idToPath[id] = path
             id
         }
 
-        fun removeId(id: Int) {
+        @Synchronized fun removeId(id: Int) {
             val path = idToPath.remove(id) ?: return
             pathToId.remove(path); sigById.remove(id); freeIds.addLast(id)
         }
@@ -179,16 +225,16 @@ class IndexServiceImpl(
         /** Forget every fingerprint but KEEP the path↔id mapping (and [nextId]/[freeIds]): the next diff then
          *  re-indexes every file with its EXISTING id. Used when the entry partitions can't be loaded but the
          *  id table can — so ids stay stable through a partition rebuild. */
-        fun dropFingerprintsKeepIds() {
+        @Synchronized fun dropFingerprintsKeepIds() {
             sigById.clear()
         }
 
-        fun clear() {
+        @Synchronized fun clear() {
             pathToId.clear(); idToPath.clear(); sigById.clear(); freeIds.clear(); nextId = 0
         }
 
         /** Serialize the whole table (assignment counter + free list + every live row). */
-        fun writeTo(out: DataOutputStream) {
+        @Synchronized fun writeTo(out: DataOutputStream) {
             out.writeInt(nextId)
             out.writeInt(freeIds.size); for (f in freeIds) out.writeInt(f)
             out.writeInt(idToPath.size)
@@ -199,7 +245,7 @@ class IndexServiceImpl(
         }
 
         /** Replace this table's contents with a persisted snapshot (ids preserved verbatim). */
-        fun readFrom(din: DataInputStream) {
+        @Synchronized fun readFrom(din: DataInputStream) {
             clear()
             nextId = din.readInt()
             repeat(din.readInt()) { freeIds.addLast(din.readInt()) }
@@ -216,6 +262,15 @@ class IndexServiceImpl(
 
     /** Load the persisted source cache lazily, exactly once per process (the first [indexSource] pass). */
     private var sourceCacheLoaded = false
+
+    /**
+     * Serializes every WRITE to the source side ([IndexData] partitions + [fileIds]): a pass's source phase,
+     * a save's [reindexSource], and [invalidate]. [IndexData] tolerates concurrent readers but not two writers,
+     * and a save runs on its own coroutine while a full pass may be applying files, so without this the two
+     * could interleave inside one store and corrupt it. Held per file, never across a parse, so a save waits
+     * at most one file's apply.
+     */
+    private val sourceMutex = kotlinx.coroutines.sync.Mutex()
 
     @Volatile
     override var status: IndexStatus = IndexStatus()
@@ -282,6 +337,38 @@ class IndexServiceImpl(
 
     // ---- build ----
 
+    /**
+     * One artifact the last finished [ensureUpToDate] had to build (a segment cache miss), for the host's
+     * analytics. Deliberately not on the [IndexService] SPI: [path] is a local path that the host classifies
+     * (bundled, Maven cache, inside the project) and never sends anywhere.
+     *
+     * [rekeyed] is the signal for a cache that cannot hold: the same file or directory was already indexed this
+     * session under a DIFFERENT key, so something rewrites it (or its mtime) between passes and every pass
+     * rebuilds it.
+     */
+    class BuiltArtifact(val kind: Kind, val path: Path, val rekeyed: Boolean, val ms: Long) {
+        enum class Kind { JDK, JAR, STABLE_JAR, SOURCE_ARCHIVE, RESOURCE_DIR }
+    }
+
+    /** What the last finished pass built, and the parallelism it ran with. [libraryChanged] is false for a quiet
+     *  pass: the classpath was unchanged, so only the source side was brought up to date. */
+    class PassReport(
+        val built: List<BuiltArtifact>,
+        val ioConcurrency: Int,
+        val buildPermits: Int,
+        val libraryChanged: Boolean = true,
+    )
+
+    /** The report of the last [ensureUpToDate] that ran to the end; null before one has, and after a pass that
+     *  timed out or failed. */
+    @Volatile
+    var lastPass: PassReport? = null
+        private set
+
+    /** Each artifact's cache key the last time a pass saw it, by [Artifact.location], for [BuiltArtifact.rekeyed].
+     *  Session-scoped on purpose: across a restart a changed key is a normal update, not a cache that misses. */
+    private val lastKeyByArtifact = ConcurrentHashMap<String, String>()
+
     /** A hard cap on a single index build. The fleet showed builds running for HOURS (max ~21h) — a stuck /
      *  pathological run that would otherwise burn battery and CPU indefinitely. p99 is ~80s and even the legit
      *  tail is minutes, so 15min is generous headroom; the build yields cooperatively (see [buildIndex]), so the
@@ -299,50 +386,95 @@ class IndexServiceImpl(
         }
     }
 
+    /** An artifact of this pass with its content key, computed once (a resource dir's key walks the dir). */
+    private class Keyed(val art: Artifact, val hash: ContentHash, val key: String)
+
     private suspend fun buildIndex(scope: IndexScope) {
-        setStatus(
-            IndexStatus(
-                building = true, message = "Indexing…", fraction = -1.0, phase = "Starting…"
-            )
-        )
+        lastPass = null
+        // A new pass supersedes the previous pass's background source-doc work; it restarts at the end.
+        docsJob?.cancelAndJoin()
+        val buildStart = System.nanoTime()
+        val previous = status
         try {
-            // Soft reset: drop the in-memory open segments (but KEEP the on-disk `.seg` files) so this call
-            // re-syncs to the current scope — segments for artifacts no longer on the classpath fall out, and
-            // unchanged artifacts are RE-OPENED from disk (cheap) rather than rebuilt. This is what makes a
-            // model-change re-index cheap: a 40k-class android.jar is segmented once and reopened thereafter,
-            // not re-scanned every time. invalidate() still forces a from-scratch rebuild by deleting THIS
-            // service's segments (it leaves other projects' segments in the shared store untouched).
-            closeSegments()
-            val artifacts = buildList {
+            val all = buildList {
                 scope.jdkHome?.let { add(Artifact.Jrt(it)) }
                 scope.libraryJars.forEach { add(Artifact.Jar(it, scope.stableJarIds[it])) }
                 scope.sourceArchives.forEach { if (Files.exists(it)) add(Artifact.SourceArchive(it)) }
                 // Immutable dependency/AAR res dirs index to content-addressed disk segments (parsed once,
                 // reopened thereafter), not into the resident source side.
-                scope.libraryResourceRoots.forEach {
-                    if (Files.isDirectory(it)) add(
-                        Artifact.ResourceDir(
-                            it
-                        )
-                    )
-                }
+                scope.libraryResourceRoots.forEach { if (Files.isDirectory(it)) add(Artifact.ResourceDir(it)) }
+            }.map { a -> a.contentHash().let { h -> Keyed(a, h, sanitize(h.value)) } }
+            // Library SOURCE archives feed only the source-doc indexes (parameter names, javadoc). When deferred,
+            // they build in the background after this pass, never holding up readiness or the next pass.
+            val docs = if (deferSourceArchives) all.filter { it.art is Artifact.SourceArchive } else emptyList()
+            val keyed = if (docs.isEmpty()) all else all.filter { it.art !is Artifact.SourceArchive }
+
+            // Segments stay open across passes, so a pass touches only what changed. Three corrections first:
+            //  - a kept artifact whose files vanished (a cleared cache) must reopen or rebuild, not be trusted;
+            //  - artifacts that left the scope close;
+            //  - anything not open yet is what this pass has to open or build.
+            val probeState = states.values.firstOrNull()
+            for (k in all) {
+                if (probeState != null && probeState.isOpen(k.key) &&
+                    !Files.exists(segmentFile(probeState.ext, k.hash))
+                ) states.values.forEach { it.closeOpen(k.key) }
             }
-            val total = artifacts.size + 1
+            val wanted = all.mapTo(HashSet()) { it.key }
+            val removed = states.values.flatMapTo(HashSet()) { st -> st.openKeys().filter { it !in wanted } }
+            val toOpen = keyed.filter { k -> states.values.any { !it.isOpen(k.key) } }
+
+            // Nothing on the classpath changed and the last pass was complete: the index already holds exactly
+            // this scope. Don't announce a build (that would clear the editor's classpath caches and re-run its
+            // passes for nothing); bring the source side up to date quietly, the way a save does.
+            if (removed.isEmpty() && toOpen.isEmpty() && previous.ready) {
+                val timer = BuildTimer()
+                val libMs = elapsedMs(buildStart)
+                val srcProbe = indexSource(scope.sourceRoots, scope.resourceRoots, timer = timer)
+                lastPass = PassReport(emptyList(), 0, 0, libraryChanged = false)
+                perfLog.info(
+                    "resync: classpath unchanged (${keyed.size} artifacts kept open, ${libMs}ms); source " +
+                        "${srcProbe.walked} files (${srcProbe.parsed} parsed, ${srcProbe.removed} removed) ${srcProbe.ms}ms"
+                )
+                setStatus(
+                    IndexStatus(
+                        false, "Indexed", 1.0, ready = true,
+                        breakdown = timer.snapshot(),
+                        stats = IndexBuildStats(
+                            libMs = libMs, sourceMs = srcProbe.ms, artifacts = keyed.size,
+                            artifactsBuilt = 0, artifactsReused = keyed.size,
+                            sourceFiles = srcProbe.walked, sourceParsed = srcProbe.parsed,
+                        ),
+                    )
+                )
+                launchDeferredDocs(docs)
+                return
+            }
+
+            // The index stays complete for the new scope through a pass that only REMOVES artifacts, so it can
+            // stay ready; one that adds any must not claim misses are authoritative until they are open.
+            val passReady = previous.ready && toOpen.isEmpty()
+            removed.forEach { key -> states.values.forEach { it.closeOpen(key) } }
+            setStatus(
+                IndexStatus(
+                    building = true, message = "Indexing…", fraction = -1.0, phase = "Starting…", ready = passReady
+                )
+            )
+            val total = keyed.size + 1
             // Index artifacts in parallel. Each artifact is independent — it scans its own jar and writes its
             // own per-(ext,hash) segment file; the only shared state is each State's `segments` (CopyOnWrite)
-            // and `openHashes` (concurrent set, distinct key per artifact). Sequential, this was the dominant
+            // and `open` (concurrent map, distinct key per artifact). Sequential, this was the dominant
             // first-load cost gating the first completion/diagnostics on a `.kt` file.
             //
             // TWO different limits, because the two paths cost differently:
             //  - REOPEN (cache hit): just opens each extension's prebuilt `.seg` (a FileChannel + footer read),
-            //    holds no accumulator, is pure I/O. A warm re-open is ~all cache hits — 156 artifacts × ~10
-            //    extension segments = ~1.5k tiny file opens — so it is bounded by I/O parallelism, not memory.
+            //    holds no accumulator, is pure I/O. Bounded by I/O parallelism, not memory. An artifact still
+            //    open from the previous pass skips even that.
             //  - BUILD (cache miss): streams a whole artifact's entries through per-(ext) SegmentWriters, so N
             //    concurrent builds keep N big-jar accumulators live; on a constrained (tight-heap) host that
             //    peak is what must be bounded.
             // So run the artifact coroutines at a HIGH I/O width but gate the build section with a small
-            // semaphore. On a warm cache nothing takes a permit and all opens run wide (the ~10s reopen the
-            // old flat concurrency=2 caused drops ~I/O-parallelism-fold); a cold build stays memory-bounded.
+            // semaphore. On a warm cache nothing takes a permit and all opens run wide; a cold build stays
+            // memory-bounded.
             val cores = Runtime.getRuntime().availableProcessors()
             // On a 32-bit ARM process, run the whole build on ONE thread so nothing allocates concurrently with
             // the editor's `ide-engine` thread (see [singleThreadedBuild]); otherwise fan out across cores.
@@ -361,7 +493,7 @@ class IndexServiceImpl(
             // Per-artifact worklist for the index-status dialog (PENDING → ACTIVE → DONE). Mutated from the
             // parallel builders under [worklistLock]; each status emit publishes an immutable snapshot.
             val worklist =
-                artifacts.mapTo(ArrayList()) { IndexItem(it.label, IndexItemState.PENDING) }
+                keyed.mapTo(ArrayList()) { IndexItem(it.art.label, IndexItemState.PENDING) }
             val worklistLock = Any()
             // Per-indexer time/entry accumulator for this build. Snapshotted into every status emit so the
             // detail view watches each index's cost grow live (and keeps the final breakdown when idle).
@@ -374,10 +506,11 @@ class IndexServiceImpl(
                         true,
                         message,
                         d.toDouble() / total,
+                        ready = passReady,
                         phase = "Libraries & SDK",
                         items = items,
                         processed = d,
-                        total = artifacts.size,
+                        total = keyed.size,
                         breakdown = timer.snapshot(),
                     )
                 )
@@ -387,7 +520,6 @@ class IndexServiceImpl(
             // build-time heap peak (sampled as each artifact finishes), so a device run on a large project
             // shows whether the shared cache is reused or rebuilt and where memory peaks. See the summary
             // emitted after the source phase below.
-            val buildStart = System.nanoTime()
             val probes = ConcurrentLinkedQueue<ArtifactProbe>()
             val peakHeap = AtomicLong(usedHeapBytes())
             fun samplePeak() {
@@ -395,19 +527,23 @@ class IndexServiceImpl(
             }
             val buildDispatcher = Dispatchers.IO.limitedParallelism(ioConcurrency)
             kotlinx.coroutines.coroutineScope {
-                for ((i, art) in artifacts.withIndex()) {
+                for ((i, k) in keyed.withIndex()) {
+                    val art = k.art
                     launch(buildDispatcher) {
                         synchronized(worklistLock) {
                             worklist[i] = worklist[i].copy(state = IndexItemState.ACTIVE)
                         }
                         emitArtifacts("Indexing ${art.label}")
                         try {
-                            val probe = indexArtifact(art, buildGate, timer)
+                            val probe = indexArtifact(art, buildGate, timer, k.hash)
                             probes.add(probe)
                             samplePeak()
                             // Surface the costly artifacts (built, or a slow open) at INFO; quiet otherwise, so a
                             // warm reopen (all cache hits) logs only the one summary line.
                             when {
+                                // A rekeyed rebuild is a cache that can never hit: always worth a line.
+                                !probe.isHit && probe.rekeyed -> perfLog.info("built ${probe.label} AGAIN (its key changed since the last pass): exts=${probe.built} entries=${probe.entries} ${probe.ms}ms")
+
                                 !probe.isHit && probe.ms >= 50 -> perfLog.info("built ${probe.label}: exts=${probe.built} entries=${probe.entries} ${probe.ms}ms")
 
                                 !probe.isHit -> perfLog.debug("built ${probe.label}: exts=${probe.built} entries=${probe.entries} ${probe.ms}ms")
@@ -438,7 +574,8 @@ class IndexServiceImpl(
                 IndexStatus(
                     true,
                     "Indexing project source",
-                    artifacts.size.toDouble() / total,
+                    keyed.size.toDouble() / total,
+                    ready = passReady,
                     phase = "Project source"
                 )
             )
@@ -449,7 +586,8 @@ class IndexServiceImpl(
                     IndexStatus(
                         true,
                         "Indexing project source",
-                        artifacts.size.toDouble() / total,
+                        keyed.size.toDouble() / total,
+                        ready = passReady,
                         phase = "Project source",
                         items = listOf(IndexItem(current, IndexItemState.ACTIVE)),
                         processed = processed,
@@ -465,20 +603,29 @@ class IndexServiceImpl(
             val reused = probes.count { it.isHit }
             val mb = 1024L * 1024L
             perfLog.info(
-                "build done: ${artifacts.size} artifacts ($built built, $reused reused), " + "${probes.sumOf { it.entries }} entries; source ${srcProbe.walked} files " + "(${srcProbe.parsed} parsed, ${srcProbe.removed} removed); lib ${libMs}ms, src ${srcProbe.ms}ms, " + "total ${
-                    elapsedMs(
-                        buildStart
-                    )
-                }ms; io=$ioConcurrency build=$buildPermits; " + "heap peak ${peakHeap.get() / mb}MB / max ${
-                    Runtime.getRuntime().maxMemory() / mb
-                }MB" + if (skipped.get() > 0) "; skipped=${skipped.get()}" else ""
+                "build done: ${keyed.size} artifacts ($built built, $reused reused, ${removed.size} closed), " +
+                    "${probes.sumOf { it.entries }} entries; source ${srcProbe.walked} files " +
+                    "(${srcProbe.parsed} parsed, ${srcProbe.removed} removed); lib ${libMs}ms, src ${srcProbe.ms}ms, " +
+                    "total ${elapsedMs(buildStart)}ms; io=$ioConcurrency build=$buildPermits; " +
+                    "heap peak ${peakHeap.get() / mb}MB / max ${Runtime.getRuntime().maxMemory() / mb}MB" +
+                    (if (skipped.get() > 0) "; skipped=${skipped.get()}" else "") +
+                    (if (docs.isNotEmpty()) "; ${docs.size} source archive(s) deferred" else "")
+            )
+            lastPass = PassReport(
+                built = probes.filter { !it.isHit }.mapNotNull { p ->
+                    p.artifact?.let { BuiltArtifact(it.kind, it.location, p.rekeyed, p.ms) }
+                },
+                ioConcurrency = ioConcurrency,
+                buildPermits = buildPermits,
+                libraryChanged = true,
             )
             // ready=true tells the JDT name environment it may trust the index as a complete superset of the
             // classpath (authoritative negatives, no probing — see JdtEnvironmentCache.libraryBytes). Only
             // claim that when EVERY artifact indexed: a skipped jar's classes are absent, so resolving them
             // would be a false "not found". A partial index stays usable (segments are open and queried), the
             // name environment just keeps probing instead of trusting misses. A read-only service's missing
-            // (not-yet-built-by-the-owner) segments withhold ready the same way.
+            // (not-yet-built-by-the-owner) segments withhold ready the same way. Deferred source archives are
+            // not classpath and never affect it.
             val missing = probes.sumOf { it.missing }
             val complete = skipped.get() == 0 && missing == 0
             val msg = when {
@@ -496,7 +643,7 @@ class IndexServiceImpl(
                     stats = IndexBuildStats(
                         libMs = libMs,
                         sourceMs = srcProbe.ms,
-                        artifacts = artifacts.size,
+                        artifacts = keyed.size,
                         artifactsBuilt = built,
                         artifactsReused = reused,
                         sourceFiles = srcProbe.walked,
@@ -504,14 +651,69 @@ class IndexServiceImpl(
                     ),
                 )
             )
+            launchDeferredDocs(docs)
         } catch (t: Throwable) {
             setStatus(IndexStatus(false, "Indexing failed: ${t.message}", 1.0))
             throw t
         }
     }
 
+    /** Write [file] as an empty segment (zero length), atomically: a temp file renamed over it, so a concurrent
+     *  reader sees either the old file or the empty one, never a partial write. */
+    private fun writeEmptySegment(file: Path) {
+        Files.createDirectories(file.parent)
+        val tmp = "$file.${temporaryName("empty")}.tmp"
+        try {
+            (dev.ide.platform.openFileForWrite(tmp) ?: error("cannot write $tmp")).close()
+            check(dev.ide.platform.moveFile(tmp, file.toString())) { "cannot move $tmp into place" }
+        } finally {
+            dev.ide.platform.deleteFile(tmp)
+        }
+    }
+
+    /** Background work for library source archives, started at the end of each pass (see [deferSourceArchives]).
+     *  One thread on a tight heap, two otherwise: it is never urgent, and it must not crowd the editor. */
+    private val docsScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO.limitedParallelism(if (constrainedHeap || singleThreadedBuild) 1 else 2)
+    )
+
+    @Volatile
+    private var docsJob: Job? = null
+
+    /**
+     * Open or build the source-archive segments in [docs] in the background. Each one's segments join the
+     * queries as they finish, so parameter names and javadoc fill in progressively. Status is never touched:
+     * readiness is about the classpath, which these are not. The next pass cancels this and starts it again
+     * with its own list; a segment finished before that is reused.
+     */
+    private fun launchDeferredDocs(docs: List<Keyed>) {
+        if (docs.isEmpty() || readOnly) return
+        docsJob = docsScope.launch {
+            val t0 = System.nanoTime()
+            val gate = kotlinx.coroutines.sync.Semaphore(1)
+            var built = 0
+            for (k in docs) {
+                try {
+                    if (!indexArtifact(k.art, gate, null, k.hash).isHit) built++
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    dev.ide.platform.log.Log.logger("index")
+                        .warn("indexing ${k.art.label} failed, skipped: ${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
+            if (built > 0) perfLog.info("source docs: built $built of ${docs.size} archive(s) in the background, ${elapsedMs(t0)}ms")
+        }
+    }
+
+    /** Wait for the background source-doc work the last pass started, if any (tests; a host that needs it). */
+    suspend fun awaitDeferredWork() {
+        docsJob?.join()
+    }
+
     override suspend fun invalidate() {
         check(!readOnly) { "read-only index: invalidate() belongs to the owning (IDE) process" }
+        docsJob?.cancelAndJoin()
         // [cacheRoot] holds the STATIC (SDK + library) segments and may be SHARED across projects. Each
         // artifact is content-addressed to one `.seg`, so two projects depending on the same jar reuse it.
         // So invalidate must NOT blind-wipe [cacheRoot] (that would delete other projects' segments): it drops
@@ -519,17 +721,19 @@ class IndexServiceImpl(
         // set), so a "Re-index" forces those artifacts to rebuild without disturbing other projects. Reclaiming
         // orphaned segments (a jar changed → a stale `.seg`) is a shared-store GC concern, intentionally not
         // done here. The in-memory source side is always per-project. Capture paths before closeSegments()
-        // clears openHashes; close channels first so the files aren't held open when we delete them.
+        // clears the open keys; close channels first so the files aren't held open when we delete them.
         val openFiles = states.values.flatMap { st ->
-            st.openHashes.map { key ->
+            st.openKeys().map { key ->
                 segmentFileForKey(
                     st.ext, key
                 )
             }
         }
         closeSegments()
-        states.values.forEach { it.source.clear() }
-        fileIds.clear()
+        sourceMutex.withLock {
+            states.values.forEach { it.source.clear() }
+            fileIds.clear()
+        }
         blockCache.clear()
         runCatching { openFiles.forEach { Files.deleteIfExists(it); pruneEmptyParents(it) } }
         // The persisted source cache is per-project (not shared), so a Re-index wipes it wholesale: the next
@@ -549,11 +753,13 @@ class IndexServiceImpl(
         states.values.forEach { st ->
             st.segments.forEach { runCatching { it.close() } }
             st.segments.clear()
-            st.openHashes.clear()
+            st.open.clear()
+            st.emptyKeys.clear()
         }
     }
 
     override fun close() {
+        docsScope.cancel()
         closeSegments()
         blockCache.clear()
     }
@@ -565,6 +771,9 @@ class IndexServiceImpl(
     private class ArtifactProbe(
         val label: String, val reused: Int, val built: Int, val entries: Int, val ms: Long,
         val missing: Int = 0,
+        val artifact: Artifact? = null,
+        /** This artifact's cache key differs from the key it had earlier this session (see [lastKeyByArtifact]). */
+        val rekeyed: Boolean = false,
     ) {
         val isHit: Boolean get() = built == 0
     }
@@ -597,31 +806,51 @@ class IndexServiceImpl(
         val rt = Runtime.getRuntime(); return rt.totalMemory() - rt.freeMemory()
     }
 
-    private suspend fun indexArtifact(art: Artifact, buildGate: kotlinx.coroutines.sync.Semaphore, timer: BuildTimer? = null): ArtifactProbe {
+    private suspend fun indexArtifact(
+        art: Artifact,
+        buildGate: kotlinx.coroutines.sync.Semaphore,
+        timer: BuildTimer? = null,
+        hash: ContentHash = art.contentHash(),
+    ): ArtifactProbe {
         val t0 = System.nanoTime()
-        val hash = art.contentHash()
         val key = sanitize(hash.value)
+        val previousKey = lastKeyByArtifact.put(art.location.toString(), key)
+        val rekeyed = previousKey != null && previousKey != key
 
         // Already built on a prior run? Just open the segment — no re-indexing, nothing loaded into RAM. This
         // is the warm-cache path; it holds no accumulator, so it runs ungated at the full I/O concurrency.
         var reused = 0
         for (st in states.values) {
-            if (key in st.openHashes) continue
+            if (st.isOpen(key)) continue
             val f = segmentFile(st.ext, hash)
-            if (Files.exists(f)) {
-                runCatching {
-                    Segment.open(
-                        f.toString(),
-                        st.ext,
-                        blockCache,
-                        segIds.getAndIncrement()
-                    )
-                }.onSuccess { st.segments.add(it); st.openHashes.add(key); reused++ }
+            // One stat answers both "built yet?" and "empty?": an empty segment is a zero-length file.
+            val size = runCatching { Files.size(f) }.getOrNull() ?: continue
+            if (size == 0L) {
+                st.addEmpty(key); reused++; continue
+            }
+            runCatching {
+                Segment.open(
+                    f.toString(),
+                    st.ext,
+                    blockCache,
+                    segIds.getAndIncrement()
+                )
+            }.onSuccess { seg ->
+                // A cache from before empty segments were zero-length: shrink this one now, so the next reopen
+                // skips it too. Replaced atomically, and an empty segment is never read, so a service in another
+                // project still holding the old file open is unaffected.
+                if (seg.isEmpty && !readOnly && runCatching { writeEmptySegment(f) }.isSuccess) {
+                    runCatching { seg.close() }
+                    st.addEmpty(key)
+                } else {
+                    st.addOpen(key, seg)
+                }
+                reused++
             }
         }
-        val needBuild = states.values.filter { key !in it.openHashes }
+        val needBuild = states.values.filter { !it.isOpen(key) }
         if (needBuild.isEmpty()) {
-            return ArtifactProbe(art.label, reused, 0, 0, elapsedMs(t0))
+            return ArtifactProbe(art.label, reused, 0, 0, elapsedMs(t0), artifact = art, rekeyed = rekeyed)
         }
         if (readOnly) {
             // A reader never builds: the artifact's entries are absent until the owning (IDE) process
@@ -633,6 +862,7 @@ class IndexServiceImpl(
         // only [buildPermits] artifacts build concurrently, bounding the heap peak on a tight-heap host. The
         // reopen path above never reaches here, so a warm cache never takes a permit.
         return buildGate.withPermit { buildArtifact(art, hash, key, needBuild, reused, timer, t0) }
+            .let { ArtifactProbe(it.label, it.reused, it.built, it.entries, it.ms, it.missing, art, rekeyed) }
     }
 
     /** Build (index) an artifact's missing per-extension segments. Called only under [indexArtifact]'s build
@@ -679,10 +909,16 @@ class IndexServiceImpl(
                 // index. That must propagate to the per-artifact handler in [ensureUpToDate] (which counts it as
                 // a skip, so the index is marked incomplete and ready is withheld), not be swallowed into a
                 // falsely "ready" index that the name environment would then trust for authoritative negatives.
+                if (w.count == 0) {
+                    // Nothing for this extension in this artifact: a zero-length file, never opened again.
+                    w.close()
+                    writeEmptySegment(segmentFile(st.ext, hash))
+                    st.addEmpty(key)
+                    continue
+                }
                 w.finish()
                 val seg = Segment.open(segmentFile(st.ext, hash).toString(), st.ext, blockCache, segIds.getAndIncrement())
-                st.segments.add(seg)
-                st.openHashes.add(key)
+                st.addOpen(key, seg)
             }
             return ArtifactProbe(art.label, reused, needBuild.size, entries, elapsedMs(t0))
         } finally {
@@ -728,48 +964,52 @@ class IndexServiceImpl(
         progress: (current: String, processed: Int, total: Int) -> Unit = { _, _, _ -> },
     ): SourceProbe {
         val t0 = System.nanoTime()
-        // First pass this session: pull the persisted per-file partitions + fingerprints off disk, so a re-open
-        // re-parses ONLY the files whose content changed since the previous launch instead of every source file.
-        if (!sourceCacheLoaded) {
-            loadSourceCache(); sourceCacheLoaded = true
-        }
-
-        // Walk the current source/resource tree, interning each file to its id and capturing its (size, mtime)
-        // fingerprint. Source roots: Java/Kotlin. Resource roots: Android res XML. Inputs are disjoint — each
-        // extension's inputFilter selects its own, so the Java indexes ignore .xml and the resource index .java.
-        val groups =
-            roots.map { it to setOf(".java", ".kt") } + resourceRoots.map { it to setOf(".xml") }
         val currentIds = HashSet<Int>()
         val dirty = ArrayList<Dirty>() // only files that are new or whose fingerprint changed
-        for ((root, exts) in groups) {
-            if (!Files.isDirectory(root)) continue
-            // walkFileTree hands each file the [BasicFileAttributes] the traversal already stat'd, so the
-            // (size, mtime) fingerprint costs ZERO extra syscalls — the old Files.walk path did three stats
-            // per file (isRegularFile + size + lastModifiedTime), which dominated the "nothing changed" restart
-            // on a large tree (thousands of res/source files) on ART's filesystem.
-            Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
-                override fun visitFile(f: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (attrs.isRegularFile && exts.any { f.toString().endsWith(it) }) {
-                        val sig = SourceSig(attrs.size(), attrs.lastModifiedTime().toMillis())
-                        val id = fileIds.idFor(f.toString())
-                        currentIds.add(id)
-                        val prev = fileIds.sigOf(id)
-                        if (prev == null || !prev.matches(sig)) dirty.add(Dirty(f, root, id, sig))
+        val gone: Set<Int>
+        // The walk, the diff and the drops read and rewrite the id table, so they run as one locked step.
+        sourceMutex.withLock {
+            // First pass this session: pull the persisted per-file partitions + fingerprints off disk, so a
+            // re-open re-parses ONLY the files whose content changed since the previous launch.
+            if (!sourceCacheLoaded) {
+                loadSourceCache(); sourceCacheLoaded = true
+            }
+
+            // Walk the current source/resource tree, interning each file to its id and capturing its (size, mtime)
+            // fingerprint. Source roots: Java/Kotlin. Resource roots: Android res XML. Inputs are disjoint — each
+            // extension's inputFilter selects its own, so the Java indexes ignore .xml and the resource index .java.
+            val groups =
+                roots.map { it to setOf(".java", ".kt") } + resourceRoots.map { it to setOf(".xml") }
+            for ((root, exts) in groups) {
+                if (!Files.isDirectory(root)) continue
+                // walkFileTree hands each file the [BasicFileAttributes] the traversal already stat'd, so the
+                // (size, mtime) fingerprint costs ZERO extra syscalls — the old Files.walk path did three stats
+                // per file (isRegularFile + size + lastModifiedTime), which dominated the "nothing changed" restart
+                // on a large tree (thousands of res/source files) on ART's filesystem.
+                Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                    override fun visitFile(f: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (attrs.isRegularFile && exts.any { f.toString().endsWith(it) }) {
+                            val sig = SourceSig(attrs.size(), attrs.lastModifiedTime().toMillis())
+                            val id = fileIds.idFor(f.toString())
+                            currentIds.add(id)
+                            val prev = fileIds.sigOf(id)
+                            if (prev == null || !prev.matches(sig)) dirty.add(Dirty(f, root, id, sig))
+                        }
+                        return FileVisitResult.CONTINUE
                     }
-                    return FileVisitResult.CONTINUE
-                }
 
-                // Skip an unreadable entry rather than aborting the whole walk (was implicit in Files.walk's
-                // lazy per-element stat; make it explicit here).
-                override fun visitFileFailed(f: Path, exc: IOException): FileVisitResult =
-                    FileVisitResult.CONTINUE
-            })
-        }
+                    // Skip an unreadable entry rather than aborting the whole walk (was implicit in Files.walk's
+                    // lazy per-element stat; make it explicit here).
+                    override fun visitFileFailed(f: Path, exc: IOException): FileVisitResult =
+                        FileVisitResult.CONTINUE
+                })
+            }
 
-        // Drop files that no longer exist under any root (deleted/moved) from the source index + the id table.
-        val gone = fileIds.ids - currentIds
-        for (id in gone) {
-            states.values.forEach { it.source.removeFile(id) }; fileIds.removeId(id)
+            // Drop files that no longer exist under any root (deleted/moved) from the source index + the id table.
+            gone = fileIds.ids - currentIds
+            for (id in gone) {
+                states.values.forEach { it.source.removeFile(id) }; fileIds.removeId(id)
+            }
         }
 
         // Only the dirty files need a read + parse + index. Everything else is already in [IndexData] (loaded
@@ -797,8 +1037,11 @@ class IndexServiceImpl(
                 }
                 for ((i, deferred) in computed.withIndex()) {
                     val d = batch[i]
-                    deferred.await()?.let { applySourceEntries(d.id, it) }
-                    fileIds.setSig(d.id, d.sig)
+                    val ops = deferred.await()
+                    sourceMutex.withLock {
+                        ops?.let { applySourceEntries(d.id, it) }
+                        fileIds.setSig(d.id, d.sig)
+                    }
                     processed++
                     // The source phase can be thousands of small files, so throttle status churn: report every
                     // 16th file (and the last) rather than every one.
@@ -812,11 +1055,11 @@ class IndexServiceImpl(
             }
         }
 
-        // No full rebuild: [indexSourceFile] already applied each dirty file to [IndexData] incrementally, and
+        // No full rebuild: the loop above already applied each dirty file to [IndexData] incrementally, and
         // unchanged files were never removed. The in-memory index is up to date here.
 
         // Persist only when something actually changed, so a truly unchanged restart writes nothing.
-        if (dirty.isNotEmpty() || gone.isNotEmpty()) saveSourceCache()
+        if (dirty.isNotEmpty() || gone.isNotEmpty()) sourceMutex.withLock { saveSourceCache() }
         return SourceProbe(
             walked = currentIds.size, parsed = dirty.size, removed = gone.size, ms = elapsedMs(t0)
         )
@@ -868,22 +1111,23 @@ class IndexServiceImpl(
         }
     }
 
-    private fun indexSourceFile(file: Path, text: String, root: Path?, id: Int, timer: BuildTimer? = null) =
-        applySourceEntries(id, computeSourceEntries(file, text, root, id, timer))
-
     override suspend fun reindexSource(path: Path, text: String) {
         check(!readOnly) { "read-only index: reindexSource() belongs to the owning (IDE) process" }
         val id = fileIds.idFor(path.toString())
-        indexSourceFile(path, text, null, id)
-        // Keep this file's fingerprint current so a later [ensureUpToDate] in the same session won't needlessly
-        // re-parse it. This is the SAVE path (the host re-indexes from the just-written file), so the on-disk
-        // (size, mtime) matches the indexed [text]; the persisted cache is refreshed by the next ensureUpToDate.
-        runCatching {
-            fileIds.setSig(
-                id, SourceSig(Files.size(path), Files.getLastModifiedTime(path).toMillis())
-            )
+        // Parse outside the lock; only the apply contends with a running pass's source phase.
+        val ops = computeSourceEntries(path, text, null, id)
+        sourceMutex.withLock {
+            applySourceEntries(id, ops)
+            // Keep this file's fingerprint current so a later [ensureUpToDate] in the same session won't needlessly
+            // re-parse it. This is the SAVE path (the host re-indexes from the just-written file), so the on-disk
+            // (size, mtime) matches the indexed [text]; the persisted cache is refreshed by the next ensureUpToDate.
+            runCatching {
+                fileIds.setSig(
+                    id, SourceSig(Files.size(path), Files.getLastModifiedTime(path).toMillis())
+                )
+            }
         }
-        // [indexSourceFile] already replaced just this file's entries in each [IndexData] (O(this file), not a
+        // The apply above replaced just this file's entries in each [IndexData] (O(this file), not a
         // whole-project rebuild) — nothing else to do.
     }
 
@@ -1034,11 +1278,17 @@ class IndexServiceImpl(
 
     private sealed class Artifact {
         abstract val label: String
+        /** What sort of artifact this is, for [PassReport]. */
+        abstract val kind: BuiltArtifact.Kind
+        /** The file or directory this artifact is read from; also its identity across passes. */
+        abstract val location: Path
         abstract fun contentHash(): ContentHash
         abstract fun open(): Pair<Sequence<IndexInput>, Closeable>
 
         class Jar(val path: Path, val stableId: String? = null) : Artifact() {
             override val label get() = jarDisplayLabel(path)
+            override val kind get() = if (stableId != null) BuiltArtifact.Kind.STABLE_JAR else BuiltArtifact.Kind.JAR
+            override val location get() = path
             override fun contentHash(): ContentHash {
                 // A bundled/SDK jar carries a caller-supplied stable id (see [IndexScope.stableJarIds]): the host
                 // re-extracts it from assets so its on-disk mtime is not stable across launches, which makes the
@@ -1092,6 +1342,8 @@ class IndexServiceImpl(
         /** A library/SDK SOURCE archive (`-sources.jar`, JDK `src.zip`) or sources DIR (Android `sources/`):
          *  yields its `.java`/`.kt` entries as immutable [IndexOrigin.LIBRARY_SOURCE] units (segment-cached). */
         class SourceArchive(val path: Path) : Artifact() {
+            override val kind get() = BuiltArtifact.Kind.SOURCE_ARCHIVE
+            override val location get() = path
             private val isDir get() = Files.isDirectory(path)
             override val label get() = "sources: ${path.fileName}"
             override fun contentHash(): ContentHash {
@@ -1138,6 +1390,8 @@ class IndexServiceImpl(
 
         class Jrt(val home: Path) : Artifact() {
             override val label get() = "JDK"
+            override val kind get() = BuiltArtifact.Kind.JDK
+            override val location get() = home
             override fun contentHash() =
                 ContentHash("jrt-${home}-${System.getProperty("java.version")}")
 
@@ -1171,6 +1425,8 @@ class IndexServiceImpl(
          *  units, segment-cached by the dir's content. So a large merged dependency `values.xml` is parsed once
          *  and reopened from disk thereafter, not re-scanned into the resident source side every launch. */
         class ResourceDir(val path: Path) : Artifact() {
+            override val kind get() = BuiltArtifact.Kind.RESOURCE_DIR
+            override val location get() = path
             override val label get() = "res: ${path.parent?.fileName?.let { "$it/" } ?: ""}${path.fileName}"
             override fun contentHash(): ContentHash {
                 // FNV-1a over each `.xml` file's path + size (no read) - re-extraction invalidates it, and
@@ -1301,7 +1557,7 @@ class IndexServiceImpl(
         override fun dom(): ParsedFile? = shared("dom") { parse(file, text) }
 
         // FileContent-style per-file memo: this input is handed to every extension for the file in one pass
-        // (see indexSourceFile), which runs them sequentially on a single thread — so a plain map is safe, and
+        // (see computeSourceEntries), which runs them sequentially on a single thread — so a plain map is safe, and
         // an AST parsed by the first Java/Kotlin index is reused by the rest instead of re-parsed per index.
         private val memo = HashMap<String, Any?>()
 

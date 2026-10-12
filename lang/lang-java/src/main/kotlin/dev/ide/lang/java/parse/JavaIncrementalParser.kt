@@ -23,7 +23,11 @@ import java.util.Collections
  * analyzer's content-hash-keyed parse of the on-disk bytes, which would place tokens at stale offsets after an
  * edit.
  */
-class JavaIncrementalParser(private val env: JavaEnvironment) : IncrementalParser {
+class JavaIncrementalParser(
+    private val env: JavaEnvironment,
+    private val apiContext: () -> dev.ide.lang.resolve.ApiLevelContext? = { null },
+    private val languageLevel: () -> Int = { Int.MAX_VALUE },
+) : IncrementalParser {
 
     /** A parse together with the exact text it was parsed from, so an unchanged buffer is never reparsed. */
     private class Live(val text: String, val tree: JavaParsedFile)
@@ -52,8 +56,11 @@ class JavaIncrementalParser(private val env: JavaEnvironment) : IncrementalParse
     override fun parseFull(snapshot: DocumentSnapshot): ParsedFile {
         latestIfText(snapshot.file.path, snapshot.text)?.let { return it }
         val text = snapshot.text.toString()
-        val tree = JavaParsedFile(env.parse(snapshot.file.name, text), snapshot.file, snapshot.version)
-        latest[snapshot.file.path] = Live(text, tree)
+        val tree = JavaParsedFile(env.parse(snapshot.file.name, text), snapshot.file, snapshot.version, apiContext, languageLevel)
+        // An edit supersedes the previous tree; its resolve-cache entries would keep it alive (see
+        // [JavaEnvironment.dropSourceResolveCache]). Clearing per edit also sweeps the one-off parses (rename,
+        // imports, structure) that never come through here.
+        if (latest.put(snapshot.file.path, Live(text, tree)) != null) env.dropSourceResolveCache()
         return tree
     }
 

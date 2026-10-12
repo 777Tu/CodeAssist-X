@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.nanoseconds
 
 /** The three editor "engine" priority lanes, all multiplexed onto one serialized worker. */
 enum class EngineLane { INTERACTIVE, BACKGROUND, PREVIEW }
@@ -42,7 +43,8 @@ fun interface EngineSchedulerObserver {
  * mutable) analyzers are never touched concurrently, while a latency-critical call can still cut ahead of a
  * heavy one already holding the worker.
  *
- *  1. [interactive] — completion: highest priority, preempts both background and preview; never preempted.
+ *  1. [interactive]: completion and other requests the user is waiting on (go to declaration, expand
+ *     selection, format): highest priority, preempts both background and preview; never preempted.
  *  2. [background] — analysis/hints/semantic/folding/signature: preempts preview, preempted by interactive
  *     (surfaces as [EngineCanceledException] — the caller maps that to a "skipped, retry next edit" result).
  *  3. [preview] — preview rendering/lowering: lowest priority, preempted by both; retries automatically.
@@ -65,7 +67,25 @@ class EngineScheduler(
     private val observer: EngineSchedulerObserver? = null,
     /** How long [preview] waits before retrying after being preempted. */
     private val previewRetryDelay: Duration = 150.milliseconds,
+    /**
+     * How long the worker must have been free of interactive and background work before a [preview] call may
+     * START. The editor's daemon runs its passes back to back as separate background calls, and a lowering
+     * slipped into the gap between two of them holds the worker until it ends (lowering polls nothing), so the
+     * passes after it wait. Requiring a short quiet spell puts the preview after the daemon's whole run.
+     */
+    private val previewQuietPeriod: Duration = 60.milliseconds,
 ) {
+    /** The constructor as published before [previewQuietPeriod] existed, kept so a plugin built against it links. */
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(
+        dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
+        observer: EngineSchedulerObserver? = null,
+        previewRetryDelay: Duration = 150.milliseconds,
+    ) : this(dispatcher, observer, previewRetryDelay, 60.milliseconds)
+
+    private val quietNanos = previewQuietPeriod.inWholeNanoseconds
+    /** When the worker last finished an interactive or background call ([System.nanoTime]). */
+    @Volatile private var editorWorkEndedAt = System.nanoTime() - quietNanos - 1
     @Volatile private var backgroundToken: CancelToken? = null
     @Volatile private var previewToken: CancelToken? = null
     private val interactivePending = AtomicInteger(0)
@@ -95,6 +115,7 @@ class EngineScheduler(
                     throw CancellationException("completion superseded").apply { initCause(e) }
                 } finally {
                     link?.dispose()
+                    editorWorkEndedAt = System.nanoTime()
                 }
             }
         } finally {
@@ -145,6 +166,7 @@ class EngineScheduler(
                 } finally {
                     link?.dispose()
                     if (backgroundToken === token) backgroundToken = null
+                    editorWorkEndedAt = System.nanoTime()
                 }
             }
         } catch (e: EngineCanceledException) {
@@ -156,6 +178,24 @@ class EngineScheduler(
             throw e
         } finally {
             backgroundPending.decrementAndGet()
+        }
+    }
+
+    /**
+     * Suspends until the worker has gone [period] without interactive or background work, counted from no
+     * earlier than this call, so a caller that arrives before the editor's first pass still waits a full
+     * spell instead of reading the start-up default as "quiet". For heavy work outside the worker that should
+     * not compete with the editor for CPU (the Kotlin compiler warm-up at project open). Never returns while
+     * the user keeps the editor busy; cancel the caller to give up.
+     */
+    suspend fun awaitQuiet(period: Duration) {
+        val periodNanos = period.inWholeNanoseconds
+        val calledAt = System.nanoTime()
+        while (true) {
+            val busy = interactivePending.get() > 0 || backgroundPending.get() > 0
+            val left = periodNanos - (System.nanoTime() - maxOf(editorWorkEndedAt, calledAt))
+            if (!busy && left <= 0) return
+            delay(if (busy || left > periodNanos) period else left.nanoseconds)
         }
     }
 
@@ -173,6 +213,8 @@ class EngineScheduler(
                     val token = CancelToken()
                     previewToken = token
                     if (interactivePending.get() > 0 || backgroundPending.get() > 0) token.cancel()
+                    // The editor's work came off the worker only just now: likely mid-run, more to follow.
+                    if (System.nanoTime() - editorWorkEndedAt < quietNanos) token.cancel()
                     val link = cancelOnCallerCancel(token)
                     try {
                         if (token.canceled) throw EngineCanceledException()
@@ -187,7 +229,9 @@ class EngineScheduler(
                 }
             } catch (e: EngineCanceledException) {
                 observer?.on(EngineLane.PREVIEW, EnginePhase.PREEMPTED, label)
-                delay(previewRetryDelay)
+                // Turned away only for the quiet spell: come back the moment it ends, not a full retry later.
+                val quietLeft = quietNanos - (System.nanoTime() - editorWorkEndedAt)
+                delay(if (quietLeft > 0) quietLeft.nanoseconds else previewRetryDelay)
             }
         }
     }

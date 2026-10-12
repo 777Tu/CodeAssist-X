@@ -91,9 +91,13 @@
     <string name="support_star">Поставить звезду на GitHub</string>
     <string name="support_show_ads">Показывать рекламу</string>
     <string name="support_show_ads_desc">Показывать рекламу в приложении. Вы можете отключить ее в любое время.</string>
+    <string name="support_show_interstitials">Полноэкранная реклама</string>
+    <string name="support_show_interstitials_desc">Иногда полноэкранная реклама во время долгих сборок и после завершённых уроков.</string>
+    <string name="ads_off_title">Отключить рекламу?</string>
+    <string name="ads_off_body">Можно отключить только полноэкранную рекламу и оставить небольшую рекламу в списках и панелях.</string>
+    <string name="ads_off_all">Всю</string>
+    <string name="ads_off_fullscreen_only">Только полноэкранную</string>
     <string name="ad_label">Реклама</string>
-    <string name="house_ad_support_title">Нравится CodeAssist?</string>
-    <string name="house_ad_support_content">Поддержите проект в GitHub Sponsors.</string>
     <string name="no_project_yet">Проектов пока нет. Создайте один, чтобы начать.</string>
     <string name="your_projects">Ваши проекты</string>
     <string name="project_kind_android">Android</string>
@@ -115,9 +119,6 @@
     <string name="creating">Создание…</string>
     <string name="create_project">Создать проект</string>
     <string name="no_templates_available">Шаблоны недоступны.</string>
-    <string name="performance_analytics">Аналитика производительности</string>
-    <string name="sharing_performance_data">Отправка анонимных данных о производительности</string>
-    <string name="not_sharing_performance_data">Без отправки данных о производительности</string>
     <string name="compatibility">Совместимость</string>
 
     <!-- AI coding agent -->
@@ -185,6 +186,9 @@
     <string name="filetree_directory">Каталог</string>
     <string name="filetree_new_in">Создать в %1$s</string>
     <string name="buildc_build">Сборка</string>
+    <string name="buildc_notice_details">Подробнее</string>
+    <string name="buildc_notice_less">Свернуть</string>
+    <string name="buildc_notice_dismiss">Скрыть</string>
     <string name="buildc_collapse">Свернуть</string>
     <string name="buildc_status_idle">Ожидание</string>
     <string name="buildc_status_running">Выполняется…</string>
@@ -239,7 +243,6 @@
     <string name="completion_no_suggestions">Нет предложений</string>
     <string name="completion_back_to_suggestions">Назад к предложениям</string>
     <string name="completion_show_documentation">Показать документацию</string>
-    <string name="sig_more">+%1$d ещё</string>
     <string name="sig_peek_tip">Нажмите, чтобы посмотреть полное определение</string>
     <string name="sig_peek_collapse">Нажмите, чтобы свернуть</string>
     <string name="symbolbar_move_line_up">Переместить строку вверх</string>
@@ -253,6 +256,8 @@
     <string name="breadcrumb_split">Разделение</string>
     <string name="edchrome_files">Файлы</string>
     <string name="edchrome_more">Ещё</string>
+    <string name="sidebar_hide_tool_window_bar">Скрыть панель инструментов</string>
+    <string name="toolwindow_hide">Скрыть</string>
     <string name="edchrome_settings_and_tools">Настройки и инструменты</string>
     <string name="edchrome_toggle_navigator">Переключить навигатор</string>
     <string name="edchrome_find_replace">Найти / заменить</string>
@@ -561,14 +566,28 @@
     <string name="perm_allow_always">Всегда разрешать в этом проекте</string>
     <string name="perm_deny">Запретить</string>
     <string name="settings_title">Настройки</string>
+    <string name="settings_group_editor">Внешний вид и редактор</string>
+    <string name="settings_group_code">Анализ кода</string>
+    <string name="settings_group_build">Сборка и запуск</string>
+    <string name="settings_group_extensions">Расширения</string>
+    <string name="settings_group_system">Система</string>
+    <string name="settings_scope_project">Этот проект</string>
+    <string name="settings_search_placeholder">Поиск настроек</string>
+    <string name="settings_search_empty">Нет настроек для «%1$s»</string>
+    <string name="settings_page_appearance_subtitle">Тема, акцентный цвет, панели и запуск</string>
+    <string name="settings_page_editor_subtitle">Шрифт, перенос, свёртка и жесты</string>
+    <string name="settings_page_keymap_subtitle">Сочетания клавиш</string>
+    <string name="settings_page_completion_subtitle">Подсказки, постфиксные шаблоны и задержка</string>
+    <string name="settings_page_analysis_subtitle">Анализ на лету и инспекции</string>
+    <string name="settings_page_preview_subtitle">Песочница и процесс предпросмотра</string>
+    <string name="settings_page_build_subtitle">Разрешение конфликтов зависимостей</string>
+    <string name="settings_page_buildRuntime_subtitle">Память, процесс сборки и компиляторы</string>
+    <string name="settings_page_privacy_subtitle">Аналитика, кэши и журналы</string>
     <string name="settings_no_settings_available">Нет доступных настроек.</string>
     <string name="settings_all_settings">Все настройки</string>
     <string name="settings_backup_ready">Резервная копия готова</string>
     <string name="settings_inspections_for_language">Инспекции %1$s</string>
     <string name="settings_advanced">Дополнительно</string>
-    <string name="settings_hub_title">Настройки и инструменты</string>
-    <string name="settings_settings">Настройки</string>
-    <string name="settings_settings_subtitle">Внешний вид, редактор, автодополнение и анализ</string>
     <string name="settings_code_style">Стиль кода</string>
     <string name="settings_code_style_subtitle">Профили форматирования по языкам и предпросмотр в реальном времени</string>
     <string name="settings_sdk_manager">Менеджер SDK</string>
@@ -1089,4 +1108,21 @@
         <item quantity="other">%1$d версий разрешено автоматически (приоритет у новейшей версии)</item>
     </plurals>
 
+    <string name="home_account">Аккаунт</string>
+    <string name="home_search_projects">Поиск проектов</string>
+    <string name="home_no_match">Нет проектов по запросу «%1$s».</string>
+    <string name="home_sort">Сортировка проектов</string>
+    <string name="home_sort_recent">Недавние</string>
+    <string name="home_sort_name">Имя</string>
+    <string name="home_clear_search">Очистить поиск</string>
+    <string name="close_project_title">Закрыть %1$s?</string>
+    <string name="close_project_body">Вы вернётесь к списку проектов.</string>
+    <plurals name="close_project_unsaved">
+        <item quantity="one">%1$d файл содержит несохранённые изменения. Сначала он будет сохранён.</item>
+        <item quantity="few">%1$d файла содержат несохранённые изменения. Сначала они будут сохранены.</item>
+        <item quantity="many">%1$d файлов содержат несохранённые изменения. Сначала они будут сохранены.</item>
+        <item quantity="other">%1$d файла содержат несохранённые изменения. Сначала они будут сохранены.</item>
+    </plurals>
+    <string name="close_project_building">Сборка ещё выполняется.</string>
+    <string name="close_project_save_and_close">Сохранить и закрыть</string>
 </resources>

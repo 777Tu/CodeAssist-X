@@ -339,7 +339,10 @@ class IdeUiState(
     private suspend fun publishActiveEditor() {
         snapshotFlow { active?.path }
             .distinctUntilChanged()
-            .collect { backend.editor.onActiveEditorChanged(it) }
+            .collect {
+                backend.editor.onActiveEditorChanged(it)
+                if (it != null) noteRecent(it)
+            }
     }
 
     // The caret/selection, debounced so it fires on settle rather than on every keystroke (collectLatest
@@ -414,6 +417,35 @@ class IdeUiState(
     /** Open (and switch to) a RIGHT panel — the mobile right-overlay switcher uses this. */
     fun selectRightPanel(id: String) { selectedRightPanel = id }
 
+    /** Whether the wide layout shows the RIGHT tool-window stripe. When hidden, the top bar carries a toggle for
+     *  the primary right tool window instead. The Settings > Appearance switch, also flipped from the stripe's
+     *  own context menu; read straight from the preference so a project opened later never sees a stale copy. */
+    var rightStripeVisible by mutableStateOf(true)
+        private set
+    fun setRightStripeShown(shown: Boolean) {
+        rightStripeVisible = shown
+        backend.settings.setSetting("appearance", "rightToolWindowBar", shown.toString())
+    }
+    private fun readRightStripe(): Boolean = backend.settings.preference(RIGHT_STRIPE_PREF) != "false"
+
+    /** The docked LEFT / RIGHT pane widths in dp, as last dragged. The layout clamps them to the space it has,
+     *  so a width saved on a large monitor still leaves the editor room in a smaller window. */
+    var leftPaneWidth by mutableStateOf(DEFAULT_LEFT_PANE_WIDTH)
+    var rightPaneWidth by mutableStateOf(DEFAULT_RIGHT_PANE_WIDTH)
+    /** The tool window being worked in: a left/right panel id, or [CONSOLE_TOOL_WINDOW]. Set by a press inside
+     *  it and cleared by a press in the editor; drives IntelliJ's "actions show on the active tool window". */
+    var activeToolWindow by mutableStateOf<String?>(null)
+
+    /** Keep tool window header actions visible even while idle (the Appearance setting). */
+    var alwaysShowToolWindowActions by mutableStateOf(false)
+        private set
+
+    /** Persist both pane widths (called when a splitter drag ends, not per frame). */
+    fun savePaneWidths() {
+        backend.settings.setPreference(LEFT_PANE_WIDTH_PREF, leftPaneWidth.toString())
+        backend.settings.setPreference(RIGHT_PANE_WIDTH_PREF, rightPaneWidth.toString())
+    }
+
     /** The bottom-nav slot that reflects the current state (or null when none of its slots is active). */
     fun bottomNavSelection(): RailDestination? = when {
         moreOpen -> RailDestination.More
@@ -433,6 +465,60 @@ class IdeUiState(
     var consoleOpen by mutableStateOf(!isMobilePlatform)
 
     var paletteOpen by mutableStateOf(false)
+
+    /** The scope tab the palette opens on (a `PaletteFilter` name: Files, Symbols, ...); null = All. Set by the
+     *  go-to shortcuts just before they open it. */
+    var paletteFilter by mutableStateOf<String?>(null)
+
+    /** Bumped to make the active editor take keyboard focus (an app shortcut that returns to the editor). */
+    var editorFocusEpoch by mutableIntStateOf(0)
+
+    /** Bumped to open Find in Files with [findInFilesSeed] (the editor's selection) as the query. */
+    var findInFilesEpoch by mutableIntStateOf(0)
+    var findInFilesSeed: String? = null
+
+    // ---- recently used files and closed tabs: the Ctrl+Tab switcher, Recent Files, Reopen Closed Tab ----
+
+    /** Paths in most-recently-active order, newest first, open or since closed. Fed by [publishActiveEditor]. */
+    val recentPaths = mutableStateListOf<String>()
+    private val recentNames = HashMap<String, String>()
+    private val closedTabs = ArrayDeque<Pair<String, String>>()
+
+    private fun noteRecent(path: String) {
+        openFiles.firstOrNull { it.path == path }?.let { recentNames[path] = it.name }
+        recentPaths.remove(path)
+        recentPaths.add(0, path)
+        while (recentPaths.size > RECENT_LIMIT) recentNames.remove(recentPaths.removeAt(recentPaths.lastIndex))
+    }
+
+    /** The display name of a recent [path]: its tab's name when it had one, else the file name. */
+    fun recentName(path: String): String =
+        recentNames[path] ?: path.substringAfterLast('/').substringAfterLast('\\')
+
+    /** The open tabs, most recently active first; a tab never activated this session follows in strip order. */
+    fun openTabsByRecency(): List<OpenFile> {
+        val byPath = openFiles.associateBy { it.path }
+        val recent = recentPaths.mapNotNull { byPath[it] }
+        return recent + openFiles.filter { it !in recent }
+    }
+
+    /** Activate the tab [delta] places along the strip from the active one, wrapping at the ends. */
+    fun cycleTab(delta: Int) {
+        if (openFiles.isEmpty()) return
+        val n = openFiles.size
+        activeIndex = ((activeIndex.coerceAtLeast(0) + delta) % n + n) % n
+    }
+
+    /** Reopen the most recently closed tab that is not open again already. False when there is none. */
+    fun reopenClosedTab(): Boolean {
+        while (closedTabs.isNotEmpty()) {
+            val (path, name) = closedTabs.removeLast()
+            if (openFiles.any { it.path == path }) continue
+            if (path.startsWith(LIBRARY_SCHEME)) openLibrary(path) else open(path, name)
+            return true
+        }
+        return false
+    }
     /** Whether the "More" actions sheet is showing (rail footer / bottom-nav More). */
     var moreOpen by mutableStateOf(false)
 
@@ -570,6 +656,13 @@ class IdeUiState(
         // remembers it for the next time the drawer is toggled on.
         backend.settings.preference(LEFT_PANEL_PREF)?.let { lastLeftPanel = it }
         if (!isMobilePlatform) selectedLeftPanel = lastLeftPanel
+        // The switch used to live under `sidebar.rightStripe`; carry a hidden stripe over to the Settings key.
+        if (backend.settings.preference(RIGHT_STRIPE_PREF) == null && backend.settings.preference(LEGACY_RIGHT_STRIPE_PREF) == "false") {
+            setRightStripeShown(false)
+        }
+        rightStripeVisible = readRightStripe()
+        backend.settings.preference(LEFT_PANE_WIDTH_PREF)?.toFloatOrNull()?.let { leftPaneWidth = it }
+        backend.settings.preference(RIGHT_PANE_WIDTH_PREF)?.toFloatOrNull()?.let { rightPaneWidth = it }
     }
 
     /**
@@ -600,6 +693,8 @@ class IdeUiState(
 
     /** Push persisted IDE settings into the live editor-pref fields (called on creation + on each settings change). */
     fun applySettings(s: UiSettings) {
+        alwaysShowToolWindowActions = s.alwaysShowToolWindowActions
+        rightStripeVisible = readRightStripe()
         inlayHintsEnabled = s.inlayHints
         editorFontScale = s.editorFontScale
         fontLigaturesEnabled = s.fontLigatures
@@ -624,12 +719,18 @@ class IdeUiState(
      */
     val blocksEnabled: Boolean = backend.blocks.blocksEnabled()
 
-    /** Whether the Logs viewer sheet (editor & analysis logs, opened from the More menu) is showing. */
+    /** Whether the Logs viewer (editor & analysis logs) is showing: a bottom tool window in the wide layout,
+     *  sharing the bottom pane with the build console, and a sheet on the phone. */
     var logsOpen by mutableStateOf(false)
 
     /** The plugin id the Logs viewer should open filtered to, set when it is opened from a plugin's row.
-     *  Cleared when the sheet closes, so opening Logs from the More menu shows everything again. */
+     *  Cleared when the viewer closes, so opening Logs again shows everything. */
     var logsSource: String? by mutableStateOf(null)
+
+    fun closeLogs() {
+        logsOpen = false
+        logsSource = null
+    }
 
     /** Whether the indexing-status detail dialog (opened by tapping the top-bar index chip) is showing. */
     var indexDetailOpen by mutableStateOf(false)
@@ -764,6 +865,8 @@ class IdeUiState(
         if (idx < 0) return
         openFiles.removeAt(idx)
         activeIndex = activeIndex.coerceAtMost(openFiles.lastIndex)
+        closedTabs.addLast(file.path to file.name)
+        while (closedTabs.size > CLOSED_TAB_LIMIT) closedTabs.removeFirst()
         backend.editor.onFileClosed(file.path)
     }
 
@@ -956,14 +1059,15 @@ class IdeUiState(
      */
     fun reloadAfterRename(activePath: String?, newPath: String?) {
         scope.launch {
-            for (i in openFiles.indices) {
-                val f = openFiles[i]
+            for (f in openFiles.toList()) {
                 if (f.readOnly) continue
                 val followsFileRename = newPath != null && f.path == activePath
                 if (!followsFileRename && f.modified) continue
                 val diskPath = if (followsFileRename) newPath!! else f.path
                 val text = readTabText(diskPath) ?: continue
                 if (!followsFileRename && text == f.savedText) continue // untouched → preserve session/undo/caret
+                // The read suspends, and a tab closed meanwhile shifts every index after it.
+                val i = openFiles.indexOfFirst { it.tabId == f.tabId }.takeIf { it >= 0 } ?: continue
                 val name = diskPath.substringAfterLast('/').substringAfterLast('\\')
                 openFiles[i] = OpenFile(diskPath, name, text, tabId = f.tabId)
                 backend.editor.updateDocument(diskPath, text)
@@ -1100,16 +1204,19 @@ class IdeUiState(
 
     /** Re-point open tabs at [oldPath] (or under it, for a directory) to [newPath], re-reading from disk. */
     private suspend fun rebaseTabs(oldPath: String, newPath: String) {
-        for (i in openFiles.indices) {
-            val p = openFiles[i].path
+        for (f in openFiles.toList()) {
+            val p = f.path
             val rebased = when {
                 p == oldPath -> newPath
                 underPath(p, oldPath) -> newPath + p.substring(oldPath.length)
                 else -> continue
             }
             val text = readTabText(rebased) ?: continue
+            // The read suspends, and a tab closed meanwhile shifts every index after it, so a captured index
+            // threw IndexOutOfBounds in the field. Find the tab again by its id.
+            val i = openFiles.indexOfFirst { it.tabId == f.tabId }.takeIf { it >= 0 } ?: continue
             val name = rebased.substringAfterLast('/').substringAfterLast('\\')
-            openFiles[i] = OpenFile(rebased, name, text, tabId = openFiles[i].tabId)
+            openFiles[i] = OpenFile(rebased, name, text, tabId = f.tabId)
             backend.editor.updateDocument(rebased, text)
         }
         dedupeTabsByPath()
@@ -1205,6 +1312,21 @@ class IdeUiState(
         /** App preference: the last-open LEFT sidebar panel id ([LeftPanelId] or a plugin tool-window id), so
          *  the activity rail reopens to the same panel next launch. */
         const val LEFT_PANEL_PREF = "sidebar.leftPanel"
+
+        /** App preference: "false" once the user hides the right tool-window stripe on the wide layout. */
+        const val RIGHT_STRIPE_PREF = "settings.appearance.rightToolWindowBar"
+        private const val LEGACY_RIGHT_STRIPE_PREF = "sidebar.rightStripe"
+
+        /** [activeToolWindow]'s id for the bottom build console. */
+        const val CONSOLE_TOOL_WINDOW = "console"
+        private const val RECENT_LIMIT = 50
+        private const val CLOSED_TAB_LIMIT = 30
+
+        /** App preferences: the docked left / right pane widths in dp, as last dragged. */
+        const val LEFT_PANE_WIDTH_PREF = "sidebar.leftWidth"
+        const val RIGHT_PANE_WIDTH_PREF = "sidebar.rightWidth"
+        const val DEFAULT_LEFT_PANE_WIDTH = 280f
+        const val DEFAULT_RIGHT_PANE_WIDTH = 380f
     }
 }
 

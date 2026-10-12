@@ -135,8 +135,18 @@ class VmLibraryExecutor(
             // blank instead of crashing the IDE. Detected by the receiver being a MeasureScope — the SAM's
             // erased return type is Object, so it can't be matched on the return type.
             proxyFallback = { _, args, _ -> (args.firstOrNull() as? MeasureScope)?.layout(0, 0) {} },
+            // The project's Android Material3 reaches Android-only text-style constructors the desktop host
+            // lacks (`PlatformTextStyle(includeFontPadding)`); substitute the host's neutral style.
+            missingConstructor = { owner, _, _ -> PlatformStyleCompat.construct(owner, hostLoader) },
         ),
         peerFactory = peerFactory,
+        // Android-only facade calls (`WindowInsets.systemBars` from the project's Material3 Scaffold) go to the
+        // host's own `actual` rather than interpreting Android platform code with no View behind it.
+        staticRedirect = PlatformFacadeRedirect(
+            hostLoader,
+            hostLoadable = ::isHostLoadable,
+            keepInterpreted = { n -> projectPreferredPrefixes.any { n.startsWith(it) } },
+        ),
     )
 
     /** Runs library reified inline functions (which cannot be dispatched reflectively) INTERPRETED, applying the

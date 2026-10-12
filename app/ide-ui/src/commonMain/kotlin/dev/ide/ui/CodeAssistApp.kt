@@ -1,5 +1,11 @@
 package dev.ide.ui
 
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import dev.ide.ui.ext.AppKeys
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import dev.ide.ui.components.WindowTitleStrip
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -28,6 +34,7 @@ import dev.ide.ui.generated.resources.import_gradle_failed
 import dev.ide.ui.generated.resources.import_unrecognized
 import dev.ide.ui.navigation.ScreenHost
 import dev.ide.ui.platform.PlatformBackHandler
+import dev.ide.ui.platform.PointerInputModeHost
 import dev.ide.ui.platform.PlatformSystemBars
 import dev.ide.ui.screens.GradleImportModeDialog
 import dev.ide.ui.screens.ImportSourceDialog
@@ -152,50 +159,63 @@ fun CodeAssistApp(
             // Occasional full-screen ad over a LONG build (Android only; inert on desktop / when ads are off).
             // Renders nothing — it just observes the build state and asks the host to present an interstitial.
             BuildAdInterstitial(backend, app.adController)
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                    AppNavGraph(
-                        app = app,
+            // Mouse or touch, from the last pointer event, for the parts of the UI that size and reveal by pointer.
+            PointerInputModeHost {
+                // App-wide shortcuts. At the root so they see a key on its way down (the switcher's modal keys,
+                // double Shift) and, last, any key nothing inside consumed. On Android this also runs before
+                // Compose's own Tab focus traversal, which would otherwise eat Ctrl+Tab.
+                Surface(
+                    Modifier.fillMaxSize().onPreviewKeyEvent(AppKeys::onPreviewKey).onKeyEvent(AppKeys::onKey),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
+                    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                        // Desktop with a custom title bar: the title strip for screens that draw none of their own.
+                        WindowTitleStrip(title = "CodeAssist")
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            AppNavGraph(
+                                app = app,
+                                state = state,
+                                fileActions = fileActions,
+                                codeFont = codeFont,
+                                dark = dark,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                    AppOverlays(
+                        backend = backend,
                         state = state,
                         fileActions = fileActions,
-                        codeFont = codeFont,
-                        dark = dark,
-                        modifier = Modifier.fillMaxSize(),
+                        onPicker = app.screen == Screen.Projects && app.homeTab == HomeTab.Projects,
+                        showMigration = app.showMigration,
+                        onBackup = app::backupAndShare,
+                        onDismissMigration = app::dismissMigration,
+                        showOnboarding = app.showOnboarding,
+                        // Final CTA: send the user straight into the Create-Project flow.
+                        onGetStarted = { app.createProject() },
+                        onFinishOnboarding = app::dismissOnboarding,
+                        showAnalytics = app.showAnalytics,
+                        onAllowAnalytics = { app.setAnalyticsConsent(true) },
+                        onDeclineAnalytics = { app.setAnalyticsConsent(false) },
+                        importError = importErrorMessage,
+                        onDismissImportError = app::dismissImportError,
+                        importBusy = app.importBusy,
+                    )
+                    ImportSourceDialog(
+                        visible = app.showImportSourceChoice,
+                        canPickFolder = fileActions.canPickDirectory,
+                        canPickPackage = fileActions.canPickFile,
+                        onFolder = app::chooseFolderImport,
+                        onPackage = app::choosePackageImport,
+                        onDismiss = app::dismissImportSourceChoice,
+                    )
+                    GradleImportModeDialog(
+                        visible = app.showImportModeChoice,
+                        onCompat = { app.importGradleProject(convert = false) },
+                        onConvert = { app.importGradleProject(convert = true) },
+                        onDismiss = app::dismissImportModeChoice,
                     )
                 }
-                AppOverlays(
-                    backend = backend,
-                    state = state,
-                    fileActions = fileActions,
-                    onPicker = app.screen == Screen.Projects && app.homeTab == HomeTab.Projects,
-                    showMigration = app.showMigration,
-                    onBackup = app::backupAndShare,
-                    onDismissMigration = app::dismissMigration,
-                    showOnboarding = app.showOnboarding,
-                    // Final CTA: send the user straight into the Create-Project flow.
-                    onGetStarted = { app.createProject() },
-                    onFinishOnboarding = app::dismissOnboarding,
-                    showAnalytics = app.showAnalytics,
-                    onAllowAnalytics = { app.setAnalyticsConsent(true) },
-                    onDeclineAnalytics = { app.setAnalyticsConsent(false) },
-                    importError = importErrorMessage,
-                    onDismissImportError = app::dismissImportError,
-                    importBusy = app.importBusy,
-                )
-                ImportSourceDialog(
-                    visible = app.showImportSourceChoice,
-                    canPickFolder = fileActions.canPickDirectory,
-                    canPickPackage = fileActions.canPickFile,
-                    onFolder = app::chooseFolderImport,
-                    onPackage = app::choosePackageImport,
-                    onDismiss = app::dismissImportSourceChoice,
-                )
-                GradleImportModeDialog(
-                    visible = app.showImportModeChoice,
-                    onCompat = { app.importGradleProject(convert = false) },
-                    onConvert = { app.importGradleProject(convert = true) },
-                    onDismiss = app::dismissImportModeChoice,
-                )
             }
         }
     }

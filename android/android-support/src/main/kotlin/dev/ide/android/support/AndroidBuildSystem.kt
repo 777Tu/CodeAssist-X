@@ -10,6 +10,7 @@ import dev.ide.android.support.tasks.AndroidKotlinCompileTask
 import dev.ide.android.support.tasks.BundleTask
 import dev.ide.android.support.tasks.CheckAarMetadataTask
 import dev.ide.android.support.tasks.CompileAidlTask
+import dev.ide.android.support.tasks.CompileArtProfileTask
 import dev.ide.android.support.tasks.ConvertResourcesTask
 import dev.ide.android.support.tasks.DexArchiveBuilderTask
 import dev.ide.android.support.tasks.DexExternalLibsTask
@@ -43,6 +44,7 @@ import dev.ide.android.support.tools.ApkSigner
 import dev.ide.android.support.tools.ApkSignerTool
 import dev.ide.android.support.tools.ApksigBundleSigner
 import dev.ide.android.support.tools.ApksigSigner
+import dev.ide.android.support.tools.ArtProfiles
 import dev.ide.android.support.tools.BundleSigner
 import dev.ide.android.support.tools.Bundler
 import dev.ide.android.support.tools.BundletoolInProcess
@@ -172,6 +174,9 @@ class AndroidBuildSystem(
      *  byte-identical to before. `:ide-android` supplies the bundled runtime when the "Forward app logs"
      *  setting is on. See [AndroidAppLogRuntime]. */
     private val appLogRuntime: () -> AndroidAppLogRuntime? = { null },
+    /** The installed platform `android.jar` for a compileSdk level, or null to use [sdk]'s. Lets each module
+     *  compile against its own compileSdk rather than the one platform the SDK was detected with. */
+    private val platformFor: (compileSdk: Int) -> Path? = { null },
 ) : BuildSystem {
 
     override val id: BuildSystemId = BuildSystemId.NATIVE
@@ -184,6 +189,18 @@ class AndroidBuildSystem(
      */
     private val compileBootclasspath: List<Path> =
         listOf(sdk.androidJar) + listOfNotNull(sdk.coreLambdaStubs.takeIf { Files.exists(it) })
+
+    /** [facet]'s compileSdk `android.jar` from [platformFor], or the build's default when it is not installed. */
+    private fun androidJarFor(facet: AndroidFacet): Path =
+        platformFor(facet.compileSdk)?.takeIf { Files.isRegularFile(it) } ?: sdk.androidJar
+
+    /** [compileBootclasspath] with [androidJar] in place of the default `android.jar`. */
+    private fun compileBootclasspathFor(androidJar: Path): List<Path> =
+        if (androidJar == sdk.androidJar) compileBootclasspath else listOf(androidJar) + compileBootclasspath.drop(1)
+
+    /** [bootClasspath] with [androidJar] in place of the default `android.jar` (on ART the boot path holds it). */
+    private fun bootClasspathFor(androidJar: Path): List<Path> =
+        bootClasspath.map { if (it == sdk.androidJar) androidJar else it }
 
     override fun supports(moduleType: ModuleType): Boolean = moduleType.id.startsWith("android")
 
@@ -266,6 +283,12 @@ class AndroidBuildSystem(
         config: BuildConfiguration,
     ) {
         val facet = app.facets.get(AndroidFacet.KEY) ?: return
+        // The module's compileSdk platform when one is installed, else the build's default android.jar, for
+        // compiling, linking and shrinking. D8 keeps the default jar: it reads it only to desugar, and the shared
+        // library-dex cache stays valid whichever platform a module compiles against.
+        val androidJar = androidJarFor(facet)
+        val compileBootclasspath = compileBootclasspathFor(androidJar)
+        val bootClasspath = bootClasspathFor(androidJar)
         val layout = Layout(app, variant.name)
         val v = variant.name.cap()
         fun step(s: String) = TaskName(":${app.name}:$s$v")
@@ -445,7 +468,7 @@ class AndroidBuildSystem(
         // (AGP's checkAarMetadata). Gates processManifest so a violation stops the build with a clear message.
         val checkAarMeta = step("checkAarMetadata")
         tasks.task(checkAarMeta) {
-            CheckAarMetadataTask(checkAarMeta, libs.aarMetadata, facet.compileSdk, layout.aarMetadataCheck, sdk.androidJar)
+            CheckAarMetadataTask(checkAarMeta, libs.aarMetadata, facet.compileSdk, layout.aarMetadataCheck, androidJar)
         }
         // Merge dependency-library + AAR manifests into the app manifest (so their components/permissions
         // land in the APK), substituting ${applicationId} etc. The linked manifest is the merged one.
@@ -480,7 +503,7 @@ class AndroidBuildSystem(
                 aapt2Link,
                 layout.compiledRes,
                 linkManifest,
-                sdk.androidJar,
+                androidJar,
                 facet.namespace,
                 extraPackages,
                 facet.minSdk,
@@ -676,7 +699,7 @@ class AndroidBuildSystem(
             val minifyTask = TaskName(":${app.name}:minify${v}WithR8")
             tasks.task(minifyTask, listOf(aapt2Link, generateRFile, compile) + listOfNotNull(transformHilt, instrument) + moduleJarProducers) {
                 R8MinifyTask(
-                    minifyTask, dexProjectClasses + subProjectJars + externalJars + rJars, sdk.androidJar, facet.minSdk,
+                    minifyTask, dexProjectClasses + subProjectJars + externalJars + rJars, androidJar, facet.minSdk,
                     keepRuleFiles, inlineRules, facet.r8FullMode,
                     layout.dexArchives.resolve("r8-staging"), layout.dex, shrinker,
                     mappingOutput = layout.mappingTxt,
@@ -806,6 +829,34 @@ class AndroidBuildSystem(
             pkgDeps = pkgDeps + listOf(l8)
         }
 
+        // Baseline Profile (AGP's merge/compile<Variant>ArtProfile): release builds only, since ART does not
+        // AOT-compile a debuggable app. The app's and its library modules' rules count as the project's own (a
+        // rule that does not parse fails the build); an AAR's are the library's (skipped with a warning). It
+        // compiles against the final dex, so it waits on everything that produces one.
+        var artProfile: Pair<Path, Path>? = null
+        if (release) {
+            val rules = ArtProfiles.sourceRules(layout.moduleDir.resolve("src"), sourceSetNames(app, variant))
+                .map { ArtProfiles.RulesFile(it, own = true) } +
+                depAndroidLibs.flatMap { dep ->
+                    ArtProfiles.sourceRules(
+                        moduleDir(dep).resolve("src"),
+                        sourceSetNames(dep, AndroidVariants.matchLibraryVariant(dep, variant, facet)),
+                    ).map { ArtProfiles.RulesFile(it, own = true) }
+                } +
+                libs.artProfiles.map { ArtProfiles.RulesFile(it, own = false) }
+            if (rules.isNotEmpty()) {
+                val compileArtProfile = step("compileArtProfile")
+                tasks.task(compileArtProfile, pkgDeps) {
+                    CompileArtProfileTask(
+                        compileArtProfile, rules, dexDirs, mapping = if (minify) layout.mappingTxt else null,
+                        layout.mergedArtProfile, layout.binaryArtProfile, layout.binaryArtProfileMetadata,
+                    )
+                }
+                artProfile = layout.binaryArtProfile to layout.binaryArtProfileMetadata
+                pkgDeps = pkgDeps + listOf(compileArtProfile)
+            }
+        }
+
         // The packaging step also waits on the native-lib + Java-resource merges (common to both the APK and
         // bundle terminals, and to the minify + debug dex paths).
         pkgDeps = pkgDeps + packagingDeps
@@ -820,7 +871,7 @@ class AndroidBuildSystem(
             val bundleResAp = if (shrinkResources) layout.shrunkProtoAp else layout.protoAp
             val packageBundle = step("packageBundle")
             tasks.task(packageBundle, pkgDeps) {
-                BundleTask(packageBundle, bundleResAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedAab, layout.baseModuleZip, bundler, javaResJars = listOf(layout.mergedJavaRes))
+                BundleTask(packageBundle, bundleResAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedAab, layout.baseModuleZip, bundler, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile)
             }
             val signBundle = step("signBundle")
             tasks.task(signBundle, listOf(packageBundle)) {
@@ -831,7 +882,7 @@ class AndroidBuildSystem(
             return
         }
 
-        tasks.task(pkg, pkgDeps) { PackageApkTask(pkg, layout.resourcesAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedApk, javaResJars = listOf(layout.mergedJavaRes)) }
+        tasks.task(pkg, pkgDeps) { PackageApkTask(pkg, layout.resourcesAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedApk, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile) }
         tasks.task(sign, listOf(pkg)) { SignApkTask(sign, layout.unsignedApk, layout.signedApk, variantSigning, signer) }
         // Top-level lifecycle aggregate (AGP's `assemble<Variant>`): fronts the signed APK.
         val assemble = step("assemble")
@@ -857,6 +908,12 @@ class AndroidBuildSystem(
             .filter { it.kind == ClasspathEntryKind.MODULE_OUTPUT }.map { Paths.get(it.root.path) }
         val level = levelOf(m.languageLevel)
         val facet = m.facets.get(AndroidFacet.KEY)!!
+        // The module's compileSdk platform when one is installed, else the build's default android.jar, for
+        // compiling, linking and shrinking. D8 keeps the default jar: it reads it only to desugar, and the shared
+        // library-dex cache stays valid whichever platform a module compiles against.
+        val androidJar = androidJarFor(facet)
+        val compileBootclasspath = compileBootclasspathFor(androidJar)
+        val bootClasspath = bootClasspathFor(androidJar)
         // Upstream modules' Kotlin output (sibling of their Java output) joins this lib's compile classpath.
         val upstreamKotlin = moduleOutputs.map { it.resolveSibling("kotlin-classes") }
         // Non-transitive R: a library's own `R` holds only its own resources, so reading a DEPENDENCY
@@ -879,7 +936,7 @@ class AndroidBuildSystem(
                 generateR,
                 srcRoots(ContentRole.ANDROID_RES),
                 buildDir.parent.resolve(facet.manifest),
-                sdk.androidJar,
+                androidJar,
                 facet.namespace,
                 facet.minSdk,
                 rRoot.resolve("res"),
@@ -1049,6 +1106,8 @@ class AndroidBuildSystem(
                 inlineProguardRules = inlineProguard,
                 compileSdk = facet.compileSdk,
                 outAar = aarPath(lib, variant.name),
+                // The library's Baseline Profile rules travel in the AAR, for the consuming app to compile.
+                artProfileRules = ArtProfiles.sourceRules(moduleDir.resolve("src"), sourceSetNames(lib, libVariant)),
             )
         }
         val assembleAar = TaskName(":${lib.name}:assembleAar")
@@ -1371,6 +1430,10 @@ class AndroidBuildSystem(
             .resolve("${module.name}-$variantName.aab")
         // mapping.txt for stack-trace de-obfuscation; AGP's outputs/mapping/<variant>/mapping.txt.
         val mappingTxt: Path = buildDir.resolve("outputs").resolve("mapping").resolve(variantName).resolve("mapping.txt")
+        // compileArtProfile: the merged Baseline Profile rules, and the binary pair compiled from them.
+        val mergedArtProfile: Path = inter.resolve("art_profile").resolve(ArtProfiles.RULES_FILE)
+        val binaryArtProfile: Path = inter.resolve("art_profile").resolve(ArtProfiles.PROFILE_NAME)
+        val binaryArtProfileMetadata: Path = inter.resolve("art_profile").resolve(ArtProfiles.PROFILE_METADATA_NAME)
 
         val moduleDir: Path get() = this@Layout.moduleDirField
         fun manifest(facet: AndroidFacet): Path = moduleDirField.resolve(facet.manifest)
@@ -1466,8 +1529,8 @@ class AndroidBuildSystem(
          * Desktop wiring: every tool is a subprocess over an installed SDK (`java -cp d8.jar …`,
          * `java -jar apksigner.jar …`, native aapt2/zipalign). No statically-linked tool jars needed.
          */
-        fun subprocess(sdk: AndroidSdk, signing: SigningConfig, bootClasspath: List<Path> = emptyList(), kotlin: IncrementalKotlinCompiler? = null, plugins: List<KotlinCompilerPlugin> = BUILTIN_KOTLIN_COMPILER_PLUGINS, generators: List<SourceGenerator> = emptyList(), classTransforms: List<ClassTransform> = emptyList(), dexCacheRoot: Path? = null, desugarLib: DesugarLib? = null, signingResolver: ((Module, String) -> SigningConfig?)? = null, appLogRuntime: () -> AndroidAppLogRuntime? = { null }): AndroidBuildSystem =
-            AndroidBuildSystem(sdk, signing, bootClasspath, kotlin = kotlin, plugins = plugins, generators = generators, classTransforms = classTransforms, dexCacheRoot = dexCacheRoot, desugarLib = desugarLib, signingResolver = signingResolver, appLogRuntime = appLogRuntime)
+        fun subprocess(sdk: AndroidSdk, signing: SigningConfig, bootClasspath: List<Path> = emptyList(), kotlin: IncrementalKotlinCompiler? = null, plugins: List<KotlinCompilerPlugin> = BUILTIN_KOTLIN_COMPILER_PLUGINS, generators: List<SourceGenerator> = emptyList(), classTransforms: List<ClassTransform> = emptyList(), dexCacheRoot: Path? = null, desugarLib: DesugarLib? = null, signingResolver: ((Module, String) -> SigningConfig?)? = null, appLogRuntime: () -> AndroidAppLogRuntime? = { null }, platformFor: (Int) -> Path? = { null }): AndroidBuildSystem =
+            AndroidBuildSystem(sdk, signing, bootClasspath, kotlin = kotlin, plugins = plugins, generators = generators, classTransforms = classTransforms, dexCacheRoot = dexCacheRoot, desugarLib = desugarLib, signingResolver = signingResolver, appLogRuntime = appLogRuntime, platformFor = platformFor)
 
         /**
          * On-device-shaped wiring: the native tools (aapt2, zipalign) run as subprocesses against the
@@ -1476,7 +1539,7 @@ class AndroidBuildSystem(
          * ART (where `java -jar` is impossible); the desktop test runs it too, so the on-device dex/sign
          * code path is exercised on the host.
          */
-        fun inProcess(sdk: AndroidSdk, signing: SigningConfig, bootClasspath: List<Path> = emptyList(), kotlin: IncrementalKotlinCompiler? = null, plugins: List<KotlinCompilerPlugin> = BUILTIN_KOTLIN_COMPILER_PLUGINS, generators: List<SourceGenerator> = emptyList(), classTransforms: List<ClassTransform> = emptyList(), dexCacheRoot: Path? = null, desugarLib: DesugarLib? = null, signingResolver: ((Module, String) -> SigningConfig?)? = null, shrinker: Shrinker? = null, dexer: Dexer? = null, mergeDexer: Dexer? = null, mergeChunk: () -> Int = { DexMergeTask.DEFAULT_MERGE_CHUNK }, appLogRuntime: () -> AndroidAppLogRuntime? = { null }): AndroidBuildSystem =
+        fun inProcess(sdk: AndroidSdk, signing: SigningConfig, bootClasspath: List<Path> = emptyList(), kotlin: IncrementalKotlinCompiler? = null, plugins: List<KotlinCompilerPlugin> = BUILTIN_KOTLIN_COMPILER_PLUGINS, generators: List<SourceGenerator> = emptyList(), classTransforms: List<ClassTransform> = emptyList(), dexCacheRoot: Path? = null, desugarLib: DesugarLib? = null, signingResolver: ((Module, String) -> SigningConfig?)? = null, shrinker: Shrinker? = null, dexer: Dexer? = null, mergeDexer: Dexer? = null, mergeChunk: () -> Int = { DexMergeTask.DEFAULT_MERGE_CHUNK }, appLogRuntime: () -> AndroidAppLogRuntime? = { null }, platformFor: (Int) -> Path? = { null }): AndroidBuildSystem =
             AndroidBuildSystem(
                 sdk, signing, bootClasspath,
                 // The dexBuilder ARCHIVE dexer. The host can inject a forked-VM D8 (an [OffHeapArchiveDexer]) so a
@@ -1499,6 +1562,7 @@ class AndroidBuildSystem(
                 signingResolver = signingResolver,
                 mergeChunk = mergeChunk,
                 appLogRuntime = appLogRuntime,
+                platformFor = platformFor,
             )
 
         /** A debug-signed [subprocess] build system, creating the shared debug keystore on demand. */

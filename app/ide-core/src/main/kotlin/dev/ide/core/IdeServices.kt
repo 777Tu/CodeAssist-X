@@ -25,6 +25,9 @@ import dev.ide.android.support.AndroidVariants
 import dev.ide.android.support.AndroidViewBindingProvider
 import dev.ide.android.support.PreviewResourceLinker
 import dev.ide.android.support.SampleAndroidProject
+import dev.ide.android.support.apilevels.AndroidApiDatabase
+import dev.ide.android.support.apilevels.JdkApiLevels
+import dev.ide.android.support.docs.AndroidPlatformDocs
 import dev.ide.android.support.index.AndroidResourceIndex
 import dev.ide.android.support.index.ResourceDeclValue
 import dev.ide.android.support.metadata.AndroidSdkMetadata
@@ -189,7 +192,9 @@ import dev.ide.lang.kotlin.index.KotlinTypeShapeIndex
 import dev.ide.lang.kotlin.interp.ResolvedClass
 import dev.ide.lang.kotlin.interp.ResolvedFunction
 import dev.ide.lang.kotlin.synthetic.KotlinSyntheticClassProvider
+import dev.ide.lang.resolve.ApiLevelContext
 import dev.ide.lang.resolve.SourceDocProvider
+import dev.ide.lang.resolve.orElse
 import dev.ide.lang.signature.SignatureHelp
 import dev.ide.lang.signature.SignatureHelpRequest
 import dev.ide.lang.signature.SignatureHelpTrigger
@@ -301,7 +306,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -471,6 +479,9 @@ class IdeServices private constructor(
     @Volatile
     private var openJob: Job? = null
 
+    /** The shared library/SDK segment store (see [indexService]). */
+    private val indexCacheRoot: Path = (sharedCachesRoot ?: store.rootPath).resolve("caches").resolve("index")
+
     /** The workspace index (class names, packages, members, source symbols). Built in the background. The index
      *  extensions are contributed app-global (see [registerStaticPlugins]); this just queries them. */
     val indexService: IndexService = run {
@@ -480,7 +491,7 @@ class IdeServices private constructor(
             // segments), so share them across projects under the host's shared cache root (like the dex and
             // Maven caches) instead of re-indexing the same AndroidX/Compose/stdlib jars per project. The
             // in-memory source side stays per-project regardless of where this points.
-            (sharedCachesRoot ?: store.rootPath).resolve("caches").resolve("index"),
+            indexCacheRoot,
             // On-device (androidTools present) ART has a tight heap, so the index builds narrowly there. Its hot
             // block cache is the desktop size unless the device is low on memory: completion's class-name
             // queries thrash a smaller one, re-reading blocks from disk on every keystroke.
@@ -497,6 +508,9 @@ class IdeServices private constructor(
             // 32-bit ARM ART: build on ONE thread so the index never allocates wide alongside the editor's
             // ide-engine thread (the 32-bit torn-reference SIGSEGV mitigation; see dev.ide.platform.RuntimeInfo).
             singleThreadedBuild = dev.ide.platform.RuntimeInfo.is32Bit,
+            // Library source archives feed only parameter names and javadoc; build them after each pass so they
+            // never hold up readiness or the next pass (they were the costliest artifacts in the field).
+            deferSourceArchives = true,
         )
     }
 
@@ -611,7 +625,7 @@ class IdeServices private constructor(
             this@IdeServices.setActiveVariant(module, variantName)
 
         override fun invalidateAnalyzers() = this@IdeServices.invalidateAnalyzers()
-        override fun resyncIndex() = this@IdeServices.resyncIndex()
+        override fun resyncIndex() = this@IdeServices.resyncIndex(IndexPassTrigger.MODULE)
         override val events get() = this@IdeServices.events
     }
 
@@ -637,7 +651,7 @@ class IdeServices private constructor(
             override fun invalidateSyntheticClasses() =
                 this@IdeServices.invalidateSyntheticClasses()
 
-            override fun resyncIndex() = this@IdeServices.resyncIndex()
+            override fun resyncIndex(reason: String) = this@IdeServices.resyncIndex(reason)
             override fun reindexSourceAsync(path: Path) {
                 indexScope.launch {
                     runCatching {
@@ -785,6 +799,8 @@ class IdeServices private constructor(
         // synthetic-R provider and the XML resource host are all registered ONCE, app-global (in
         // [registerStaticPlugins]), and resolve THIS engine via the scope / [ApplicationEnvironment.activeEngine].
         registerScopedServices()
+        // Register the downloaded Android platforms before any analyzer resolves its module's SDK.
+        if (!buildOnly) runCatching { syncPlatformSdks() }
         // Provision kotlin-stdlib as a real project dependency (bundled jar, never the host runtime) before
         // anything reads a Kotlin module's classpath.
         runCatching { ensureKotlinStdlib() }
@@ -856,7 +872,10 @@ class IdeServices private constructor(
                 }
                 try {
                     memLog.info("project open (before index): ${MemSample.now().fmt()} tier=${DeviceMemory.tier}")
-                    runCatching { indexService.ensureUpToDate(buildIndexScope()) }
+                    // The app's prebuilt segments for the jars it ships, unpacked once per app version, so this
+                    // pass finds android.jar as a cache hit instead of indexing it on the phone.
+                    PrebuiltIndexSegments.ensureInstalled(indexCacheRoot)
+                    runIndexPass(IndexPassTrigger.OPEN)
                     memLog.info("after index build: ${MemSample.now().fmt()}")
                 } finally {
                     sampler.cancel()
@@ -866,7 +885,7 @@ class IdeServices private constructor(
             }
         } else {
             openJob = indexScope.launch {
-                runCatching { indexService.ensureUpToDate(buildIndexScope()) }
+                runIndexPass(IndexPassTrigger.OPEN)
                 memLog.info("after index build: ${MemSample.now().fmt()}")
             }
         }
@@ -912,6 +931,11 @@ class IdeServices private constructor(
             runCatching { kotlinJvmCompiler.warmUp(compileBootClasspath) }
             memLog.info("after Kotlin compiler warm-up: ${MemSample.now().fmt()}")
         }
+    }
+
+    /** Suspends until the project-open index build has finished (at once when there is none). */
+    suspend fun awaitOpenIndex() {
+        openJob?.join()
     }
 
     /** Cheap check (bounded, short-circuiting) for any `.kt` under the project's source roots. */
@@ -992,21 +1016,71 @@ class IdeServices private constructor(
         )
     }
 
+    /** How long a resync waits before starting, so a burst of commits (a reconcile loop) becomes one pass. */
+    private val resyncDebounceMs = 200L
+
+    /** A resync is scheduled and has not taken [indexSyncMutex] yet; requests meanwhile join it. */
+    private val resyncPending = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Requests that joined the pending resync, reported as `index_perf.coalesced`. */
+    private val resyncCoalesced = java.util.concurrent.atomic.AtomicInteger(0)
+
     // Serializes the background ensureUpToDate passes: the event hub triggers a re-sync per model commit,
-    // so back-to-back triggers (a reconcile loop's per-module commits) must queue, not interleave.
+    // so back-to-back triggers (a reconcile loop's per-module commits) must queue, not interleave. The
+    // project-open pass takes it too, so a resync fired during open cannot run alongside it.
     private val indexSyncMutex = Mutex()
+
+    // Replays the latest report, so a collector that subscribes after a fast project-open pass finished still
+    // sees it (a collector dedupes by identity on re-subscribe).
+    private val _indexPasses = MutableSharedFlow<IndexPassReport>(
+        replay = 1, extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** One [IndexPassReport] per finished full index pass (open, resync, re-index), for the index analytics. */
+    val indexPasses: SharedFlow<IndexPassReport> get() = _indexPasses
+
+    /**
+     * Run one full index pass for [trigger] and publish its [IndexPassReport]. Every full pass goes through
+     * here, under [indexSyncMutex]. [invalidate] wipes this project's segments first (the "Re-index" action).
+     * Never throws: a failed pass is reported with the failure status it ended on.
+     */
+    private suspend fun runIndexPass(trigger: String, invalidate: Boolean = false, onLocked: () -> Int = { 0 }) {
+        val asked = System.nanoTime()
+        indexSyncMutex.withLock {
+            // From here on a new request must start a pass of its own: the scope below is read after this point.
+            val coalesced = onLocked()
+            val start = System.nanoTime()
+            val scope = runCatching { buildIndexScope() }.getOrElse { return }
+            val scoped = System.nanoTime()
+            runCatching {
+                if (invalidate) indexService.invalidate()
+                indexService.ensureUpToDate(scope)
+            }
+            val end = System.nanoTime()
+            val pass = (indexService as? IndexServiceImpl)?.lastPass
+            val kinds = pass?.built.orEmpty().map { it to builtKind(it, store.rootPath, sharedCachesRoot) }
+            _indexPasses.tryEmit(
+                IndexPassReport(
+                    trigger = trigger,
+                    durationMs = (end - scoped) / 1_000_000,
+                    scopeMs = (scoped - start) / 1_000_000,
+                    queuedMs = (start - asked) / 1_000_000,
+                    status = indexService.status,
+                    ioConcurrency = pass?.ioConcurrency,
+                    buildPermits = pass?.buildPermits,
+                    built = kinds.groupingBy { it.second }.eachCount(),
+                    rekeyed = kinds.filter { it.first.rekeyed }.groupingBy { it.second }.eachCount(),
+                    libraryChanged = pass?.libraryChanged,
+                    coalesced = coalesced,
+                )
+            )
+        }
+    }
 
     /** Re-invalidate and rebuild the workspace indexes from scratch (the UI's "Re-index" action). */
     fun reindex() {
         invalidateSyntheticClasses()
-        indexScope.launch {
-            indexSyncMutex.withLock {
-                runCatching {
-                    indexService.invalidate()
-                    indexService.ensureUpToDate(buildIndexScope())
-                }
-            }
-        }
+        indexScope.launch { runIndexPass(IndexPassTrigger.REINDEX, invalidate = true) }
     }
 
     /**
@@ -1015,10 +1089,21 @@ class IdeServices private constructor(
      * removed dependencies fall out. Used for automatic model-change triggers — on device this is the difference
      * between reopening the android.jar segment and re-scanning its ~40k classes on every dependency/facet edit.
      */
-    private fun resyncIndex() {
+    private fun resyncIndex(reason: String) {
         invalidateSyntheticClasses()
+        // Coalesce: while a resync is waiting to start, further requests ride on it. It reads the scope only once
+        // it holds the mutex, so it covers every change made before then. A reconcile loop's burst of per-module
+        // commits used to queue one full pass per commit.
+        if (!resyncPending.compareAndSet(false, true)) {
+            resyncCoalesced.incrementAndGet()
+            return
+        }
         indexScope.launch {
-            indexSyncMutex.withLock { runCatching { indexService.ensureUpToDate(buildIndexScope()) } }
+            delay(resyncDebounceMs.milliseconds)
+            runIndexPass(reason) {
+                resyncPending.set(false)
+                resyncCoalesced.getAndSet(0)
+            }
             // A full resync may have added/removed source declarations — refresh source-index snapshots.
             bumpSourceIndexGeneration()
         }
@@ -1046,7 +1131,30 @@ class IdeServices private constructor(
      *  engine has no editor analyzers to refresh, so it doesn't subscribe (and doesn't build the SDK manager).
      *  Initialized as a property (not in [registerScopedServices]) so it runs after the engine's other fields. */
     private val sdkChangeSubscription: Disposable? =
-        if (buildOnly) null else sdkManager.addChangeListener { events.librariesChanged() }
+        if (buildOnly) null else sdkManager.addChangeListener {
+            runCatching { syncPlatformSdks() }
+            events.librariesChanged()
+        }
+
+    /**
+     * Mirror the installed Android platforms into the workspace SDK table as `android-<level>` entries, so a
+     * module whose compileSdk has one resolves it ([AndroidFacet.preferredSdkName]) in the editor and the
+     * build alike; without one it keeps the default Android SDK (the bundled `android.jar` on device). Each
+     * entry carries the default Android SDK's extra boot jars (desugar stubs, the Swing API). Entries whose
+     * platform is gone are dropped. Saved, so the separate build process reads the same table.
+     */
+    private fun syncPlatformSdks() {
+        val current = store.data.sdks
+        val primary = current.firstOrNull { it.kind == PlatformKind.ANDROID && !PLATFORM_SDK_NAME.matches(it.name) }
+        val extras = primary?.bootClasspath?.drop(1) ?: emptyList()
+        val platforms = sdkManager.installedPlatforms().map { (level, jar) ->
+            SdkData(AndroidFacet.platformSdkName(level), listOf(jar.toString()) + extras, primary?.buildToolsPath, kind = PlatformKind.ANDROID)
+        }
+        val next = current.filterNot { PLATFORM_SDK_NAME.matches(it.name) } + platforms
+        if (next == current) return
+        store.replaceSdks(next)
+        runCatching { store.save() }
+    }
 
     /**
      * The compile bootclasspath. On-device ([androidTools] non-null) ecj has no readable JRE, so every compile
@@ -1438,16 +1546,49 @@ class IdeServices private constructor(
         store.liveModuleContainers().forEach { it.peekService(MODULE_ANALYZERS)?.invalidateCaches(reason) }
     }
 
-    /** The open buffers as an FQCN -> source overlay for the name environment, plus synthetic light classes. */
+    /** One open `.java` buffer's overlay entry, kept until that buffer's text changes. */
+    private class JavaOverlayEntry(val text: String, val fqcn: String?, val chars: CharArray)
+
+    /** The overlay map last handed out, with the inputs it was built from. */
+    private class JavaOverlaySnapshot(
+        val synthetic: Map<String, CharArray>,
+        val entries: List<JavaOverlayEntry>,
+        val map: Map<String, CharArray>,
+    )
+
+    private val javaOverlayEntries = ConcurrentHashMap<Path, JavaOverlayEntry>()
+
+    @Volatile
+    private var javaOverlaySnapshot: JavaOverlaySnapshot? = null
+
+    /**
+     * The open `.java` buffers as an FQCN -> source overlay for the name environment, plus synthetic light
+     * classes. The resolver asks for this on every class lookup, so the map is rebuilt only when a buffer's
+     * text or the synthetic set changed; otherwise the same map, with the same arrays, is returned.
+     */
     private fun overlay(): Map<String, CharArray> {
         val synthetic = syntheticOverlay()
-        val map = HashMap<String, CharArray>(synthetic.size + openDocuments.size)
-        map.putAll(synthetic)
+        val entries = ArrayList<JavaOverlayEntry>()
         for ((path, content) in openDocuments) {
-            val fqcn = fqcnOf(path, content) ?: continue
-            map[fqcn] =
-                content.toCharArray() // a real, open file overrides a synthetic of the same FQCN
+            if (!path.toString().endsWith(".java")) continue
+            val entry = javaOverlayEntries[path]?.takeIf { it.text == content }
+                ?: JavaOverlayEntry(content, fqcnOf(path, content), content.toCharArray())
+                    .also { javaOverlayEntries[path] = it }
+            entries += entry
         }
+        javaOverlaySnapshot?.let { last ->
+            if (last.synthetic === synthetic && last.entries.size == entries.size &&
+                last.entries.indices.all { last.entries[it] === entries[it] }
+            ) return last.map
+        }
+        javaOverlayEntries.keys.retainAll(openDocuments.keys)
+        val map = HashMap<String, CharArray>(synthetic.size + entries.size)
+        map.putAll(synthetic)
+        for (e in entries) {
+            // A real, open file overrides a synthetic of the same FQCN.
+            map[e.fqcn ?: continue] = e.chars
+        }
+        javaOverlaySnapshot = JavaOverlaySnapshot(synthetic, entries, map)
         return map
     }
 
@@ -1503,7 +1644,7 @@ class IdeServices private constructor(
         val bundled = (compileBootClasspath + listOfNotNull(BundledKotlinStdlib.jar()))
             .map { it.toAbsolutePath().normalize().toString() }
         if (norm !in bundled) return null
-        return "${p.fileName}-${runCatching { Files.size(p) }.getOrDefault(0L)}"
+        return PrebuiltIndexSegments.stableId(p)
     }
 
     private fun fqcnOf(path: Path, text: String): String? {
@@ -1888,6 +2029,40 @@ class IdeServices private constructor(
         ) { ModuleCompilationContext.create(store.workspace, module, variant) }
     }
 
+    /**
+     * The API-level check's inputs for the module [id] as the model holds it NOW (so editing minSdk in Module
+     * Settings applies on the next analysis pass), or null when the table is not bundled.
+     *
+     * An Android module gets the minSdk check. Its table is the bundled one unless the module compiles against
+     * a newer installed platform, whose own `api-versions.xml` then answers. A plain JVM module gets the JDK
+     * table against its Java language level, reported as an error where the build enforces it (`--release` on
+     * a desktop JDK) and as a warning on the device, whose build compiles against `android.jar`'s `java.*`.
+     */
+    private fun apiLevelContext(id: ModuleId): ApiLevelContext? {
+        val module = store.workspace.projects.firstNotNullOfOrNull { p -> p.modules.firstOrNull { it.id == id } }
+            ?: return null
+        val facet = module.facets.get(AndroidFacet.KEY)
+        if (facet == null) {
+            if (module.type.platform == PlatformKind.ANDROID) return null
+            val jdk = JdkApiLevels.bundled() ?: return null
+            return ApiLevelContext.jdk(module.languageLevel.javaVersion, jdk, enforced = JdtBatchCompiler.releaseAvailable)
+        }
+        val platformJar = SdkResolution.sdkFor(store.workspace, module)?.bootClasspath?.firstOrNull()?.let { Paths.get(it.path) }
+        val levels = AndroidApiDatabase.forPlatform(platformJar) ?: return null
+        return ApiLevelContext.android(facet.minSdk, levels)
+    }
+
+    /**
+     * The Android platform's bundled parameter names and javadoc, for an Android module: what its editors
+     * show for framework and `java.*` APIs until real platform sources are attached. Empty elsewhere.
+     */
+    private fun platformDocs(module: Module): SourceDocProvider {
+        val android = module.facets.get(AndroidFacet.KEY) != null || module.type.platform == PlatformKind.ANDROID
+        if (!android) return SourceDocProvider.NONE
+        return AndroidPlatformDocs.bundled((sharedCachesRoot ?: store.rootPath).resolve("caches"))
+            ?: SourceDocProvider.NONE
+    }
+
     /** Construct the analyzer for [module] in [language]. Invoked once by the module-scoped analyzer
      *  service factory; the module container caches and disposes the result. */
     private fun buildAnalyzer(module: Module, language: LanguageId): SourceAnalyzer =
@@ -1906,10 +2081,16 @@ class IdeServices private constructor(
                     // `new <caret>` subtype completion: a supertype FQN → its concrete implementations, via a
                     // bounded BFS over the subtype index (same index find-implementations uses).
                     it.subtypeIndexQuery = ::javaSubtypesOf
+                    // The minSdk check and the "Added in API N" doc line, from the module's current facet.
+                    it.apiContext = { apiLevelContext(module.id) }
                     sdkManager.jdkSourceOverride()?.let { zip -> it.addSourceJars(listOf(zip)) }
                     module.facets.get(AndroidFacet.KEY)?.let { facet ->
                         sdkManager.androidSourcesDir(facet.compileSdk)?.let { dir -> it.addSourceDirs(listOf(dir)) }
                     }
+                    // Docs + real parameter names for compiled classpath symbols: attached sources (index, then
+                    // a live parse of this analyzer's roots), then the bundled Android docs.
+                    it.sourceDocProvider = IndexBackedSourceDocs(indexService, AnalyzerSourceDocs(it))
+                        .orElse(platformDocs(module))
                 }
 
                 is JdtSourceAnalyzer -> {
@@ -1948,6 +2129,7 @@ class IdeServices private constructor(
                     // analyzer also self-detects androidx on its own classpath, so this need not be exhaustive.)
                     it.isAndroidModule =
                         module.facets.get(AndroidFacet.KEY) != null || module.type.platform == PlatformKind.ANDROID
+                    it.apiContext = { apiLevelContext(module.id) }
                     it.extensionCacheDir = store.rootPath.resolve(".platform/caches/kotlin-ext")
                     // Lowered Compose-preview declarations persist across launches, so the first preview after
                     // a reopen decodes instead of re-running overload resolution over the reachable closure.
@@ -1965,7 +2147,7 @@ class IdeServices private constructor(
                     // named `p0` in Kotlin (the index covers LIBRARY_SOURCE only, never project sources).
                     val liveFallback = (analyzerFor(module) as? JvmIndexScopeProvider)
                         ?.let { a -> AnalyzerSourceDocs(a) } ?: SourceDocProvider.NONE
-                    it.sourceDocProvider = IndexBackedSourceDocs(indexService, liveFallback)
+                    it.sourceDocProvider = IndexBackedSourceDocs(indexService, liveFallback).orElse(platformDocs(module))
                     // Live editor buffers (path → text) so cross-file completion/resolution/diagnostics see
                     // unsaved edits in OTHER open .kt files before they're saved + reindexed.
                     it.liveOverlayProvider = ::kotlinOverlay
@@ -4601,6 +4783,9 @@ class IdeServices private constructor(
          * migration-safe: it also augments an OLDER workspace whose sdks.json holds only the Android SDK
          * (adds the missing core-Java SDK on reopen). [baseDir] roots the filtered-jar cache on-device.
          */
+        /** The SDK-table names [syncPlatformSdks] owns: `android-34`, one per installed platform. */
+        private val PLATFORM_SDK_NAME = Regex("""android-\d+""")
+
         private fun ensureSdks(store: ProjectModelStore, primary: SdkData?, baseDir: Path) {
             val current = store.data.sdks.toMutableList()
             if (current.isEmpty()) primary?.let { current.add(it) }

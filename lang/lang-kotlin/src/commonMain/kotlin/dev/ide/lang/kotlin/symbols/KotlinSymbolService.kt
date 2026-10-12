@@ -32,7 +32,10 @@ import dev.ide.lang.kotlin.resolve.KotlinResolver
 import dev.ide.lang.kotlin.resolve.approximateEscapingLocalType
 import dev.ide.lang.kotlin.resolve.delegatedValueType
 import dev.ide.lang.kotlin.resolve.inferType
+import dev.ide.lang.resolve.ApiLevel
 import dev.ide.lang.resolve.Modifier
+import dev.ide.lang.resolve.ApiLevelContext
+import dev.ide.lang.resolve.ApiPlatform
 import dev.ide.lang.resolve.SourceDocProvider
 import dev.ide.lang.resolve.Symbol
 import dev.ide.lang.resolve.SymbolKind
@@ -97,6 +100,9 @@ class KotlinSymbolService(
      *  answers instead. A same-project Java source class is treated as VOLATILE (never pinned in the classpath
      *  memos) so both live-buffer and post-save edits show at once. */
     private val javaSourceMemberProvider: (String) -> List<MemberValue>? = { null },
+    /** Optional: the module's API-level context (the Android platform's table, or the JDK's for a JVM module),
+     *  for the "Added in API N" / "Since Java N" line of a platform symbol's docs. Null when there is none. */
+    private val apiContext: () -> ApiLevelContext? = { null },
 ) : KotlinTypeContext, AutoCloseable {
 
     // Kotlin's stdlib is an IMPLICIT dependency of every Kotlin file (like java.lang for Java). Always
@@ -2182,6 +2188,62 @@ class KotlinSymbolService(
         return if (names === s.paramNames && doc == s.documentation()) s
         else s.withSourceDoc(names = names, sig = sig, docText = doc)
     }
+
+    /**
+     * The platform API level of a BINARY symbol: a method or constructor by its declaring class, a Java
+     * accessor property by its getter, a class by its name. Null for project code, for a module with no
+     * table, and for an API the table does not list.
+     */
+    fun apiLevelOf(s: KotlinSymbol): ApiLevel? {
+        if (s.origin.fromSource || s.isExtension) return null
+        val levels = apiContext()?.levels ?: return null
+        val owner = s.declaringClassFqn
+        return when (s.kind) {
+            SymbolKind.METHOD -> owner?.let { levels.methodLevel(it, s.name, null, s.paramTypes.size) }
+            SymbolKind.CONSTRUCTOR -> owner?.let { levels.methodLevel(it, "<init>", null, s.paramTypes.size) ?: levels.classLevel(it) }
+            SymbolKind.FIELD -> owner?.let {
+                val getter = if (s.name.length > 2 && s.name.startsWith("is") && s.name[2].isUpperCase()) s.name
+                else "get" + s.name.replaceFirstChar { c -> c.uppercaseChar() }
+                levels.methodLevel(it, getter, null, 0)
+            }
+            SymbolKind.CLASS, SymbolKind.INTERFACE, SymbolKind.ENUM, SymbolKind.ANNOTATION_TYPE ->
+                ((s.type as? KotlinType)?.qualifiedName ?: owner)?.let(levels::classLevel)
+            else -> null
+        }
+    }
+
+    /** [doc] with [s]'s API-level line in front ([ApiLevel.prependTo]), or [doc] itself when there is none. */
+    fun withApiLevel(s: KotlinSymbol, doc: String?): String? {
+        val level = apiLevelOf(s) ?: return doc
+        return level.prependTo(doc, apiContext()?.platform ?: ApiPlatform.ANDROID).ifEmpty { doc }
+    }
+
+    /**
+     * A BINARY symbol's doc comment from the attached sources, for the quick-doc popup: the raw comment (markup
+     * kept) when the provider has one, else its cleaned text. Null for project code and when no source is
+     * attached. Types are answered here and nowhere else, since [enrich] only reaches members, so a library
+     * class like `ComponentActivity` used to hover with an empty doc even with its sources downloaded.
+     */
+    fun sourceDocOf(s: KotlinSymbol): SourceDocText? {
+        if (sourceDoc === SourceDocProvider.NONE || s.origin.fromSource) return null
+        val owner = s.declaringClassFqn
+        return when (s.kind) {
+            SymbolKind.METHOD, SymbolKind.CONSTRUCTOR -> owner?.let { o ->
+                val arity = s.paramTypes.size
+                sourceDoc.methodRaw(o, s.name, arity)?.let { SourceDocText(it, raw = true) }
+                    ?: sourceDoc.method(o, s.name, arity)?.doc?.let { SourceDocText(it, raw = false) }
+            }
+            SymbolKind.CLASS, SymbolKind.INTERFACE, SymbolKind.ENUM, SymbolKind.ANNOTATION_TYPE, SymbolKind.RECORD ->
+                ((s.type as? KotlinType)?.qualifiedName ?: owner)?.let { fqn ->
+                    sourceDoc.classDocRaw(fqn)?.let { SourceDocText(it, raw = true) }
+                        ?: sourceDoc.classDoc(fqn)?.let { SourceDocText(it, raw = false) }
+                }
+            else -> null
+        }?.takeIf { it.text.isNotBlank() }
+    }
+
+    /** A doc comment recovered from sources; [raw] when it still carries its javadoc markup. */
+    class SourceDocText(val text: String, val raw: Boolean)
 
     /** `p0`/`p1`/… — the placeholder names Java bytecode surfaces when real ones were stripped. */
     private fun isSyntheticParamName(n: String): Boolean =

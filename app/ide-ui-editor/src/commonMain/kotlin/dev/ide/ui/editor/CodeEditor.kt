@@ -1,5 +1,14 @@
 package dev.ide.ui.editor
 
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.geometry.Offset
+import dev.ide.ui.backend.UiDiagnostic
+import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -59,6 +68,7 @@ import dev.ide.ui.clipForClipboard
 import dev.ide.ui.editor.core.EditorDocument
 import dev.ide.ui.editor.core.EditorSession
 import dev.ide.ui.editor.core.MEASURER_CACHE_ENTRIES
+import dev.ide.ui.ext.AppCommandHost
 import dev.ide.ui.ext.KeymapHost
 import dev.ide.ui.editor.core.RangeEdit
 import dev.ide.ui.editor.core.isLarge
@@ -113,6 +123,8 @@ fun CodeEditor(
     formatEpoch: Int = 0,
     /** Bump from the host (the Optimize Imports menu action) to reorganize imports; 0 = no request. */
     optimizeImportsEpoch: Int = 0,
+    /** Bump from the host (an app shortcut that returns to the editor) to take keyboard focus; 0 = no request. */
+    focusEpoch: Int = 0,
     /** Editor text zoom; 1.0 = the theme's code size. Driven by pinch + Ctrl-+/-/0; hoisted so it persists across tabs. */
     fontScale: Float = 1f,
     onFontScaleChange: (Float) -> Unit = {},
@@ -175,6 +187,7 @@ fun CodeEditor(
             findEpoch,
             formatEpoch,
             optimizeImportsEpoch,
+            focusEpoch,
             fontScale,
             onFontScaleChange,
             onPreview,
@@ -206,6 +219,7 @@ private fun CodeEditorContent(
     findEpoch: Int = 0,
     formatEpoch: Int = 0,
     optimizeImportsEpoch: Int = 0,
+    focusEpoch: Int = 0,
     fontScale: Float = 1f,
     onFontScaleChange: (Float) -> Unit = {},
     onPreview: (variantId: String) -> Unit = {},
@@ -314,6 +328,12 @@ private fun CodeEditorContent(
     var renameError by remember(path) { mutableStateOf<String?>(null) }
     // The source-navigation dropdown / target picker (Go to Declaration / Implementation / Type / Super).
     var navMenu by remember(path) { mutableStateOf<NavMenuState?>(null) }
+    // Mouse: the hover popups, the Ctrl/⌘ link and the right-click menu (see EditorMouseSupport).
+    val hover = remember(path) { EditorHoverState() }
+    var contextMenuAt by remember(path) { mutableStateOf<Offset?>(null) }
+    // The problem popup opened by resting the pointer on a problem, by the sheet group it opened (a click that
+    // opens another group replaces it, and must not be closed when the hover hides).
+    var hoverSheetGroup by remember(path) { mutableStateOf<List<UiDiagnostic>?>(null) }
 
     /** Run one source go-to for [kind] (a keyboard shortcut): exactly one target navigates immediately; 0 or
      *  many open the dropdown (a "nothing found" note, or a target picker). */
@@ -351,6 +371,48 @@ private fun CodeEditorContent(
         val text = editorSession.doc.text
         scope.launch {
             quickDoc = runCatching { backend.editor.quickDocAt(path, text, caret) }.getOrNull()
+        }
+    }
+
+    // Resting the mouse on code: after HOVER_DELAY_MS a problem under the pointer opens its popup, and
+    // otherwise the symbol's documentation shows beside it. Moving within the shown span keeps it; leaving
+    // hides it after a short grace, unless the pointer went into the popup.
+    val obscuredNow by rememberUpdatedState(obscured)
+    LaunchedEffect(hover) {
+        hover.moves.collectLatest { p ->
+            val shown = hover.info
+            if (shown != null && p != null && p.offset in shown.start until shown.end) return@collectLatest
+            if (shown != null) {
+                delay(HOVER_HIDE_GRACE_MS)
+                if (hover.popupHovered) return@collectLatest
+                hover.info = null
+            }
+            if (p == null || p.offset < 0 || obscuredNow) return@collectLatest
+            delay(HOVER_DELAY_MS)
+            val problem = editorSession.diagnostics
+                .filter { p.offset >= it.startOffset && p.offset < it.endOffset }
+                .minByOrNull { it.severity.ordinal }
+            if (problem != null) {
+                if (acts.sheetGroup.isNotEmpty()) return@collectLatest // a clicked problem popup is already open
+                acts.openSheet(problem)
+                hoverSheetGroup = acts.sheetGroup
+                hover.info = HoverInfo.Problem(problem, problem.startOffset, maxOf(problem.endOffset, problem.startOffset + 1))
+                return@collectLatest
+            }
+            val word = identifierRangeAt(editorSession.doc.chars, p.offset) ?: return@collectLatest
+            val doc = runCatching { backend.editor.quickDocAt(path, editorSession.doc.text, p.offset) }.getOrNull()
+                ?: return@collectLatest
+            hover.info = HoverInfo.Doc(doc, word.first, word.last + 1)
+        }
+    }
+    // A hidden hover takes the problem popup it opened with it (not one a click opened since).
+    LaunchedEffect(hover) {
+        snapshotFlow { hover.info }.collect { info ->
+            val group = hoverSheetGroup
+            if (info == null && group != null) {
+                hoverSheetGroup = null
+                if (acts.sheetGroup === group) acts.closeSheet()
+            }
         }
     }
 
@@ -631,6 +693,10 @@ private fun CodeEditorContent(
     LaunchedEffect(findEpoch) { if (findEpoch > 0) find.openBar(replace = false) }
     LaunchedEffect(formatEpoch) { if (formatEpoch > 0) runFormat(0, 0) }
     LaunchedEffect(optimizeImportsEpoch) { if (optimizeImportsEpoch > 0) runOptimizeImports() }
+    // Only a request made while this editor is showing: one bumped earlier must not make every editor that
+    // opens afterwards take focus (from the Search panel that opened it, say).
+    val mountFocusEpoch = remember { focusEpoch }
+    LaunchedEffect(focusEpoch) { if (focusEpoch > mountFocusEpoch) runCatching { focus.requestFocus() } }
 
     // recompute find matches when the query/options change or the buffer edits (debounced).
     LaunchedEffect(find.open, find.query, find.options, editorSession.textRevision) {
@@ -831,8 +897,22 @@ private fun CodeEditorContent(
      * which command is now data (`EDITOR_KEY_DEFAULTS`, overridable by the user and by a plugin), and the
      * variants that used to be branches on a modifier are separate ids.
      */
+    /** Open the editor's context menu at [pos] (pane coordinates): a right-click, or the Menu key at the caret. */
+    fun openContextMenu(pos: Offset) {
+        completion.dismiss()
+        hover.dismiss()
+        contextMenuAt = pos
+        scope.launch { acts.resolveContextMenu() }
+    }
+
     fun runEditorCommand(id: String): Boolean {
         when (id) {
+            // The keyboard's way to the context menu: under the caret, as IntelliJ places it.
+            EditorCommands.SHOW_CONTEXT_MENU -> {
+                val (_, x, top) = geometry.caretGeometry(editorSession.selection.end)
+                openContextMenu(Offset(x, top + metrics.lineHeight))
+            }
+
             // Reformat: the selection if any, else the whole file.
             EditorCommands.REFORMAT -> {
                 val sel = editorSession.selection
@@ -908,6 +988,16 @@ private fun CodeEditorContent(
     // Editor commands, handled on the Preview pass so they win over the default key path + completion keys.
     fun onPreviewKey(ev: KeyEvent): Boolean {
         if (ev.type != KeyEventType.KeyDown) return false
+        // Any key hides a hover popup, as in IntelliJ; Escape is spent doing it.
+        if (hover.info != null) {
+            hover.dismiss()
+            if (ev.key == Key.Escape) return true
+        }
+        // Escape closes the pointer's problem popup, like a click outside it.
+        if (ev.key == Key.Escape && acts.sheetGroup.isNotEmpty()) {
+            acts.closeSheet()
+            return true
+        }
         // Escape dismisses an open quick-doc popup before anything else can claim it, as it did when this was
         // a chain of conditions: the popup is modal-ish, and its Escape is not a command.
         if (quickDoc != null && ev.key == Key.Escape) {
@@ -918,7 +1008,11 @@ private fun CodeEditorContent(
         // below (the code-action menu, a live template, the completion popup), which own their keys while they
         // are open and are not rebindable for that reason.
         when (val outcome = resolveEditorCommand(ev)) {
-            is KeymapHost.Outcome.Command -> if (runEditorCommand(outcome.actionId)) return true
+            // A Global binding resolves here too (the editor is inside the IDE). The editor does not run those
+            // itself; it hands them to the screen's app-command runner, so the key is resolved exactly once,
+            // which the keymap's chord state needs.
+            is KeymapHost.Outcome.Command ->
+                if (runEditorCommand(outcome.actionId) || AppCommandHost.run(outcome.actionId)) return true
             // The first half of a chord: consume it so it does not also reach the buffer.
             is KeymapHost.Outcome.Pending -> return true
             KeymapHost.Outcome.None -> Unit
@@ -994,6 +1088,7 @@ private fun CodeEditorContent(
         }
     }
 
+    var pointerOverGutter by remember { mutableStateOf(false) }
     Box(
         modifier
             .background(colors.editorBg)
@@ -1031,6 +1126,31 @@ private fun CodeEditorContent(
                     onDismissQuickDoc = { quickDoc = null },
                     onPreviewKey = ::onPreviewKey,
                     onKey = ::handleKey,
+                    hover = hover,
+                    onContextMenu = ::openContextMenu,
+                    onLinkClick = { offset ->
+                        editorSession.setCaret(offset)
+                        runNav(UiNavKind.DECLARATION)
+                    },
+                )
+                // A text (I-beam) cursor over the code, and the normal arrow over the gutter, as in IntelliJ. Reads
+                // the hover position on the Initial pass without consuming it, so the editor's input is untouched.
+                .pointerInput(gutterWidthPx) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Move || event.type == PointerEventType.Enter) {
+                                pointerOverGutter = event.changes.first().position.x < gutterWidthPx
+                            }
+                        }
+                    }
+                }
+                .pointerHoverIcon(
+                    when {
+                        hover.link != null -> PointerIcon.Hand // Ctrl/⌘ held over an identifier: a link
+                        pointerOverGutter -> PointerIcon.Default
+                        else -> PointerIcon.Text
+                    },
                 )
                 .drawBehind {
                     // Interpolate the drawn selection span for an in-flight expand animation (reads snapshot
@@ -1242,7 +1362,7 @@ private fun CodeEditorContent(
         }
 
         // quick-documentation popup — a floating card; dismissed by Esc, a tap, or a navigation/edit key.
-        quickDoc?.let { QuickDocPopup(it, Modifier.align(Alignment.TopCenter)) }
+        quickDoc?.let { QuickDocPopup(it, Modifier.align(Alignment.TopCenter).padding(top = 56.dp)) }
 
         // rename prompt — a small centered card over the editor
         rename?.let { r ->
@@ -1263,14 +1383,67 @@ private fun CodeEditorContent(
 
         // diagnostic sheet: every diagnostic in the tapped area, plus the selected one's full (scrollable)
         // message and its fixes, docked at the pane bottom
-        if (engaged && acts.sheetGroup.isNotEmpty()) {
-            DiagnosticSheet(
-                diagnostics = acts.sheetGroup,
-                selected = acts.sheetSelected,
-                actions = acts.sheetActions,
-                onSelect = { acts.selectSheet(it) },
-                onPick = { acts.applySheetFix(it) },
-                onDismiss = { acts.closeSheet() },
+        // With a mouse it is a popup anchored at the problem; on touch the bottom sheet, sized for a thumb.
+        val fromHover = hoverSheetGroup != null && hoverSheetGroup === acts.sheetGroup
+        if ((engaged || fromHover) && acts.sheetGroup.isNotEmpty()) {
+            if (!isMobilePlatform || !interaction.lastInputWasTouch) {
+                val anchor = (acts.sheetGroup.getOrNull(acts.sheetSelected) ?: acts.sheetGroup.first()).startOffset
+                DiagnosticPopup(
+                    diagnostics = acts.sheetGroup,
+                    selected = acts.sheetSelected,
+                    actions = acts.sheetActions,
+                    onSelect = { acts.selectSheet(it) },
+                    onPick = { acts.applySheetFix(it) },
+                    onDismiss = { acts.closeSheet() },
+                    position = rememberLinePosition(
+                        anchor.coerceIn(0, editorSession.doc.length), { geometry.caretGeometry(it) },
+                        metrics.lineHeight, gutterWidthPx,
+                    ),
+                    modifier = if (fromHover) Modifier.trackPopupHover(hover) else Modifier,
+                )
+            } else {
+                DiagnosticSheet(
+                    diagnostics = acts.sheetGroup,
+                    selected = acts.sheetSelected,
+                    actions = acts.sheetActions,
+                    onSelect = { acts.selectSheet(it) },
+                    onPick = { acts.applySheetFix(it) },
+                    onDismiss = { acts.closeSheet() },
+                )
+            }
+        }
+
+        // The hovered symbol's documentation, beside it.
+        (hover.info as? HoverInfo.Doc)?.let { info ->
+            if (!obscured) HoverDocPopup(info, hover, { geometry.caretGeometry(it) }, metrics.lineHeight, gutterWidthPx)
+        }
+        // The Ctrl/⌘ link under the pointer.
+        hover.link?.let { LinkUnderline(it, { off -> geometry.caretGeometry(off) }, metrics.lineHeight) }
+        // The right-click menu, at the pointer.
+        contextMenuAt?.let { at ->
+            EditorContextMenu(
+                at = at,
+                hasSelection = !editorSession.selection.collapsed,
+                readOnly = readOnly,
+                pluginMenu = acts.editorMenu,
+                // Resolved again on pick: moving the caret to the click re-runs the editor's own availability
+                // pass, which can clear what the right-click resolved.
+                onShowActions = {
+                    scope.launch {
+                        acts.resolveContextMenu()
+                        if (acts.available.isNotEmpty()) acts.openMenu()
+                    }
+                },
+                onCommand = { runEditorCommand(it) },
+                onCut = { editorSession.cutSelection()?.let { clipboard.setText(AnnotatedString(clipForClipboard(it))) } },
+                onCopy = { editorSession.selectedText()?.let { clipboard.setText(AnnotatedString(clipForClipboard(it))) } },
+                onPaste = { clipboard.getText()?.text?.let { if (it.isNotEmpty()) editorSession.commitText(it) } },
+                onSelectAll = { editorSession.selectAll() },
+                onPluginAction = { acts.invokeMenuAction(it.id) },
+                onDismiss = {
+                    contextMenuAt = null
+                    focus.requestFocus()
+                },
             )
         }
 
@@ -1423,7 +1596,6 @@ private fun SignatureHelpLayer(
         // In the pane, not a `Popup` (see [aboveLineInPane]): it stays up for as long as the caret is in a call.
         SignatureHelpPopup(
             sigHelp,
-            mobile = isMobilePlatform,
             modifier = Modifier.aboveLineInPane(
                 anchor = { caretGeometry(caretOffset).let { (_, x, top) -> x to top } },
                 lineHeightPx = lineHeightPx,

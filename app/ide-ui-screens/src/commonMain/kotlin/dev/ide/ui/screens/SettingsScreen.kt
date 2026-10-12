@@ -1,5 +1,7 @@
 package dev.ide.ui.screens
 
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import dev.ide.ui.itemsKeyed
 import dev.ide.ui.theme.Ide
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +80,13 @@ import dev.ide.ui.generated.resources.set_sev_hint
 import dev.ide.ui.generated.resources.set_sev_info
 import dev.ide.ui.generated.resources.set_sev_warning
 import dev.ide.ui.generated.resources.support_show_ads
+import dev.ide.ui.generated.resources.cancel
+import dev.ide.ui.generated.resources.ads_off_fullscreen_only
+import dev.ide.ui.generated.resources.ads_off_all
+import dev.ide.ui.generated.resources.ads_off_body
+import dev.ide.ui.generated.resources.ads_off_title
+import dev.ide.ui.generated.resources.support_show_interstitials_desc
+import dev.ide.ui.generated.resources.support_show_interstitials
 import dev.ide.ui.generated.resources.support_show_ads_desc
 import dev.ide.ui.generated.resources.support_ad_privacy
 import dev.ide.ui.generated.resources.support_ad_privacy_desc
@@ -102,6 +111,9 @@ private const val ACTION_BUILD_NOTIFICATIONS = "buildNotifications"
  *  backend doesn't know about. [PRIVACY_PAGE_ID] mirrors `BuiltInSettingsPages.PRIVACY`. */
 internal const val PRIVACY_PAGE_ID = "privacy"
 internal const val SHOW_ADS_KEY = "showAds"
+
+/** The full-screen (interstitial) ads toggle, injected under [SHOW_ADS_KEY] and routed to the controller too. */
+internal const val SHOW_INTERSTITIALS_KEY = "showFullScreenAds"
 /** The "Manage ad consent" action injected onto the Privacy page when the host's UMP flow requires a privacy-
  *  options entry point (EEA/UK). Routed to [dev.ide.ui.ads.AdController.showPrivacyOptions], not the store. */
 private const val AD_PRIVACY_KEY = "adPrivacyOptions"
@@ -129,6 +141,9 @@ fun SettingsScreen(
     title: String = stringResource(Res.string.settings_title),
     codeFont: FontFamily = FontFamily.Monospace,
     fileActions: FileActions = FileActions.None,
+    /** Show only this page, titled with its name: the Settings hub lists the pages itself, so a page opened
+     *  from it must not repeat that list. Null shows every page with its own category navigation. */
+    pageId: String? = null,
 ) {
     // The ads on/off control (moved off the picker's support card). Shown only where an ad network exists
     // (AdController.manageable, i.e. Android, never desktop) and prepended to the Privacy & Data page; its
@@ -136,6 +151,8 @@ fun SettingsScreen(
     val ads = LocalAds.current
     val showAdsTitle = stringResource(Res.string.support_show_ads)
     val showAdsDesc = stringResource(Res.string.support_show_ads_desc)
+    val showInterstitialsTitle = stringResource(Res.string.support_show_interstitials)
+    val showInterstitialsDesc = stringResource(Res.string.support_show_interstitials_desc)
     val adPrivacyTitle = stringResource(Res.string.support_ad_privacy)
     val adPrivacyDesc = stringResource(Res.string.support_ad_privacy_desc)
     val adPrivacyButton = stringResource(Res.string.support_ad_privacy_button)
@@ -156,6 +173,7 @@ fun SettingsScreen(
             else {
                 val injected = buildList {
                     add(UiSettingControl.Toggle(SHOW_ADS_KEY, showAdsTitle, showAdsDesc, ads.adsEnabled))
+                    add(UiSettingControl.Toggle(SHOW_INTERSTITIALS_KEY, showInterstitialsTitle, showInterstitialsDesc, ads.interstitialsEnabled))
                     // Only shown where the host's consent flow requires a privacy-options entry point (EEA/UK).
                     if (privacyOptionsRequired) {
                         add(UiSettingControl.Action(AD_PRIVACY_KEY, adPrivacyTitle, adPrivacyDesc, buttonLabel = adPrivacyButton))
@@ -191,9 +209,12 @@ fun SettingsScreen(
         }
     }
 
-    ExpressiveScaffold(title = title, onBack = onBack) { innerPadding ->
+    val single = pageId?.let { id -> pages.firstOrNull { it.id == id } }
+    ExpressiveScaffold(title = single?.let { localizedPageTitle(it) } ?: title, onBack = onBack) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
-            if (pages.isEmpty()) {
+            if (single != null) {
+                PageContent(backend, single, state.values, codeFont, onSet, onAction, state::onStructuralChange)
+            } else if (pages.isEmpty() || pageId != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(stringResource(Res.string.settings_no_settings_available), color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodyLarge)
                 }
@@ -213,6 +234,7 @@ fun SettingsScreen(
                 SettingsToast.NotificationsEnabled -> stringResource(Res.string.build_notif_enabled)
             }
             ToastBar(toastText, Modifier.align(Alignment.BottomCenter))
+            if (state.adsOffPrompt) AdsOffPrompt(state)
         }
     }
 }
@@ -239,7 +261,7 @@ private fun WideLayout(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             pages.forEach { page ->
-                SettingsCategoryItem(localizedPageTitle(page), iconFor(page.iconId), page.id == selectedId, showChevron = false) { selectedId = page.id }
+                SettingsCategoryItem(localizedPageTitle(page), settingsPageIcon(page.iconId), page.id == selectedId, showChevron = false) { selectedId = page.id }
             }
         }
         Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
@@ -268,7 +290,7 @@ private fun NarrowLayout(
     if (open == null) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             itemsKeyed(pages, key = { it.id }) { page ->
-                SettingsCategoryItem(localizedPageTitle(page), iconFor(page.iconId), selected = false, showChevron = true) { openId = page.id }
+                SettingsCategoryItem(localizedPageTitle(page), settingsPageIcon(page.iconId), selected = false, showChevron = true) { openId = page.id }
             }
         }
     } else {
@@ -480,7 +502,10 @@ private fun encodeValue(c: UiSettingControl): String? = when (c) {
 }
 
 /** Map a page's icon id (resolved generically, so plugin icons work too) to a glyph; gear is the fallback. */
-private fun iconFor(iconId: String): ImageVector = when (iconId) {
+internal fun settingsPageIcon(iconId: String): ImageVector = when (iconId) {
+    "moon" -> CaIcons.moon
+    "keyboard" -> CaIcons.command
+    "git" -> CaIcons.gitBranch
     "eye" -> CaIcons.eye
     "code" -> CaIcons.code
     "sparkle" -> CaIcons.sparkle
@@ -494,4 +519,27 @@ private fun iconFor(iconId: String): ImageVector = when (iconId) {
     "image" -> CaIcons.image
     "box" -> CaIcons.box
     else -> CaIcons.gear
+}
+
+/**
+ * Asked when "Show ads" is turned off while full-screen ads are still on: the user can turn off only the
+ * full-screen ads and keep the smaller ones in lists and panels, or turn every ad off. Neither choice is
+ * framed as support for the project, and dismissing it changes nothing.
+ */
+@Composable
+private fun AdsOffPrompt(state: SettingsScreenState) {
+    AlertDialog(
+        onDismissRequest = state::dismissAdsOffPrompt,
+        title = { Text(stringResource(Res.string.ads_off_title)) },
+        text = { Text(stringResource(Res.string.ads_off_body)) },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = state::turnOffAllAds) { Text(stringResource(Res.string.ads_off_all)) }
+                TextButton(onClick = state::turnOffFullScreenAdsOnly) { Text(stringResource(Res.string.ads_off_fullscreen_only)) }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = state::dismissAdsOffPrompt) { Text(stringResource(Res.string.cancel)) }
+        },
+    )
 }

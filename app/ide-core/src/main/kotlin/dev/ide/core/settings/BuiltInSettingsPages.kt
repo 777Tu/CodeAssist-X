@@ -26,6 +26,13 @@ object BuiltInSettingsPages {
     /** Project-scoped Compose Preview page — the interpreter sandbox toggles (see `PreviewSandboxPolicy`). */
     const val PREVIEW = "preview"
 
+    /** Toggle key on the [APPEARANCE] page: resume into the last open project on a cold launch (default on).
+     *  Read once at startup by the UI app state through [REOPEN_LAST_PROJECT_KEY]. */
+    const val REOPEN_LAST_PROJECT = "reopenLastProject"
+
+    /** Full preference key of [REOPEN_LAST_PROJECT]. */
+    const val REOPEN_LAST_PROJECT_KEY = "settings.$APPEARANCE.$REOPEN_LAST_PROJECT"
+
     /** Choice key on the [BUILD_RUNTIME] page: the "Low memory mode" override of the detected device tier
      *  (`auto` / `on` / `off`, see [dev.ide.platform.DeviceMemory]). Applied when a project opens. */
     const val LOW_MEMORY_MODE = "lowMemoryMode"
@@ -143,7 +150,7 @@ object BuiltInSettingsPages {
         appearance, editor, completion, analysis, preview, build, buildRuntime, privacy(analyticsAvailable),
     )
 
-    private val appearance = page(APPEARANCE, "Appearance", "eye", 0) {
+    private val appearance = page(APPEARANCE, "Appearance", "moon", 0) {
         listOf(
             SettingControl.Choice(
                 "themeMode", "Theme", "Use a fixed theme or follow the operating system",
@@ -169,6 +176,21 @@ object BuiltInSettingsPages {
             SettingControl.Color(
                 "accentColor", "Custom color", "Pick any color; the full Material You theme regenerates from it",
                 default = d.accentColor,
+            ),
+            SettingControl.Toggle(
+                "toolWindowActions", "Always show tool window actions",
+                "Keep the buttons in tool window headers visible. Off shows them only while the pointer is over a tool window or it is the one you're working in (mouse and trackpad only)",
+                default = d.alwaysShowToolWindowActions,
+            ),
+            SettingControl.Toggle(
+                "rightToolWindowBar", "Right tool window bar",
+                "Show the tool window icons along the right edge on wide screens. Off moves the AI chat's button into the top bar",
+                default = d.rightToolWindowBar,
+            ),
+            SettingControl.Toggle(
+                REOPEN_LAST_PROJECT, "Reopen last project on launch",
+                "Open the project you were working on when the app starts. Off starts on the project list instead",
+                default = true, group = "Startup",
             ),
         )
     }

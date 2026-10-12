@@ -601,6 +601,15 @@ class KotlinEditorFeatures(
         }
     }
 
+    /**
+     * The minSdk check's quick fixes for a diagnostic at [offset] requiring API [level]: `@RequiresApi(level)` on
+     * the enclosing declaration, and an `SDK_INT` guard around the statement.
+     */
+    fun newApiFixes(file: VirtualFile, offset: Int, level: Int): List<KotlinImportFix> {
+        val parsed = parsedFor(file.path) ?: return emptyList()
+        return KotlinApiLevelFixes.fixes(parsed.ktFile, offset, level, service.isKnownType("androidx.annotation.RequiresApi"))
+    }
+
     /** The innermost function enclosing [offset] (the suspend-override diagnostic anchors on its name). */
     private fun functionCovering(ktFile: KtFile, offset: Int): KtNamedFunction? {
         var n: KtElement? =
@@ -666,9 +675,20 @@ class KotlinEditorFeatures(
                 ?.takeIf { it.isNotEmpty() }
         val declPsi = (sym.declaration() as? KotlinDomNode)?.psi
         val rawKdoc = (declPsi as? KtDeclaration)?.docComment?.text?.takeIf { it.isNotBlank() }
-        val (doc, fmt) = if (rawKdoc != null) rawKdoc to DocFormat.KDOC
-        else sym.documentation() to DocFormat.PLAIN
-        return QuickDocInfo(sig, sym.name, sym.kind, container, doc, fmt)
+        // A library symbol has no PSI: its doc comes from the attached sources, with its markup. A Java
+        // library's Javadoc keeps its comment markers; a Kotlin library's KDoc comes from the index already
+        // undecorated.
+        val fromSources = if (rawKdoc == null) service.sourceDocOf(sym) else null
+        val (doc, fmt) = when {
+            rawKdoc != null -> rawKdoc to DocFormat.KDOC
+            fromSources != null -> fromSources.text to when {
+                !fromSources.raw -> DocFormat.PLAIN
+                fromSources.text.startsWith("/*") -> DocFormat.JAVADOC
+                else -> DocFormat.KDOC
+            }
+            else -> sym.documentation() to DocFormat.PLAIN
+        }
+        return QuickDocInfo(sig, sym.name, sym.kind, container, service.withApiLevel(sym, doc), fmt)
     }
 
     private fun declarationDoc(decl: KtNamedDeclaration): QuickDocInfo {

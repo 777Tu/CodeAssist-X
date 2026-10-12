@@ -149,12 +149,16 @@ We never collect your code, file or project names, which features you use, or an
     <string name="support_star">Star on GitHub</string>
     <string name="support_show_ads">Show ads</string>
     <string name="support_show_ads_desc">Show ads in the app. You can turn them off at any time.</string>
+    <string name="support_show_interstitials">Full-screen ads</string>
+    <string name="support_show_interstitials_desc">Occasional full-screen ads during long builds and after finished lessons.</string>
+    <string name="ads_off_title">Turn off ads?</string>
+    <string name="ads_off_body">You can turn off only the full-screen ads and keep the smaller ads in lists and panels.</string>
+    <string name="ads_off_all">All ads</string>
+    <string name="ads_off_fullscreen_only">Full-screen only</string>
     <string name="support_ad_privacy">Manage ad consent</string>
     <string name="support_ad_privacy_desc">Review or change your ad privacy choices.</string>
     <string name="support_ad_privacy_button">Manage</string>
     <string name="ad_label">Ad</string>
-    <string name="house_ad_support_title">Enjoying CodeAssist?</string>
-    <string name="house_ad_support_content">Support the project on GitHub Sponsors.</string>
     <string name="no_project_yet">No projects yet. Create one to get started.</string>
     <string name="your_projects">Your projects</string>
     <string name="project_kind_android">Android</string>
@@ -222,12 +226,6 @@ We never collect your code, file or project names, which features you use, or an
     <string name="creating">Creating…</string>
     <string name="create_project">Create Project</string>
     <string name="no_templates_available">No templates available.</string>
-    <string name="performance_analytics">Performance analytics</string>
-    <string name="sharing_performance_data">Sharing anonymous performance data</string>
-    <string name="not_sharing_performance_data">Not sharing performance data</string>
-    <string name="ftp_server">FTP server</string>
-    <string name="ftp_server_running">Running on 127.0.0.1:8021 · uploads go to assets/, writable by any app on this device</string>
-    <string name="ftp_server_stopped">Stopped · local asset upload server</string>
     <string name="compatibility">Compatibility</string>
     <plurals name="recovered_projects">
         <item quantity="one">Recovered %1$d project from an older version</item>
@@ -323,6 +321,9 @@ We never collect your code, file or project names, which features you use, or an
 
     <!-- buildc (BuildConsole/BuildDock) — uses StringResource fields on LogLevelFilter + statusTag -->
     <string name="buildc_build">Build</string>
+    <string name="buildc_notice_details">Details</string>
+    <string name="buildc_notice_less">Less</string>
+    <string name="buildc_notice_dismiss">Dismiss</string>
     <string name="buildc_collapse">Collapse</string>
     <string name="buildc_fullscreen">Full screen</string>
     <string name="buildc_exit_fullscreen">Exit full screen</string>
@@ -389,7 +390,6 @@ We never collect your code, file or project names, which features you use, or an
     <string name="completion_no_suggestions">No suggestions</string>
     <string name="completion_back_to_suggestions">Back to suggestions</string>
     <string name="completion_show_documentation">Show documentation</string>
-    <string name="sig_more">+%1$d more</string>
     <string name="sig_peek_tip">Tap to peek full definition</string>
     <string name="sig_peek_collapse">Tap to collapse</string>
     <string name="symbolbar_move_line_up">Move line up</string>
@@ -457,6 +457,8 @@ We never collect your code, file or project names, which features you use, or an
     <!-- edchrome (EditorChrome/SideRail) -->
     <string name="edchrome_files">Files</string>
     <string name="edchrome_more">More</string>
+    <string name="sidebar_hide_tool_window_bar">Hide tool window bar</string>
+    <string name="toolwindow_hide">Hide</string>
     <string name="edchrome_settings_and_tools">Settings &amp; Tools</string>
     <string name="edchrome_toggle_navigator">Toggle navigator</string>
     <string name="edchrome_find_replace">Find / replace</string>
@@ -549,6 +551,13 @@ We never collect your code, file or project names, which features you use, or an
     <string name="home_challenges">Daily</string>
     <!-- Home / Projects tab, Material 3 Expressive redesign -->
     <string name="home_your_projects">Your projects</string>
+    <string name="home_account">Account</string>
+    <string name="home_search_projects">Search projects</string>
+    <string name="home_no_match">No projects match “%1$s”.</string>
+    <string name="home_sort">Sort projects</string>
+    <string name="home_sort_recent">Recent</string>
+    <string name="home_sort_name">Name</string>
+    <string name="home_clear_search">Clear search</string>
     <string name="home_good_morning">Good morning</string>
     <string name="home_good_afternoon">Good afternoon</string>
     <string name="home_good_evening">Good evening</string>
@@ -658,7 +667,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="submit_category_unavailable">Categories could not be loaded. Every submission has to name one, so this needs a connection before you can send it.</string>
     <string name="submit_category_retry">Try again</string>
     <string name="submit_screenshots">Screenshots</string>
-    <string name="submit_screenshots_desc">Up to six images. This is what people look at before they install anything.</string>
+    <string name="submit_screenshots_desc">Up to six images, and at least one. This is what people look at before they install anything.</string>
     <string name="submit_add_screenshot">Add a screenshot</string>
     <string name="submit_send">Submit for review</string>
     <string name="submit_sending">Submitting…</string>
@@ -675,6 +684,8 @@ We never collect your code, file or project names, which features you use, or an
     <string name="submit_category_current">Staying in %1$s. The category list could not be loaded, so it cannot be changed right now.</string>
     <string name="submit_field_changelog">What changed</string>
     <string name="submit_required_version">Give the version as three numbers, like 1.2.0.</string>
+    <string name="submit_required_screenshot">Add at least one screenshot. It is what people look at before they install anything.</string>
+    <string name="submit_screenshots_unavailable">A new listing needs at least one screenshot, and images cannot be picked here. Send it from CodeAssist on Android or desktop.</string>
     <string name="submit_mine_title">Your submissions</string>
     <string name="submit_withdraw">Withdraw</string>
     <string name="submit_unavailable">Publishing isn't available in this build.</string>
@@ -1137,20 +1148,34 @@ We never collect your code, file or project names, which features you use, or an
 
     <!-- settings (SettingsScreen/SettingsControls/SettingsHubScreen) — provides settings_title reused by CodeAssistApp -->
     <string name="settings_title">Settings</string>
+    <string name="settings_group_editor">Appearance &amp; Editor</string>
+    <string name="settings_group_code">Code Intelligence</string>
+    <string name="settings_group_build">Build &amp; Run</string>
+    <string name="settings_group_extensions">Extensions</string>
+    <string name="settings_group_system">System</string>
+    <string name="settings_scope_project">This project</string>
+    <string name="settings_search_placeholder">Search settings</string>
+    <string name="settings_search_empty">No settings match “%1$s”</string>
+    <string name="settings_page_appearance_subtitle">Theme, accent color, tool windows &amp; startup</string>
+    <string name="settings_page_editor_subtitle">Font, wrapping, folding &amp; gestures</string>
+    <string name="settings_page_keymap_subtitle">Keyboard shortcuts</string>
+    <string name="settings_page_completion_subtitle">Suggestions, postfix &amp; timing</string>
+    <string name="settings_page_analysis_subtitle">On-the-fly analysis &amp; inspections</string>
+    <string name="settings_page_preview_subtitle">Preview sandbox &amp; process</string>
+    <string name="settings_page_build_subtitle">How dependency conflicts resolve</string>
+    <string name="settings_page_buildRuntime_subtitle">Memory, build process &amp; compilers</string>
+    <string name="settings_page_privacy_subtitle">Analytics, caches &amp; logs</string>
     <string name="settings_no_settings_available">No settings available.</string>
     <string name="settings_all_settings">All settings</string>
     <string name="settings_backup_ready">Backup ready</string>
     <string name="settings_inspections_for_language">%1$s inspections</string>
     <string name="settings_advanced">Advanced</string>
-    <string name="settings_hub_title">Settings &amp; Tools</string>
-    <string name="settings_settings">Settings</string>
-    <string name="settings_settings_subtitle">Appearance, editor, completion &amp; analysis</string>
     <string name="settings_code_style">Code Style</string>
-    <string name="settings_code_style_subtitle">Per-language formatting profiles &amp; live preview</string>
+    <string name="settings_code_style_subtitle">Formatting rules per language</string>
     <string name="settings_symbols">Symbols &amp; Macros</string>
-    <string name="settings_symbols_subtitle">Customize the keyboard symbol bar &amp; text macros</string>
+    <string name="settings_symbols_subtitle">Keyboard symbol bar &amp; text macros</string>
     <string name="settings_sdk_manager">SDK Manager</string>
-    <string name="settings_sdk_manager_subtitle">Download Android SDK &amp; JDK sources</string>
+    <string name="settings_sdk_manager_subtitle">Download Android platforms, SDK &amp; JDK sources</string>
     <string name="settings_keystore_manager">Keystore Manager</string>
     <string name="settings_keystore_manager_subtitle">Create, import &amp; manage signing keystores</string>
     <string name="settings_plugins">Plugins</string>
@@ -1250,6 +1275,12 @@ We never collect your code, file or project names, which features you use, or an
     <string name="sdk_download_installing">Installing…</string>
     <string name="sdk_installed">Installed</string>
     <string name="sdk_resume">Resume</string>
+    <string name="sdk_platforms">Android SDK platforms</string>
+    <string name="sdk_platforms_desc">The android.jar a module compiles and completes against, matched to its compileSdk. A module whose platform is not installed uses the default one.</string>
+    <string name="sdk_license_title">License agreement</string>
+    <string name="sdk_license_accept">Accept</string>
+    <string name="sdk_license_decline">Decline</string>
+    <string name="sdk_license_unavailable">The license text could not be loaded. Check your connection and try again.</string>
 
     <!-- dep (DependenciesScreen) — enums use @Composable label() extensions -->
     <string name="dep_declared">Declared</string>
@@ -1530,6 +1561,7 @@ We never collect your code, file or project names, which features you use, or an
 
     <string name="modcfg_platform_sdk">Platform SDK</string>
     <string name="modcfg_platform_sdk_auto">Auto (%1$s)</string>
+    <string name="modcfg_platform_missing">compileSdk %1$d is not installed, so this module compiles and completes against API %2$d. Install Android SDK Platform %1$d in the SDK Manager.</string>
 
     <!-- AI coding agent -->
 
@@ -1771,7 +1803,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="action_close_project">Close project</string>
     <string name="action_close_project_desc">Back to all projects</string>
     <string name="action_dependencies">Manage dependencies</string>
-    <string name="action_hub">Settings &amp; Tools</string>
+    <string name="action_hub">Settings</string>
     <string name="action_hub_desc">Settings · code style · SDK manager · keystore manager</string>
     <string name="action_icons">Icon Manager</string>
     <string name="action_icons_desc">Browse and import icons, and change the app icon</string>
@@ -1891,5 +1923,97 @@ We never collect your code, file or project names, which features you use, or an
     <string name="colors_overlay_note">Layered on top of whatever the symbol already is.</string>
     <string name="colors_reset_entry">Reset this entry</string>
     <string name="settings_colors">Editor Colors</string>
-    <string name="settings_colors_subtitle">Syntax colors, the editor surface, and the gutter</string>
+    <string name="settings_colors_subtitle">Syntax, surface &amp; gutter colors</string>
+    <string name="close_project_title">Close %1$s?</string>
+    <string name="close_project_body">You'll go back to your projects.</string>
+    <plurals name="close_project_unsaved">
+        <item quantity="one">%1$d file has unsaved changes. It will be saved first.</item>
+        <item quantity="other">%1$d files have unsaved changes. They will be saved first.</item>
+    </plurals>
+    <string name="close_project_building">A build is still running.</string>
+    <string name="close_project_save_and_close">Save &amp; close</string>
+    <string name="block_top_level">Top level</string>
+    <string name="block_functions">Functions</string>
+    <string name="block_variables">Variables</string>
+    <string name="block_add_function">Function</string>
+    <string name="block_add_variable">Variable</string>
+    <string name="block_add_event">Event</string>
+    <string name="block_no_members">Nothing declared here yet.</string>
+    <string name="block_expression_body">= value</string>
+    <string name="block_kind_init">initializer</string>
+    <string name="block_kind_constructor">constructor</string>
+    <string name="block_kind_accessor">accessor</string>
+    <string name="block_back_to_outline">All functions</string>
+    <string name="block_function_missing">This function is no longer in the file.</string>
+    <string name="block_outline_empty">This file declares no functions or variables yet.</string>
+    <string name="block_form_new_variable">New variable</string>
+    <string name="block_form_edit_variable">Edit variable</string>
+    <string name="block_form_new_function">New function</string>
+    <string name="block_form_edit_function">Edit function</string>
+    <string name="block_form_name">Name</string>
+    <string name="block_form_type">Type</string>
+    <string name="block_form_initial">Initial value</string>
+    <string name="block_form_modifiers">Modifiers</string>
+    <string name="block_form_annotations">Annotations</string>
+    <string name="block_form_return">Return type</string>
+    <string name="block_form_params">Parameters</string>
+    <string name="block_form_add_param">Add parameter</string>
+    <string name="block_form_param_name">name</string>
+    <string name="block_form_param_type">type</string>
+    <string name="block_form_mutable">Can change (var)</string>
+    <string name="block_form_place">Add to</string>
+    <string name="block_form_invalid_name">Enter a valid name.</string>
+    <string name="block_form_readonly">This declaration has accessors or a delegate. Edit it in the code view.</string>
+    <string name="block_event_title">Add event</string>
+    <string name="block_event_hint">Override a method this class inherits.</string>
+    <string name="block_event_loading">Finding methods to override…</string>
+    <string name="block_event_none">No inherited methods to override.</string>
+    <string name="block_cat_control">Control</string>
+    <string name="block_cat_logic">Logic</string>
+    <string name="block_cat_math">Math</string>
+    <string name="block_cat_text">Text</string>
+    <string name="block_cat_variables">Variables</string>
+    <string name="block_cat_calls">Calls</string>
+    <string name="block_cat_compose">Compose</string>
+    <string name="block_cat_search">Search</string>
+    <string name="block_palette_loading">Loading blocks…</string>
+    <string name="block_palette_hint">Long-press a block and drag it onto the page.</string>
+    <string name="block_palette_no_variables">No variables in scope yet.</string>
+    <string name="block_canvas_description">Block canvas</string>
+    <string name="block_zoom_in">Zoom in</string>
+    <string name="block_zoom_out">Zoom out</string>
+    <string name="block_zoom_reset">Actual size</string>
+    <string name="block_palette">Blocks</string>
+    <string name="block_pick_function">Choose a function to edit it as blocks.</string>
+    <string name="block_modifier_title">Modifier</string>
+    <string name="block_modifier_add">Add modifier</string>
+    <string name="block_modifier_preview">Approximate preview</string>
+    <string name="block_modifier_fills">fills its parent</string>
+    <string name="block_modifier_args">arguments</string>
+    <string name="block_modifier_group_size">Size</string>
+    <string name="block_modifier_group_spacing">Spacing</string>
+    <string name="block_modifier_group_drawing">Drawing</string>
+    <string name="block_modifier_group_behaviour">Behaviour</string>
+    <string name="block_move_up">Move up</string>
+    <string name="block_move_down">Move down</string>
+    <string name="block_modifier_empty">No modifiers yet.</string>
+    <string name="block_properties">Properties</string>
+    <string name="block_property_title">Add a property</string>
+    <string name="block_property_optional">Optional parameters</string>
+    <string name="block_property_overloads">Signature</string>
+    <string name="block_property_none">Every parameter is already set.</string>
+    <string name="block_preview">Preview</string>
+    <string name="block_form_place_local">This function (local)</string>
+    <string name="block_cat_scope">Scope</string>
+    <string name="block_scope_title">In this scope</string>
+    <string name="block_scope_loading">Finding what this scope can call…</string>
+    <string name="block_scope_none">This scope adds nothing to call.</string>
+    <string name="block_lambda_page">Lambda</string>
+    <string name="switcher_title">Switcher</string>
+    <string name="switcher_recent_title">Recent Files</string>
+    <string name="switcher_hint">Release Ctrl to open · Del closes a tab</string>
+    <string name="switcher_recent_hint">Type to filter · Enter opens · Esc closes</string>
+    <string name="switcher_no_match">No matching files</string>
+    <string name="shortcut_no_build_task">Nothing to build on its own here. Use Run instead.</string>
+    <string name="shortcut_nothing_to_reopen">No closed tab to reopen</string>
 </resources>

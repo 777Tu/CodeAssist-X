@@ -76,6 +76,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.seconds
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.nio.file.Paths
@@ -134,7 +135,14 @@ class IdeServicesBackend(
                 val runner = if (factory != null && separateBuildProcessEnabled()) factory(services) else services.buildRunner
                 // Only the chosen runner warms its compiler: the in-process one here, the remote one in the
                 // `:build` process. Warming both would leave a second compiler resident that never compiles.
-                runCatching { runner.warmCompiler() }
+                // Not straight away: the warm-up is seconds of CPU and heap (a forked compiler VM either way),
+                // and project open is when the index reopen and the editor's first analysis of the open file
+                // need the device most. Wait for the index, then for the editor to go quiet.
+                engineScope.launch {
+                    services.awaitOpenIndex()
+                    scheduler.awaitQuiet(COMPILER_WARMUP_QUIET)
+                    runCatching { runner.warmCompiler() }
+                }
                 runner
             }
         }
@@ -206,7 +214,8 @@ class IdeServicesBackend(
      * threading/scheduling policy is testable + instrumentable in isolation). Shares [engineDispatcher] with
      * the direct `withContext(engineDispatcher)` call sites below, so all engine work stays on the one worker.
      *
-     *  1. [interactive] — completion: highest priority, preempts both background and preview.
+     *  1. [interactive]: completion and the read-only requests the user waits on (go to, expand selection,
+     *     format): highest priority, preempts both background and preview.
      *  2. [background] — analysis/hints/semantic/folding/signature: preempts preview, preempted by interactive
      *     (the scheduler throws [EngineCanceledException]; [background] below re-runs the call after it).
      *  3. [preview] — preview rendering/lowering: lowest priority, preempted by both; retries automatically.
@@ -226,7 +235,9 @@ class IdeServicesBackend(
         },
     )
     override suspend fun <T> interactive(op: String, block: suspend () -> T): T =
-        logEditorFailures("completion") { scheduler.interactive(label = op.ifEmpty { "completion" }, block = block) }
+        logEditorFailures(op.substringBefore(':').ifEmpty { "completion" }) {
+            scheduler.interactive(label = op.ifEmpty { "completion" }, block = block)
+        }
     /**
      * A background-lane call that waits out preemption instead of failing with it. Completion preempting this
      * lane is the scheduler's business, not the caller's: most callers (icon import, the agent's workspace
@@ -518,49 +529,34 @@ class IdeServicesBackend(
         Log.addSink(errorDialogSink)
         followFileSystem(activeServices)
 
-        // index_perf: time each index build (building → not building) and emit its duration + a per-indexer
-        // breakdown, so the fleet reveals WHICH index (and which phase) dominates. Low-volume (once per
-        // build/reindex). Re-subscribes per project (collectLatest on the epoch).
+        // The index-in-flight crash breadcrumb follows the status edges: a native crash this session is then
+        // attributed to concurrent index churn (the leading hypothesis for the residual SIGSEGV).
         analyticsScope.launch {
             projectEpoch.collectLatest {
                 val svc = activeServices ?: return@collectLatest
-                var startNs = 0L
                 var building = false
                 svc.indexStatus.collectLatest { st ->
-                    if (st.building && !building) {
-                        building = true; startNs = System.nanoTime()
-                        // Mark the index as in flight so a native crash this session is attributed to
-                        // concurrent index churn (the leading hypothesis for the residual SIGSEGV).
-                        EngineBreadcrumb.noteIndexBuilding(true)
-                    } else if (!st.building && building) {
-                        building = false
-                        EngineBreadcrumb.noteIndexBuilding(false)
-                        val props = buildMap {
-                            put("duration_ms", ((System.nanoTime() - startNs) / 1_000_000).toString())
-                            // Phase split + cache effectiveness + source-diff counts: is the wall time in the
-                            // library phase or the source phase, and how much came from the on-disk segment
-                            // cache vs. a fresh build. All counts/times — no names or paths.
-                            st.stats?.let { s ->
-                                put("lib_ms", s.libMs.toString())
-                                put("src_ms", s.sourceMs.toString())
-                                put("artifacts", s.artifacts.toString())
-                                put("artifacts_built", s.artifactsBuilt.toString())
-                                put("artifacts_reused", s.artifactsReused.toString())
-                                put("src_files", s.sourceFiles.toString())
-                                put("src_parsed", s.sourceParsed.toString())
-                            }
-                            // Per-indexer time (the "which index is slow" signal), keyed by the stable index
-                            // id (e.g. idx.java.classNames.ms) — never a file/artifact/project name. Skip the
-                            // trivially-fast ones (<1ms) to keep the row bounded.
-                            for (b in st.breakdown) if (b.indexMs >= 1) {
-                                put("idx.${b.id}.ms", b.indexMs.toString())
-                            }
-                            // Heap at index completion (Phase-0 build-isolation instrumentation) so the index
-                            // phase's memory footprint is comparable to a build's peak across the fleet.
-                            putAll(MemSample.now().props())
-                        }
-                        track(dev.ide.analytics.Events.INDEX_PERF, props)
+                    if (st.building != building) {
+                        building = st.building
+                        EngineBreadcrumb.noteIndexBuilding(building)
                     }
+                }
+            }
+        }
+        // index_perf: one row per finished full index pass (open, resync, re-index), from the engine's own
+        // pass reports, so a pass that finishes between two samples of the status flow is still counted. Carries
+        // WHY it ran, the phase split, cache effectiveness, which kinds of artifact had to be rebuilt (and
+        // whether one keeps being rebuilt), and a per-indexer breakdown. Times, counts and kinds only: no
+        // names or paths. Re-subscribes per project (collectLatest on the epoch).
+        analyticsScope.launch {
+            // The flow replays its latest report to each new subscriber; never count one pass twice.
+            var lastTracked: IndexPassReport? = null
+            projectEpoch.collectLatest {
+                val svc = activeServices ?: return@collectLatest
+                svc.indexPasses.collect { pass ->
+                    if (pass === lastTracked) return@collect
+                    lastTracked = pass
+                    track(dev.ide.analytics.Events.INDEX_PERF, indexPerfProps(pass))
                 }
             }
         }
@@ -617,8 +613,11 @@ class IdeServicesBackend(
     /** The lowered preview to render — lowest-priority engine work, preempted by analysis and completion,
      *  retries until the engine is free. Returns an ide-core type; on-device preview host calls this. */
     suspend fun lowerComposePreview(path: String, functionName: String, arity: Int, text: String): LoweredComposePreview? {
-        // A live-literal edit patches the last lowering directly: no lane wait behind the editor's analysis.
-        runCatching { services.liveLiteralPreview(Paths.get(path), text, functionName, arity) }.getOrNull()?.let { return it }
+        // A live-literal edit patches the last lowering directly: no lane wait behind the editor's analysis. Off the
+        // caller's thread all the same (the host asks from the UI thread): the patch diffs the whole buffer.
+        withContext(Dispatchers.Default) {
+            runCatching { services.liveLiteralPreview(Paths.get(path), text, functionName, arity) }.getOrNull()
+        }?.let { return it }
         return timedPass("lower", path, { it?.program?.size ?: 0 }) {
             preview { services.lowerComposePreview(Paths.get(path), text, functionName, arity) }
         }
@@ -851,3 +850,40 @@ private fun renderStandaloneLayout(
 
 /** Frames per [IdeServicesBackend.recordFrame] summary event. */
 private const val FRAME_WINDOW = 600
+
+/**
+ * How long the editor's engine must sit idle before the Kotlin compiler warm-up starts. Spans the gap between
+ * the index finishing and the editor re-running its passes on the now-ready index, so the warm-up lands after
+ * that run rather than in the middle of it.
+ */
+private val COMPILER_WARMUP_QUIET = 3.seconds
+
+/** The `index_perf` event for one finished index pass. See [IndexPassReport] for what each part means. */
+internal fun indexPerfProps(pass: IndexPassReport): Map<String, String> = buildMap {
+    val st = pass.status
+    put("duration_ms", pass.durationMs.toString())
+    put("trigger", pass.trigger)
+    put("scope_ms", pass.scopeMs.toString())
+    put("queued_ms", pass.queuedMs.toString())
+    st.stats?.let { s ->
+        put("lib_ms", s.libMs.toString())
+        put("src_ms", s.sourceMs.toString())
+        put("artifacts", s.artifacts.toString())
+        put("artifacts_built", s.artifactsBuilt.toString())
+        put("artifacts_reused", s.artifactsReused.toString())
+        put("src_files", s.sourceFiles.toString())
+        put("src_parsed", s.sourceParsed.toString())
+    }
+    pass.libraryChanged?.let { put("lib_changed", if (it) "1" else "0") }
+    if (pass.coalesced > 0) put("coalesced", pass.coalesced.toString())
+    pass.ioConcurrency?.let { put("par_io", it.toString()) }
+    pass.buildPermits?.let { put("par_build", it.toString()) }
+    for ((kind, n) in pass.built) put("built.$kind", n.toString())
+    for ((kind, n) in pass.rekeyed) put("rekeyed.$kind", n.toString())
+    // Per-indexer time, keyed by the stable index id (e.g. idx.java.classNames.ms), never a file/artifact/
+    // project name. Summed across the threads that ran it (compare with lib_ms and par_io, not as wall time).
+    // Skip the trivially-fast ones (<1ms) to keep the row bounded.
+    for (b in st.breakdown) if (b.indexMs >= 1) put("idx.${b.id}.ms", b.indexMs.toString())
+    // Heap at index completion, comparable to a build's peak across the fleet.
+    putAll(MemSample.now().props())
+}

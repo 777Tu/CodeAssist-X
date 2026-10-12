@@ -184,6 +184,44 @@ class CodeAssistAppStateTest {
         assertEquals(emptyList(), backend.opened, "installing must not navigate into the editor")
     }
 
+    /**
+     * Lets the cold-launch resume settle. It checks the project still exists on the real IO dispatcher, which
+     * the test scheduler cannot advance, so this alternates real-time waits with scheduler advances until an
+     * open lands (or [timeoutMs] passes, the expected outcome when resume is off).
+     */
+    private fun TestScope.settleResume(backend: AppBackend, timeoutMs: Long = 2_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        advanceUntilIdle()
+        while (backend.opened.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10)
+            advanceUntilIdle()
+        }
+    }
+
+    /** By default a cold launch resumes into the project that was on screen last run. */
+    @Test
+    fun coldLaunchReopensTheLastProject() = runTest {
+        val backend = AppBackend(settledPrefs() + ("session.lastProject" to "/ws/app")).apply { analyticsConsent = false }
+        val app = appState(backend)
+        settleResume(backend)
+
+        assertEquals(listOf("/ws/app"), backend.opened)
+        assertEquals(Screen.Editor, app.screen)
+    }
+
+    /** With "Reopen last project on launch" off, a cold launch stays on the picker. */
+    @Test
+    fun reopenToggleOffLandsOnThePicker() = runTest {
+        val backend = AppBackend(
+            settledPrefs() + ("session.lastProject" to "/ws/app") + ("settings.appearance.reopenLastProject" to "false"),
+        ).apply { analyticsConsent = false }
+        val app = appState(backend)
+        settleResume(backend, timeoutMs = 300)
+
+        assertEquals(emptyList(), backend.opened)
+        assertEquals(Screen.Projects, app.screen)
+    }
+
     @Test
     fun pickerLandingLeavesBackToTheSystem() = runTest {
         val backend = settled() // the consent sheet is already answered
@@ -212,6 +250,34 @@ class CodeAssistAppStateTest {
         assertEquals(Screen.Hub, app.screen)
         app.navigateBack()
         assertEquals(Screen.Editor, app.screen)
+    }
+
+    @Test
+    fun wideHubLeavesFromAnyPaneOnBack() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.hubTwoPane = true
+
+        // The wide hub and its destinations are one surface: stepping "back to the hub" would show the same
+        // sidebar again, so Back leaves to where the hub was opened from.
+        app.openHub(Screen.Editor)
+        app.navigateTo(Screen.Settings)
+        app.navigateTo(Screen.Storage)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.openHub(Screen.Projects)
+        app.openKeystoreManagerFromHub()
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+
+        // Its create sub-screen still steps back to the manager, in the pane.
+        app.openHub(Screen.Projects)
+        app.openKeystoreManagerFromHub()
+        app.navigateTo(Screen.KeystoreCreate)
+        app.navigateBack()
+        assertEquals(Screen.KeystoreManager, app.screen)
     }
 
     // ---- plugin-contributed screens ----
@@ -246,9 +312,10 @@ class CodeAssistAppStateTest {
             assertEquals(Screen.Editor, app.screen)
             assertNull(app.pluginScreenId)
 
-            // Only a second back leaves the project, as it does from the editor anywhere else.
+            // Only a second back asks to leave the project, as it does from the editor anywhere else.
             app.navigateBack()
-            assertEquals(Screen.Projects, app.screen)
+            assertEquals(Screen.Editor, app.screen)
+            assertTrue(app.confirmCloseProject)
         }
     }
 
@@ -296,6 +363,43 @@ class CodeAssistAppStateTest {
             app.navigateBack()
             assertEquals(Screen.Editor, app.screen)
             assertNull(app.pluginScreenId)
+        }
+    }
+
+    /**
+     * A screen's argument rides the back stack with it. It used to travel in a plugin-side global that the next
+     * navigation overwrote, so Diff(A) -> History -> Diff(B) -> Back -> Back showed B's diff instead of A's.
+     */
+    @Test
+    fun backRestoresTheArgumentEachScreenWasOpenedWith() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        backend.epochFlow.value++
+        advanceUntilIdle()
+
+        val context = object : dev.ide.ui.ext.ScreenContext {
+            override val backend = backend
+            override fun back() = app.navigateBack()
+            override fun openScreen(id: String) = app.openPluginScreen(id)
+        }
+        withScreens("vcs.diff", "vcs.history") {
+            context.openScreen("vcs.diff", "A.kt")
+            context.openScreen("vcs.history", "A.kt")
+            context.openScreen("vcs.diff", "B.kt")
+            assertEquals("B.kt", app.pluginScreenArgument)
+
+            app.navigateBack()
+            assertEquals("vcs.history", app.pluginScreenId)
+            assertEquals("A.kt", app.pluginScreenArgument)
+
+            app.navigateBack()
+            assertEquals("vcs.diff", app.pluginScreenId)
+            assertEquals("A.kt", app.pluginScreenArgument)
+
+            // An id-only navigation never inherits an argument left over from an earlier one.
+            context.openScreen("vcs.history")
+            assertNull(app.pluginScreenArgument)
         }
     }
 
@@ -370,7 +474,7 @@ class CodeAssistAppStateTest {
             // The editor is not a contributed screen, so the claim is not consulted.
             app.navigateBack()
             assertEquals(0, handled)
-            assertEquals(Screen.Projects, app.screen)
+            assertTrue(app.confirmCloseProject)
         } finally {
             claim.dispose()
         }
@@ -459,9 +563,10 @@ class CodeAssistAppStateTest {
         assertEquals(listOf("/ws/app"), backend.opened)
         assertEquals(Screen.Editor, app.screen)
         assertEquals(1, app.epoch)
-        // Back out of the editor and the picker re-reads the project list.
+        // Back on the editor asks before leaving the project; it stays open until the user confirms.
         app.navigateBack()
-        assertEquals(Screen.Projects, app.screen)
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.confirmCloseProject)
     }
 
     @Test
@@ -827,8 +932,10 @@ class CodeAssistAppStateTest {
         advanceUntilIdle()
         assertEquals(Screen.Editor, app.screen)
 
+        // Back is the editor's own (the close confirmation), not a pop to the listing that opened it.
         app.navigateBack()
-        assertEquals(Screen.Projects, app.screen)
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.confirmCloseProject)
     }
 
     @Test

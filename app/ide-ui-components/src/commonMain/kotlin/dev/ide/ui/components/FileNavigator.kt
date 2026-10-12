@@ -64,7 +64,7 @@ import dev.ide.ui.icons.actionIcon
 import dev.ide.ui.icons.TreeIcon
 import dev.ide.ui.icons.TreeIcons
 import dev.ide.ui.theme.resolveTint
-import dev.ide.ui.platform.isMobilePlatform
+import dev.ide.ui.platform.touchInput
 import dev.ide.ui.platform.secondaryClickable
 import dev.ide.ui.theme.Ca
 import dev.ide.ui.generated.resources.Res
@@ -204,9 +204,45 @@ fun FileNavigator(
         canExport,
         onExport
     )
+    val rootDir = root.dirPath
+    // The header's actions: reveal, import, and the overflow menu. Sized for whichever header shows them.
+    val headerActions: @Composable (Int, Int) -> Unit = { box, icon ->
+        if (onOpenInFiles != null) IconButtonCa(
+            CaIcons.folderOpen,
+            stringResource(Res.string.filetree_open_in_file_manager),
+            onClick = onOpenInFiles,
+            boxSize = box,
+            iconSize = icon
+        )
+        if (canImport) IconButtonCa(
+            CaIcons.download,
+            stringResource(Res.string.filetree_import_files),
+            onClick = onImport,
+            boxSize = box,
+            iconSize = icon
+        )
+        HeaderOverflowMenu(
+            onNewFile = { rootDir?.let { onNewFile(it, emptyList()) } },
+            onNewFolder = { rootDir?.let { onNewFolder(it, emptyList()) } },
+            onRefresh = onRefreshTree,
+            onExpandAll = { expandAll(root, expanded) },
+            onCollapseAll = { expanded.clear() },
+            sort = sort,
+            onSort = { sort = it },
+            boxSize = box,
+            iconSize = icon,
+        )
+    }
+    // In a tool window, the scope dropdown sits beside the title and the actions before the hide button, as in
+    // IntelliJ's Project view; the project's name and tile are in the top bar.
+    val hostedActions = ToolWindowHeaderActions(
+        leading = { ScopeDropdown(mode, onModeChange, Modifier.padding(start = 4.dp)) },
+        actions = { headerActions(28, 16) },
+    )
     Column(modifier) {
-        // header — project identity + the IntelliJ-style scope dropdown, with import + an overflow ⋮ menu.
-        Row(
+        // Without a tool window header (a test, a sheet): the panel's own header, project identity over the scope
+        // dropdown, with import + an overflow ⋮ menu.
+        if (!hostedActions) Row(
             Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 12.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -227,33 +263,10 @@ fun FileNavigator(
                     style = MaterialTheme.typography.labelSmall
                 )
             }
-            if (onOpenInFiles != null) IconButtonCa(
-                CaIcons.folderOpen,
-                stringResource(Res.string.filetree_open_in_file_manager),
-                onClick = onOpenInFiles,
-                boxSize = 34,
-                iconSize = 18
-            )
-            if (canImport) IconButtonCa(
-                CaIcons.download,
-                stringResource(Res.string.filetree_import_files),
-                onClick = onImport,
-                boxSize = 34,
-                iconSize = 18
-            )
-            val rootDir = root.dirPath
-            HeaderOverflowMenu(
-                onNewFile = { rootDir?.let { onNewFile(it, emptyList()) } },
-                onNewFolder = { rootDir?.let { onNewFolder(it, emptyList()) } },
-                onRefresh = onRefreshTree,
-                onExpandAll = { expandAll(root, expanded) },
-                onCollapseAll = { expanded.clear() },
-                sort = sort,
-                onSort = { sort = it },
-            )
+            headerActions(34, 18)
         }
         // The scope selector (Project ⇄ All files) — a dropdown button, like IntelliJ's view chooser.
-        ScopeDropdown(mode, onModeChange, Modifier.padding(start = 12.dp, bottom = 8.dp))
+        if (!hostedActions) ScopeDropdown(mode, onModeChange, Modifier.padding(start = 12.dp, bottom = 8.dp))
         Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
         // The tree is virtualized: only the currently-visible (expanded-into) rows are flattened and handed to
         // a LazyColumn, so a project with thousands of files composes just what's on screen instead of the whole
@@ -454,6 +467,8 @@ private fun HeaderOverflowMenu(
     onCollapseAll: () -> Unit,
     sort: TreeSort,
     onSort: (TreeSort) -> Unit,
+    boxSize: Int = 34,
+    iconSize: Int = 18,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -461,8 +476,8 @@ private fun HeaderOverflowMenu(
             CaIcons.ellipsis,
             stringResource(Res.string.filetree_more_actions),
             onClick = { open = true },
-            boxSize = 34,
-            iconSize = 18
+            boxSize = boxSize,
+            iconSize = iconSize
         )
         // The sort rows below the divider carry no icon of their own, so the menu holds the slot for them.
         CaDropdownMenu(expanded = open, onDismissRequest = { open = false }, iconLed = true) {
@@ -583,7 +598,7 @@ private fun TreeRowContent(
     val hovered by interaction.collectIsHoveredAsState()
 
     // Taller, finger-friendly rows on touch; denser on desktop where pointer precision is higher.
-    val rowHeight = if (isMobilePlatform) 40.dp else 30.dp
+    val rowHeight = if (touchInput) 40.dp else 30.dp
     Box(modifier) {
         // Rows read as inset rounded pills (the sidebar idiom of the design system) rather than
         // full-bleed stripes — the selection highlight is clipped to the pill.

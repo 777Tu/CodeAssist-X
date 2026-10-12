@@ -33,6 +33,7 @@ import dev.ide.build.engine.warn
 import dev.ide.build.resolveFor
 import dev.ide.lang.jdt.build.javaFailureSummary
 import dev.ide.lang.jdt.build.reportJavaProblems
+import dev.ide.lang.jdt.compile.IncrementalJavaCompiler
 import dev.ide.lang.jdt.compile.JdtBatchCompiler
 import dev.ide.lang.kotlin.build.kotlinFailureSummary
 import dev.ide.lang.kotlin.build.reportKotlinProblems
@@ -600,15 +601,15 @@ internal class AndroidCompileTask(
 
     override suspend fun execute(ctx: TaskContext): TaskResult {
         ctx.checkCanceled()
-        withContext(Dispatchers.IO) {
-            Files.createDirectories(outClasses)
+        // Incremental: only the changed sources are recompiled when nothing else can be affected, and the
+        // output holds exactly the classes of the current sources, so a deleted class is not dexed.
+        val r = withContext(Dispatchers.IO) {
+            IncrementalJavaCompiler().compile(sources(), classpath, outClasses, level, bootClasspath = bootClasspath)
         }
-        val srcs = sources()
-        if (srcs.isEmpty()) return TaskResult.Success
-
-        val r = JdtBatchCompiler.compile(srcs, classpath, outClasses, level, bootClasspath = bootClasspath)
-        ctx.reportJavaProblems(r)
-        return if (r.success) TaskResult.Success else TaskResult.Failed(javaFailureSummary(r))
+        ctx.debug("${name.value}: ${r.mode.name.lowercase()} compile of ${r.recompiledSources.size} source(s)")
+        val result = JdtBatchCompiler.Result(r.success, r.messages, r.diagnostics)
+        ctx.reportJavaProblems(result)
+        return if (r.success) TaskResult.Success else TaskResult.Failed(javaFailureSummary(result))
     }
 }
 
@@ -2106,6 +2107,8 @@ internal class PackageApkTask(
     private val jniLibDirs: List<Path>,
     private val outApk: Path,
     private val javaResJars: List<Path> = emptyList(),
+    /** The compiled Baseline Profile (`.prof`, `.profm`) from [CompileArtProfileTask], packaged when present. */
+    private val artProfile: Pair<Path, Path>? = null,
 ) : Task {
     override val inputs: TaskInputs
         get() = TaskInputsImpl().apply {
@@ -2114,6 +2117,7 @@ internal class PackageApkTask(
             dirPaths("assets", assetsDirs)
             dirPaths("jni", jniLibDirs)
             filePaths("javaRes", javaResJars)
+            artProfile?.let { (prof, profm) -> filePaths("artProfile", listOf(prof, profm).filter { Files.exists(it) }) }
         }
     override val outputs: TaskOutputs get() = TaskOutputsImpl().apply { filePath("apk", outApk) }
 
@@ -2121,7 +2125,7 @@ internal class PackageApkTask(
         ctx.checkCanceled()
         return runCatching {
             val names =
-                ApkPackaging.assembleApk(resourcesAp, dexDirs, assetsDirs, jniLibDirs, outApk, javaResJars)
+                ApkPackaging.assembleApk(resourcesAp, dexDirs, assetsDirs, jniLibDirs, outApk, javaResJars, artProfile)
             ctx.debug("packageApk -> ${outApk.fileName} (${names.size} entries)")
             TaskResult.Success as TaskResult
         }.getOrElse { TaskResult.Failed("packageApk failed: ${it.message}", it) }

@@ -91,9 +91,13 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="support_star">Bintang di GitHub</string>
     <string name="support_show_ads">Tampilkan iklan</string>
     <string name="support_show_ads_desc">Tampilkan iklan di aplikasi. Anda dapat mematikannya kapan saja.</string>
+    <string name="support_show_interstitials">Iklan layar penuh</string>
+    <string name="support_show_interstitials_desc">Sesekali iklan layar penuh saat build lama dan setelah pelajaran selesai.</string>
+    <string name="ads_off_title">Matikan iklan?</string>
+    <string name="ads_off_body">Anda dapat mematikan hanya iklan layar penuh dan tetap menampilkan iklan kecil di daftar dan panel.</string>
+    <string name="ads_off_all">Semua iklan</string>
+    <string name="ads_off_fullscreen_only">Hanya layar penuh</string>
     <string name="ad_label">Iklan</string>
-    <string name="house_ad_support_title">Menikmati CodeAssist?</string>
-    <string name="house_ad_support_content">Dukung proyek ini di GitHub Sponsors.</string>
     <string name="no_project_yet">Belum ada proyek. Buat satu untuk memulai.</string>
     <string name="your_projects">Proyek Anda</string>
     <string name="project_kind_android">Android</string>
@@ -115,9 +119,6 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="creating">Membuat…</string>
     <string name="create_project">Buat Proyek</string>
     <string name="no_templates_available">Tidak ada templat yang tersedia.</string>
-    <string name="performance_analytics">Analisis performa</string>
-    <string name="sharing_performance_data">Membagikan data performa anonim</string>
-    <string name="not_sharing_performance_data">Tidak membagikan data performa</string>
     <string name="compatibility">Kompatibilitas</string>
 
     <!-- AI coding agent -->
@@ -212,6 +213,9 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="filetree_directory">Direktori</string>
     <string name="filetree_new_in">Baru di %1$s</string>
     <string name="buildc_build">Build</string>
+    <string name="buildc_notice_details">Detail</string>
+    <string name="buildc_notice_less">Ringkas</string>
+    <string name="buildc_notice_dismiss">Tutup</string>
     <string name="buildc_collapse">Ciutkan</string>
     <string name="buildc_status_idle">Menganggur</string>
     <string name="buildc_status_running">Berjalan…</string>
@@ -266,7 +270,6 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="completion_no_suggestions">Tidak ada saran</string>
     <string name="completion_back_to_suggestions">Kembali ke saran</string>
     <string name="completion_show_documentation">Tampilkan dokumentasi</string>
-    <string name="sig_more">+%1$d lainnya</string>
     <string name="sig_peek_tip">Ketuk untuk mengintip definisi lengkap</string>
     <string name="sig_peek_collapse">Ketuk untuk menciutkan</string>
     <string name="symbolbar_move_line_up">Pindahkan baris ke atas</string>
@@ -280,6 +283,8 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="breadcrumb_split">Terpisah</string>
     <string name="edchrome_files">File</string>
     <string name="edchrome_more">Lainnya</string>
+    <string name="sidebar_hide_tool_window_bar">Sembunyikan bilah jendela alat</string>
+    <string name="toolwindow_hide">Sembunyikan</string>
     <string name="edchrome_settings_and_tools">Setelan &amp; Alat</string>
     <string name="edchrome_toggle_navigator">Alihkan navigator</string>
     <string name="edchrome_find_replace">Cari / ganti</string>
@@ -597,14 +602,28 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="perm_allow_always">Selalu izinkan di proyek ini</string>
     <string name="perm_deny">Tolak</string>
     <string name="settings_title">Setelan</string>
+    <string name="settings_group_editor">Tampilan &amp; Editor</string>
+    <string name="settings_group_code">Kecerdasan Kode</string>
+    <string name="settings_group_build">Build &amp; Jalankan</string>
+    <string name="settings_group_extensions">Ekstensi</string>
+    <string name="settings_group_system">Sistem</string>
+    <string name="settings_scope_project">Proyek ini</string>
+    <string name="settings_search_placeholder">Cari setelan</string>
+    <string name="settings_search_empty">Tidak ada setelan yang cocok dengan “%1$s”</string>
+    <string name="settings_page_appearance_subtitle">Tema, warna aksen, jendela alat &amp; saat mulai</string>
+    <string name="settings_page_editor_subtitle">Font, pembungkusan, pelipatan &amp; gestur</string>
+    <string name="settings_page_keymap_subtitle">Pintasan keyboard</string>
+    <string name="settings_page_completion_subtitle">Saran, templat postfix &amp; waktu</string>
+    <string name="settings_page_analysis_subtitle">Analisis langsung &amp; inspeksi</string>
+    <string name="settings_page_preview_subtitle">Sandbox &amp; proses pratinjau</string>
+    <string name="settings_page_build_subtitle">Cara konflik dependensi diselesaikan</string>
+    <string name="settings_page_buildRuntime_subtitle">Memori, proses build &amp; kompiler</string>
+    <string name="settings_page_privacy_subtitle">Analitik, cache &amp; log</string>
     <string name="settings_no_settings_available">Tidak ada setelan tersedia.</string>
     <string name="settings_all_settings">Semua setelan</string>
     <string name="settings_backup_ready">Cadangan siap</string>
     <string name="settings_inspections_for_language">Inspeksi %1$s</string>
     <string name="settings_advanced">Lanjutan</string>
-    <string name="settings_hub_title">Setelan &amp; Alat</string>
-    <string name="settings_settings">Setelan</string>
-    <string name="settings_settings_subtitle">Tampilan, editor, penyelesaian &amp; analisis</string>
     <string name="settings_code_style">Gaya Kode</string>
     <string name="settings_code_style_subtitle">Profil pemformatan per bahasa &amp; pratinjau langsung</string>
     <string name="settings_sdk_manager">Pengelola SDK</string>
@@ -1042,4 +1061,18 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="block_palette_variable">Variabel</string>
     <string name="block_palette_call">Panggil</string>
     <string name="block_palette_comment">Komentar</string>
+    <string name="home_account">Akun</string>
+    <string name="home_search_projects">Cari proyek</string>
+    <string name="home_no_match">Tidak ada proyek yang cocok dengan “%1$s”.</string>
+    <string name="home_sort">Urutkan proyek</string>
+    <string name="home_sort_recent">Terbaru</string>
+    <string name="home_sort_name">Nama</string>
+    <string name="home_clear_search">Hapus pencarian</string>
+    <string name="close_project_title">Tutup %1$s?</string>
+    <string name="close_project_body">Anda akan kembali ke daftar proyek.</string>
+    <plurals name="close_project_unsaved">
+        <item quantity="other">%1$d file memiliki perubahan yang belum disimpan. File akan disimpan terlebih dahulu.</item>
+    </plurals>
+    <string name="close_project_building">Build masih berjalan.</string>
+    <string name="close_project_save_and_close">Simpan &amp; tutup</string>
 </resources>

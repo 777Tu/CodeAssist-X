@@ -6,6 +6,7 @@ import java.io.PrintWriter
 import java.io.StringWriter
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import org.eclipse.jdt.core.compiler.CategorizedProblem
 import org.eclipse.jdt.internal.compiler.CompilationResult
 import org.eclipse.jdt.internal.compiler.ICompilerRequestor
@@ -55,7 +56,22 @@ object JdtBatchCompiler {
         val messages: List<String>,
         /** The problems themselves. This — not [messages] — is what a caller presents; see [Diagnostic]. */
         val diagnostics: List<Diagnostic> = emptyList(),
+        /**
+         * Each compiled source to the class files it produced, relative to the output dir. Keyed by [sourceKey],
+         * since the compiler may report a source under its canonical path rather than the one it was given.
+         */
+        val outputs: Map<Path, List<String>> = emptyMap(),
     )
+
+    /** The key [Result.outputs] uses for [source]: its real path when it exists, else its absolute form. */
+    fun sourceKey(source: Path): Path =
+        runCatching { source.toRealPath() }.getOrElse { source.toAbsolutePath().normalize() }
+
+    /** Record [result]'s class files under its source in [outputs]. */
+    internal fun recordOutputs(result: CompilationResult, outputs: MutableMap<Path, List<String>>) {
+        val source = runCatching { sourceKey(Paths.get(String(result.getFileName()))) }.getOrNull() ?: return
+        outputs[source] = result.classFiles.orEmpty().map { String(it.fileName()) + ".class" }
+    }
 
     /** Build a [Diagnostic] from an ecj problem, computing the column and snippet off the unit's contents. */
     internal fun diagnosticOf(p: CategorizedProblem, result: CompilationResult?): Diagnostic = Diagnostic(
@@ -134,15 +150,24 @@ object JdtBatchCompiler {
     }
 
     /** Compliance level parsed from an ecj `-source`/`-target` string (`"8"`, `"11"`, `"1.8"`, …) is >= 9. */
-    private fun complianceAtLeast9(level: String): Boolean {
-        val n = level.removePrefix("1.").takeWhile { it.isDigit() }.toIntOrNull() ?: return false
-        return n >= 9
-    }
+    private fun complianceAtLeast9(level: String): Boolean = releaseOf(level) >= 9
+
+    /** The release number of a `-source` string (`"1.8"` is 8), or -1. */
+    private fun releaseOf(level: String): Int = level.removePrefix("1.").takeWhile { it.isDigit() }.toIntOrNull() ?: -1
 
     /** True on Android's runtime (ART/Dalvik), where ecj cannot read the platform library off the VM. */
     private val isAndroidRuntime: Boolean =
         System.getProperty("java.vm.name").orEmpty().contains("Dalvik", ignoreCase = true) ||
             System.getProperty("java.vendor").orEmpty().contains("Android", ignoreCase = true)
+
+    /**
+     * Whether a compile with no boot library can pass `--release`: off ART, on a JDK that ships `lib/ct.sym`
+     * (the per-release signatures `--release` reads). The compile then sees exactly the JDK API of the
+     * module's release, which is what the editor's JDK API-level check reports against.
+     */
+    val releaseAvailable: Boolean by lazy {
+        !isAndroidRuntime && System.getProperty("java.home")?.let { Files.isRegularFile(Paths.get(it, "lib", "ct.sym")) } == true
+    }
 
     fun compile(
         sources: List<Path>,
@@ -171,7 +196,11 @@ object JdtBatchCompiler {
         }
 
         val args = ArrayList<String>()
-        args += listOf("-source", sourceLevel, "-target", sourceLevel, "-proc:none", "-nowarn", "-g")
+        // On a desktop JDK, compile against the module's release of the JDK API rather than the running JDK's,
+        // so `List.of` is an error at 8 here just as the editor reports it.
+        args += if (boot.isEmpty() && releaseAvailable && releaseOf(sourceLevel) >= 8) listOf("--release", releaseOf(sourceLevel).toString())
+        else listOf("-source", sourceLevel, "-target", sourceLevel)
+        args += listOf("-proc:none", "-nowarn", "-g")
         args += listOf("-d", outputDir.toString())
         if (boot.isNotEmpty()) {
             args += "-bootclasspath"
@@ -194,7 +223,7 @@ object JdtBatchCompiler {
         val raw = err.toString() + "\n" + out.toString()
         val messages = raw.lines().filter { it.isNotBlank() }
         val diagnostics = main.problems.ifEmpty { parseEcjDiagnostics(raw) }
-        return Result(ok, messages, diagnostics)
+        return Result(ok, messages, diagnostics, main.outputs)
     }
 
     /**
@@ -204,11 +233,13 @@ object JdtBatchCompiler {
      */
     private class RecordingMain(out: PrintWriter, err: PrintWriter) : Main(out, err, false) {
         val problems = ArrayList<Diagnostic>()
+        val outputs = HashMap<Path, List<String>>()
 
         override fun getBatchRequestor(): ICompilerRequestor {
             val delegate = super.getBatchRequestor()
             return ICompilerRequestor { result ->
                 result?.allProblems?.forEach { p -> if (p != null) problems.add(diagnosticOf(p, result)) }
+                if (result != null && !result.hasErrors()) recordOutputs(result, outputs)
                 delegate.acceptResult(result)
             }
         }

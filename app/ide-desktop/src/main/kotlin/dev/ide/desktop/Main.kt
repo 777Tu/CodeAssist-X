@@ -1,6 +1,9 @@
 package dev.ide.desktop
 
+import dev.ide.ui.ext.AppKeys
 import androidx.compose.material.Button
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -12,6 +15,7 @@ import dev.ide.ui.CodeAssistApp
 import dev.ide.ui.editor.preview.ImageSceneComposer
 import dev.ide.ui.editor.preview.OffscreenPreviewRenderer
 import dev.ide.ui.ext.PreviewSnapshots
+import dev.ide.ui.platform.LocalWindowTitleBar
 import java.nio.file.Path
 
 /**
@@ -48,12 +52,22 @@ fun main(args: Array<String>) {
             onCloseRequest = ::exitApplication,
             state = state,
             title = "CodeAssist",
+            // An app shortcut pressed while nothing in the window has focus (the root listener inside the app
+            // only hears keys that reach a focused node). Runs only for a key the content did not consume.
+            onKeyEvent = { AppKeys.onKey(it) },
         ) {
-            CodeAssistApp(
-                backend,
-                fileActions = DesktopFileActions(backend),
-                composePreviewHost = previewHost,
-            )
+            // Remembered: the app state is keyed on it, so a new instance on recomposition (the title bar's height
+            // changes whenever the editor is left) would start the app over and land back in the editor.
+            val fileActions = remember { DesktopFileActions(backend) }
+            // IntelliJ-style: the app draws the title bar (the editor's top bar, or a plain strip elsewhere)
+            // with the native window controls on top of it.
+            CompositionLocalProvider(LocalWindowTitleBar provides rememberJbrWindowTitleBar(window, state)) {
+                CodeAssistApp(
+                    backend,
+                    fileActions = fileActions,
+                    composePreviewHost = previewHost,
+                )
+            }
         }
     }
     backend.close()

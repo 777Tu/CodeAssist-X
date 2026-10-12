@@ -242,6 +242,15 @@ interface BlockService {
 
     /** Compile a block edit against [path]'s current buffer [text] into surgical text edits. */
     suspend fun applyBlockEdit(path: String, text: String, edit: UiBlockEdit): List<UiTextEdit> = emptyList()
+
+    /**
+     * The block view's scratch stacks for [path]: blocks left loose on the canvas, kept beside the file
+     * rather than in it, in the editor's own serialized form. Null when there are none or nothing is stored.
+     */
+    suspend fun loadScratchStacks(path: String): String? = null
+
+    /** Persist [path]'s scratch stacks ([data] from the block view); null or blank removes them. */
+    suspend fun saveScratchStacks(path: String, data: String?) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,7 +1404,7 @@ interface LearnService {
 // SDK / toolchain manager
 // ---------------------------------------------------------------------------
 
-/** The SDK manager: download editor sources/docs for the Android SDK + JDK. */
+/** The SDK manager: download Android platforms, and editor sources/docs for the Android SDK + JDK. */
 interface SdkService {
     /** Live download queue + progress. */
     val sdkManagerState: StateFlow<UiSdkManagerState> get() = MutableStateFlow(UiSdkManagerState())
@@ -1405,6 +1414,12 @@ interface SdkService {
 
     /** Start downloading one Android package by id; returns immediately. */
     suspend fun installSdkPackage(path: String): String = "Not supported."
+
+    /** The text of SDK license [id] (a package's [UiSdkPackage.license]), or null when unavailable. */
+    suspend fun sdkLicenseText(id: String): String? = null
+
+    /** Record that the user accepted SDK license [id]. */
+    suspend fun acceptSdkLicense(id: String) {}
 
     /** Cancel an in-flight SDK/JDK download by id. */
     fun cancelSdkDownload(id: String) {}
@@ -1793,7 +1808,7 @@ interface AgentService {
     /** Answer a pending [permissionRequest]. */
     fun answerPermission(id: Int, decision: UiAgentPermissionDecision)
 
-    /** Whether the backend hosts the local FTP asset server (the More-menu toggle + `ftp_server` tool). */
+    /** Whether the backend hosts the local FTP asset server (the AI settings toggle + `ftp_server` tool). */
     fun ftpServerSupported(): Boolean = false
 
     /** Whether the local FTP asset server is currently running. */

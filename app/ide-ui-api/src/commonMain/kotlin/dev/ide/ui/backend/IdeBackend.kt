@@ -1027,7 +1027,13 @@ data class UiModuleConfig(
     val resolvedSdk: String = "",
     /** The platform SDKs installed in the workspace, offered in the picker (plus an implicit "Auto"). */
     val availableSdks: List<UiSdkOption> = emptyList(),
+    /** Set when an Android module's compileSdk has no installed platform, so it compiles and completes
+     *  against another level; the screen points at the SDK Manager. */
+    val missingPlatform: UiMissingPlatform? = null,
 )
+
+/** An Android module's compileSdk ([compileSdk]) is not installed, so it uses the [usedLevel] platform. */
+data class UiMissingPlatform(val compileSdk: Int, val usedLevel: Int)
 
 /** A selectable platform SDK: [name] is the value persisted to `module.toml`, [label] the display text. */
 data class UiSdkOption(val name: String, val label: String)
@@ -1638,6 +1644,10 @@ object UiActionPlaces {
     const val MAIN_TOOLBAR = "mainToolbar"
     const val MAIN_OVERFLOW = "mainToolbar.overflow"
     const val MORE_MENU = "moreMenu"
+
+    /** The lower group of the wide layout's left tool-window stripe: icon-only buttons for the screens a
+     *  project is configured from (modules, icons). An action here should name an icon id. */
+    const val TOOL_STRIPE = "toolStripe"
     const val FILE_CONTEXT = "fileContext"
     const val EDITOR_TAB = "editorTab"
     const val COMMAND_PALETTE = "commandPalette"
@@ -1947,8 +1957,9 @@ data class UiSdkDownload(
     val detail: String = "",
 )
 
-/** An installable Android SDK package. [category] is always SOURCES (the SDK Manager is sources/docs only).
- *  [incomplete] ⇒ a previous install was interrupted; re-installing resumes/repairs it. */
+/** An installable Android SDK package. [category] is SOURCES or PLATFORMS. [incomplete] ⇒ a previous install
+ *  was interrupted; re-installing resumes/repairs it. [license] is the id of the license the user must accept
+ *  before installing ([licenseAccepted] once they have). */
 data class UiSdkPackage(
     val path: String,
     val displayName: String,
@@ -1957,6 +1968,8 @@ data class UiSdkPackage(
     val installed: Boolean,
     val installable: Boolean,
     val incomplete: Boolean = false,
+    val license: String? = null,
+    val licenseAccepted: Boolean = true,
 )
 
 /** The active JDK and whether its sources are available for docs. [androidRuntime] = true on ART, where the
@@ -1978,6 +1991,8 @@ data class UiSettings(
     val accent: UiAccent = UiAccent.Lime,
     /** The seed color for [UiAccent.Custom], as an `0xAARRGGBB` ARGB long. Ignored unless accent is Custom. */
     val customAccentColor: Long = 0xFF8B5CF6L,
+    /** Keep tool window header actions always visible (off = only while the tool window is hovered or active). */
+    val alwaysShowToolWindowActions: Boolean = false,
     val editorFontScale: Float = 1f,
     /** "jetbrains" (bundled JetBrains Mono) | "monospace" (system monospace). */
     val codeFont: String = "jetbrains",
@@ -2213,4 +2228,28 @@ sealed interface UiBlockEdit {
     data class WrapInIf(val blockId: String) : UiBlockEdit
     /** Relocate [blockId] to position [toIndex] in the list slot [toSlotIndex] of [toOwnerBlockId] (drag). */
     data class MoveBlock(val blockId: String, val toOwnerBlockId: String, val toSlotIndex: Int, val toIndex: Int) : UiBlockEdit
+    /**
+     * Relocate [count] consecutive statements starting at [blockId] (a block dragged with the stack below it)
+     * to position [toIndex] in the list slot [toSlotIndex] of [toOwnerBlockId], re-indented for the new depth.
+     */
+    data class MoveRange(val blockId: String, val count: Int, val toOwnerBlockId: String, val toSlotIndex: Int, val toIndex: Int) : UiBlockEdit
+    /** Delete [count] consecutive statements starting at [blockId], with the lines that only held them. */
+    data class DeleteRange(val blockId: String, val count: Int) : UiBlockEdit
+    /**
+     * Wrap [count] consecutive statements starting at [blockId] in [template], whose [BODY_MARKER] marks
+     * where the statements go (a C-block dropped around a stack).
+     */
+    data class WrapRange(val blockId: String, val count: Int, val template: String) : UiBlockEdit
+    /**
+     * Add an argument to segment [link] of call block [blockId] (0 = the call, `i` = a chain's `i`-th link), as
+     * argument [index] among those written; [text] may be a named argument (`fontSize = 18.sp`).
+     */
+    data class InsertArgument(val blockId: String, val link: Int, val index: Int, val text: String) : UiBlockEdit
+    /** Remove the argument in slot [slotIndex] of call block [blockId], with its separating comma. */
+    data class RemoveArgument(val blockId: String, val slotIndex: Int) : UiBlockEdit
+
+    companion object {
+        /** The body marker a [WrapRange] template carries. */
+        const val BODY_MARKER: Char = '\u2588'
+    }
 }

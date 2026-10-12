@@ -9,6 +9,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.Color
+import dev.ide.ui.ext.ScreenArgumentHandoff
 import dev.ide.ui.ext.ScreenBackRegistry
 import dev.ide.ui.ext.ScreenRegistry
 import dev.ide.ui.ads.AdController
@@ -40,8 +41,9 @@ internal const val EXPORT_AUTHOR_PREF = "export.author"
  *  kill (or a normal relaunch) resumes back into it instead of the picker. Blank = the picker was showing. */
 private const val LAST_PROJECT_PREF = "session.lastProject"
 
-/** App preference gating the resume-last-project behavior. Unset/anything-but-"false" = on (the default). */
-private const val REOPEN_LAST_PROJECT_PREF = "session.reopenLastProject"
+/** App preference gating the resume-last-project behavior: the "Reopen last project on launch" toggle on the
+ *  Appearance settings page (`settings.<pageId>.<key>`). Unset/anything-but-"false" = on (the default). */
+private const val REOPEN_LAST_PROJECT_PREF = "settings.appearance.reopenLastProject"
 
 private const val MIGRATION_ACK_PREF = "migration.acknowledged"
 private const val LEGACY_RECOVERY_SEEN_PREF = "legacy.recovery.seen"
@@ -148,6 +150,10 @@ class CodeAssistAppState(
     /** Which plugin-contributed screen [Screen.PluginScreen] is showing, and where Back returns to. */
     var pluginScreenId: String? by mutableStateOf(null)
         private set
+
+    /** What [pluginScreenId] was opened with ([ScreenContext.argument]); saved and restored with it on the stack. */
+    var pluginScreenArgument: Any? by mutableStateOf(null)
+        private set
     private var pluginScreenReturn: Screen = Screen.Editor
 
     /** The home screen's selected bottom-nav tab (project picker / store / learn). Lives here, not in the
@@ -158,6 +164,22 @@ class CodeAssistAppState(
     /** Where the Settings and Tools hub returns on Back: the picker (opened with no project) or the editor. */
     var hubReturn: Screen by mutableStateOf(Screen.Editor)
         private set
+
+    /**
+     * Whether the window is wide enough that Settings shows as a sidebar beside its open destination
+     * (reported by the nav graph, which is what measures the window). Then the hub and its destinations are
+     * one surface, so Back from any of them leaves the hub instead of stepping to a "hub" that looks the same.
+     */
+    var hubTwoPane: Boolean by mutableStateOf(false)
+
+    /** Whether [s] is one of the hub's destinations shown in its pane while [hubTwoPane]. The Keystore Manager
+     *  only counts when entered from the hub, not from a module's Signing tab. */
+    fun isHubPane(s: Screen): Boolean = when (s) {
+        Screen.Hub, Screen.Settings, Screen.CodeStyle, Screen.ColorScheme, Screen.EditorSymbols,
+        Screen.SdkManager, Screen.Plugins, Screen.Storage -> true
+        Screen.KeystoreManager -> keystoreReturn == Screen.Hub
+        else -> false
+    }
 
     /** Where the Keystore Manager returns on Back: the hub (its normal entry) or the module Signing tab (the
      *  "manage keystores" cross-link from project signing). */
@@ -388,6 +410,10 @@ class CodeAssistAppState(
 
     // ---- navigation intents ----
 
+    /** The editor's close-project confirmation is up. Back on the editor raises it rather than leaving at once,
+     *  the same as the top bar's back arrow; the editor draws it and clears it. */
+    var confirmCloseProject by mutableStateOf(false)
+
     /** Go to [target] with no extra state to carry (the plain forward/back moves between screens). */
     fun navigateTo(target: Screen) {
         screen = target
@@ -412,17 +438,30 @@ class CodeAssistAppState(
      * navigation from inside a screen that is already animating away.
      */
     fun openPluginScreen(id: String) {
+        // Taken first, so a refused navigation cannot leave it pending for the next one.
+        val argument = ScreenArgumentHandoff.take()
         if (ScreenRegistry.find(id) == null) return
         if (screen != Screen.PluginScreen) pluginScreenReturn = screen
         pushEntry()
         pluginScreenId = id
+        pluginScreenArgument = argument
         screen = Screen.PluginScreen
     }
 
-    /** Open the Settings and Tools hub, remembering [from] as its Back destination. */
+    /** Open Settings (the hub), remembering [from] as its Back destination. */
     fun openHub(from: Screen) {
         hubReturn = from
         screen = Screen.Hub
+    }
+
+    /** The settings page [Screen.Settings] shows, by id. Null shows every page with its own navigation. */
+    var settingsPageId: String? by mutableStateOf(null)
+        private set
+
+    /** Open one settings page from the hub. */
+    fun openSettingsPage(id: String) {
+        settingsPageId = id
+        screen = Screen.Settings
     }
 
     /** Open the Keystore Manager, remembering its Back destination and whether it was reached with a project
@@ -788,12 +827,14 @@ class CodeAssistAppState(
         val project = submitProject
         val slug = submitItemSlug
         val plugin = pluginScreenId
+        val pluginArgument = pluginScreenArgument
         backStack += NavEntry(screen) {
             storeItem = item
             publisherHandle = handle
             submitProject = project
             submitItemSlug = slug
             pluginScreenId = plugin
+            pluginScreenArgument = pluginArgument
         }
         while (backStack.size > MAX_BACK_STACK) backStack.removeAt(0)
     }
@@ -991,6 +1032,8 @@ class CodeAssistAppState(
 
             // The keystore Create/Import sub-screens step back to their manager, not all the way out.
             screen == Screen.KeystoreCreate || screen == Screen.KeystoreImport -> screen = Screen.KeystoreManager
+            // The wide hub is one surface with its destinations: Back leaves it from any of them.
+            hubTwoPane && isHubPane(screen) -> screen = hubReturn
             // The hub's sub-screens step back to the hub; the keystore manager honours its entry origin.
             screen == Screen.SdkManager || screen == Screen.Settings || screen == Screen.CodeStyle ||
                 screen == Screen.ColorScheme || screen == Screen.EditorSymbols ||
@@ -1007,6 +1050,7 @@ class CodeAssistAppState(
             // A plugin screen returns to wherever it was opened from.
             screen == Screen.PluginScreen -> {
                 pluginScreenId = null
+                pluginScreenArgument = null
                 screen = pluginScreenReturn
             }
 
@@ -1024,7 +1068,7 @@ class CodeAssistAppState(
             screen == Screen.CreateProject -> screen = Screen.Projects
             screen == Screen.ImportProject -> cancelImportPreview()
             screen == Screen.ExportProject -> finishExport()
-            screen == Screen.Editor -> screen = Screen.Projects
+            screen == Screen.Editor -> confirmCloseProject = true
             // On the home screen, a Store/Learn tab steps back to the project picker before exiting.
             screen == Screen.Projects && homeTab != HomeTab.Projects -> homeTab = HomeTab.Projects
             else -> {}
