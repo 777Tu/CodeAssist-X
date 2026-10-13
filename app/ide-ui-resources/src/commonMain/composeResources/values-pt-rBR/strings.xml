@@ -101,6 +101,7 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="no_project_yet">Nenhum projeto ainda. Crie um para começar.</string>
     <string name="your_projects">Seus projetos</string>
     <string name="project_kind_android">Android</string>
+    <string name="project_kind_files">Arquivos</string>
     <string name="project_opened_just_now">Aberto agora mesmo</string>
     <string name="beta_notice">Você está no %1$s</string>
     <string name="beta_notice_content">Alguns recursos podem estar incompletos ou mudar. Adoraríamos receber seu feedback, conte-nos o que está faltando ou quebrado.</string>
@@ -170,6 +171,13 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="edview_open_a_file_from_navigator">Abra um arquivo pelo navegador</string>
     <string name="edview_no_file_open_title">Nenhum arquivo aberto</string>
     <string name="edview_no_file_open_hint">Selecione um arquivo no navegador para começar a editar</string>
+    <string name="edview_action_search">Pesquisar em tudo</string>
+    <string name="edview_action_go_to_file">Ir para arquivo</string>
+    <string name="edview_action_recent">Arquivos recentes</string>
+    <string name="edview_action_find">Localizar nos arquivos</string>
+    <string name="edview_action_new_file">Novo arquivo</string>
+    <string name="edview_action_project">Arquivos do projeto</string>
+    <string name="edview_recent_title">Abertos recentemente</string>
 
     <!-- tabs -->
     <string name="tab_close_others">Fechar outras</string>
@@ -457,6 +465,10 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="palette_hint">Execute um comando, vá para um arquivo ou símbolo…</string>
     <string name="palette_type_to_search">Digite para pesquisar %1$s…</string>
     <string name="palette_no_matches">Nenhuma correspondência</string>
+    <string name="palette_key_navigate">navegar</string>
+    <string name="palette_key_open">abrir</string>
+    <string name="palette_key_scope">trocar escopo</string>
+    <string name="palette_key_close">fechar</string>
 
     <!-- run/preview/edoverlay -->
     <string name="run_no_active_run">Nenhuma execução ativa.</string>
@@ -814,6 +826,16 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="modcfg_title_modules">Módulos</string>
     <string name="modcfg_new_module_action">Novo módulo</string>
     <string name="modcfg_no_modules">Nenhum módulo. Toque em + para adicionar um.</string>
+    <string name="modcfg_empty_title">Nenhum módulo ainda</string>
+    <string name="modcfg_empty_body">Um módulo é uma parte compilável do seu projeto: um app, uma biblioteca ou um recurso.</string>
+    <string name="keymap_hint">Clique em um atalho e pressione as novas teclas. Esc cancela; Backspace o remove.</string>
+    <string name="keymap_search">Pesquisar comandos ou teclas</string>
+    <string name="keymap_modified">Modificados</string>
+    <string name="keymap_reset_all">Redefinir tudo</string>
+    <string name="keymap_no_results">Nenhum comando corresponde.</string>
+    <string name="keymap_recording">Pressione as teclas…</string>
+    <string name="keymap_not_set">Não definido</string>
+    <string name="keymap_reset">Restaurar padrão</string>
     <string name="modcfg_remove_named">Remover %1$s</string>
     <string name="modcfg_removed">%1$s removido</string>
     <string name="modcfg_build_features_android_only">Os recursos de compilação se aplicam apenas a módulos Android.</string>
@@ -837,6 +859,10 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="modcfg_packaging_merge_desc">Concatenar as duplicatas em vez de descartá-las.</string>
     <string name="modcfg_packaging_default_excludes">Sempre excluído por padrão</string>
     <string name="modcfg_packaging_default_merges">Sempre mesclado por padrão</string>
+    <string name="modcfg_packaging_compression">Compressão</string>
+    <string name="modcfg_packaging_no_compress">Não comprimir</string>
+    <string name="modcfg_packaging_no_compress_desc">Sufixos de arquivo como tflite ou .bin armazenados sem compressão no APK, para que AssetManager.openFd() e o mapeamento em memória funcionem. Comparados com o fim de cada caminho, sem diferenciar maiúsculas.</string>
+    <string name="modcfg_packaging_default_no_compress">Nunca comprimidos por padrão</string>
     <string name="modcfg_manage_keystores">Gerenciar keystores</string>
     <string name="modcfg_keystores_empty">Nenhuma keystore ainda. Crie uma no Gerenciador de Keystore para assinar compilações de release.</string>
     <string name="modcfg_debug_default">debug (padrão)</string>

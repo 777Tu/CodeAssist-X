@@ -79,6 +79,10 @@ interface EditorService {
     /** Register/refresh the live editor buffer so cross-file analysis sees in-progress edits. */
     fun updateDocument(path: String, text: String)
 
+    /** The buffer for [path] was just (re)loaded from disk: [text] is what the file holds, with no unsaved edit,
+     *  so a build's flush of unsaved buffers must leave the file alone. */
+    fun documentLoaded(path: String, text: String) = updateDocument(path, text)
+
     /** Persist the buffer [text] for [path] to disk (and keep it as the live buffer). */
     fun saveFile(path: String, text: String)
 
@@ -584,9 +588,10 @@ interface ModuleService {
      *  it is not an Android module. */
     suspend fun getPackagingOptions(moduleName: String): UiPackagingOptions? = null
 
-    /** Persist the Android packaging merge rules for [moduleName] (empty lists clear the block). */
+    /** Persist the Android packaging merge rules and the [noCompress] suffixes for [moduleName] (empty lists
+     *  clear the block). */
     suspend fun updatePackagingOptions(
-        moduleName: String, resources: UiPackagingRules, jniLibs: UiPackagingRules
+        moduleName: String, resources: UiPackagingRules, jniLibs: UiPackagingRules, noCompress: List<String>,
     ): UiConfigResult = UiConfigResult(false, "Packaging options not supported by this backend")
 
     /**

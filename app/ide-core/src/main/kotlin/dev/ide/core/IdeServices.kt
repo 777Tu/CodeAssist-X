@@ -78,6 +78,7 @@ import dev.ide.core.completion.BufferWordsContributor
 import dev.ide.core.completion.CompletionEngine
 import dev.ide.core.completion.CompletionOptions
 import dev.ide.core.completion.CompletionStats
+import dev.ide.core.completion.MemberUsageIndex
 import dev.ide.core.completion.PostfixContributor
 import dev.ide.core.gradle.GradleImport
 import dev.ide.core.perf.MB_BYTES
@@ -85,6 +86,7 @@ import dev.ide.core.perf.MEM_SAMPLE_INTERVAL_MS
 import dev.ide.core.perf.MemSample
 import dev.ide.core.perf.PeakHeap
 import dev.ide.core.project.SampleProject
+import dev.ide.core.sdk.BundledAndroidToolchain
 import dev.ide.core.sdk.SdkManagerService
 import dev.ide.core.sdk.SwingApiStubs
 import dev.ide.core.services.AndroidResourceService
@@ -358,6 +360,10 @@ class IdeServices private constructor(
      *  backend points at this engine on project swap. */
     private val env: ApplicationEnvironment,
 ) : AutoCloseable {
+    // The project-settings cache (see [cachedProjectSettings]), declared first: initializers below read settings.
+    private val projectSettingsLock = Any()
+    private var projectSettingsCache: java.util.Properties? = null
+    private var projectSettingsStamp: List<Any?>? = null
 
     // Phase-0 build-process-isolation instrumentation (docs/build-process-isolation.md): the most recent
     // build/run and project-open heap peaks. [lastBuildPeak] is read by the analytics bridge to attach to
@@ -594,8 +600,11 @@ class IdeServices private constructor(
             this@IdeServices.analysisUnavailable.add(language)
         }
 
-        override fun removeOverlay(path: Path) =
-            this@IdeServices.openDocuments.remove(path.toAbsolutePath().normalize())
+        override fun removeOverlay(path: Path): String? {
+            val norm = path.toAbsolutePath().normalize()
+            this@IdeServices.diskBaselines.remove(norm)
+            return this@IdeServices.openDocuments.remove(norm)
+        }
 
         override fun projectJavaFiles() = this@IdeServices.projectJavaFiles()
         override fun isValidJavaIdentifier(s: String) = this@IdeServices.isValidJavaIdentifier(s)
@@ -1305,6 +1314,21 @@ class IdeServices private constructor(
     // touching disk — true working copies, not flushed buffers.
     private val openDocuments = ConcurrentHashMap<Path, String>()
 
+    /**
+     * Per overlay, the text it and the file on disk last agreed on: what the editor loaded, saved, or took from
+     * disk. An overlay equal to its baseline holds no unsaved edit, so [flushOpenDocuments] leaves its file
+     * alone, whatever the file now holds. Without it the flush wrote every overlay that differed from disk,
+     * which put a stale tab's old text back over a file copied in from outside, and re-created a file deleted
+     * from outside. An overlay with no baseline (registered by [updateDocument] alone) flushes as before.
+     */
+    private val diskBaselines = ConcurrentHashMap<Path, String>()
+
+    /** [text] is both the overlay for [norm] and what its file holds. */
+    private fun putInStep(norm: Path, text: String) {
+        openDocuments[norm] = text
+        diskBaselines[norm] = text
+    }
+
     /** Called by the editor on every change so cross-file analysis sees the latest text. */
     fun updateDocument(file: Path, text: String) {
         val norm = file.toAbsolutePath().normalize()
@@ -1314,6 +1338,16 @@ class IdeServices private constructor(
         // regenerates `R` from the now-buffer-aware resource repository (its fingerprint includes open res
         // buffers). Cheap cache-drops; the lazy repo rebuild is fingerprint-gated (only when content changed).
         if (changed && isResourcePath(norm)) invalidateSyntheticClasses()
+    }
+
+    /**
+     * The editor (re)loaded [file]'s buffer from disk: [text] is what the file holds, so the buffer has no
+     * unsaved edit. The reload after an outside write must say so, or the overlay reads as edited and the next
+     * build's flush writes it back over the file.
+     */
+    fun documentLoaded(file: Path, text: String) {
+        updateDocument(file, text)
+        diskBaselines[file.toAbsolutePath().normalize()] = text
     }
 
     /**
@@ -1341,7 +1375,9 @@ class IdeServices private constructor(
         val disk = runCatching { norm.readText() }.getOrNull() ?: return
         // replace(), not put(): the tab may have been closed between the containsKey and here, and this must
         // not resurrect an overlay for a file nothing has open.
-        if (openDocuments.replace(norm, disk) == disk) return
+        val previous = openDocuments.replace(norm, disk) ?: return
+        diskBaselines[norm] = disk
+        if (previous == disk) return
         if (isResourcePath(norm)) invalidateSyntheticClasses()
     }
 
@@ -1355,6 +1391,7 @@ class IdeServices private constructor(
      */
     fun documentClosed(file: Path) {
         val norm = file.toAbsolutePath().normalize()
+        diskBaselines.remove(norm)
         if (openDocuments.remove(norm) == null) return
         // Same reason as [updateDocument]: dropping a `res/` buffer changes what the synthetic `R` resolves.
         if (isResourcePath(norm)) invalidateSyntheticClasses()
@@ -1384,6 +1421,7 @@ class IdeServices private constructor(
         val updated = sb.toString()
         updateDocument(path, updated)
         runCatching { path.parent?.let { Files.createDirectories(it) }; path.writeText(updated) }
+            .onSuccess { diskBaselines[path] = updated }
         events.filesMutated(listOf(path), null)
     }
 
@@ -1399,6 +1437,7 @@ class IdeServices private constructor(
         openDocuments[path] = text
         path.parent?.let { Files.createDirectories(it) }
         path.writeText(text)
+        diskBaselines[path] = text
         events.fileChanged(path, text)
     }
 
@@ -1412,10 +1451,16 @@ class IdeServices private constructor(
      * writes when content actually changed. Public so the UI process can flush before a build runs in the
      * separate `:build` daemon — the daemon has no editor buffers of its own, so its own flush is a no-op and
      * it would otherwise compile whatever was last saved to disk (running stale code on an unsaved edit).
+     *
+     * Only a buffer with an unsaved edit (one that differs from its [diskBaselines] entry) is written. A clean
+     * buffer that differs from disk means the FILE changed, from outside the IDE, and the file is newer.
+     * An edited buffer still wins over an outside write: it is what the user sees and is building, and the tab
+     * already flags that the two have diverged.
      */
     fun flushOpenDocuments() {
         for ((path, content) in openDocuments) {
             runCatching {
+                if (diskBaselines[path] == content) return@runCatching
                 // Same guard as save(): an opened binary/oversized file lives in the overlay as placeholder
                 // text (its bytes never differ from that placeholder), so flushing it before a build would
                 // overwrite the real bytes on disk. Skip it — this is the frequent PNG-corruption path.
@@ -1424,6 +1469,7 @@ class IdeServices private constructor(
                     path.parent?.let { Files.createDirectories(it) }
                     path.writeText(content)
                 }
+                diskBaselines[path] = content
             }
         }
     }
@@ -1714,12 +1760,32 @@ class IdeServices private constructor(
     private val inspectionsFile: Path get() = store.rootPath.resolve(".platform/inspections.properties")
 
     /** Read a per-project generic-settings value (the store behind PROJECT-scoped settings pages). */
-    fun projectPref(key: String): String? = loadProps(projectSettingsFile).getProperty(key)
+    fun projectPref(key: String): String? = cachedProjectSettings().getProperty(key)
 
     /** Write a per-project generic-settings value. */
-    fun setProjectPref(key: String, value: String) {
-        val props = loadProps(projectSettingsFile).apply { setProperty(key, value) }
+    fun setProjectPref(key: String, value: String) = synchronized(projectSettingsLock) {
+        val props = java.util.Properties().apply { putAll(cachedProjectSettings()) }
+        props.setProperty(key, value)
+        projectSettingsCache = props
         storeProps(projectSettingsFile, props, "CodeAssist project settings")
+        projectSettingsStamp = fileStamp(projectSettingsFile)
+    }
+
+    /** The file's id, modification time and size: what changes when this or another process rewrites it. */
+    private fun fileStamp(file: Path): List<Any?>? = runCatching {
+        val a = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes::class.java)
+        listOf(a.fileKey(), a.lastModifiedTime().toMillis(), a.size())
+    }.getOrNull()
+
+    /**
+     * The project settings as last read, re-read only when the file changed. Each project-scoped control on a
+     * Settings page reads one key, and opening and parsing the file per key (often on shared storage, on the
+     * UI thread) made those pages lag. The result is shared: callers must not mutate it.
+     */
+    private fun cachedProjectSettings(): java.util.Properties = synchronized(projectSettingsLock) {
+        val stamp = fileStamp(projectSettingsFile)
+        projectSettingsCache?.takeIf { stamp == projectSettingsStamp }?.let { return it }
+        return loadProps(projectSettingsFile).also { projectSettingsCache = it; projectSettingsStamp = stamp }
     }
 
     // --- active build variant (per module) -----------------------------------------------------
@@ -2923,7 +2989,7 @@ class IdeServices private constructor(
     private fun dropOverlaysUnder(root: Path) {
         val r = normPath(root)
         openDocuments.keys.filter { it == r || it.startsWith(r) }
-            .forEach { openDocuments.remove(it) }
+            .forEach { openDocuments.remove(it); diskBaselines.remove(it) }
     }
 
     /** Re-point open-document overlays from [from] (a file or directory) to [to] after a move/rename. */
@@ -2933,6 +2999,7 @@ class IdeServices private constructor(
         for (k in openDocuments.keys.filter { it == f || it.startsWith(f) }) {
             val dest = if (k == f) t else t.resolve(f.relativize(k))
             openDocuments.remove(k)?.let { openDocuments[normPath(dest)] = it }
+            diskBaselines.remove(k)?.let { diskBaselines[normPath(dest)] = it }
         }
     }
 
@@ -3003,8 +3070,9 @@ class IdeServices private constructor(
             val text = openDocuments[key] ?: runCatching { f.readText() }.getOrNull() ?: continue
             val rewrite = (if (isKotlinSource(f)) rewriteKotlinPackage(f, text, newPkg)
             else rewriteJavaPackage(f, text, newPkg)) ?: continue
-            openDocuments[key] = rewrite.updated
             runCatching { f.writeText(rewrite.updated) }
+                .onSuccess { putInStep(key, rewrite.updated) }
+                .onFailure { openDocuments[key] = rewrite.updated }
             if (updateReferences) for (type in rewrite.topLevelNames) {
                 val oldFqn = if (rewrite.oldPkg.isEmpty()) type else "${rewrite.oldPkg}.$type"
                 val newFqn = if (newPkg.isEmpty()) type else "$newPkg.$type"
@@ -3063,8 +3131,9 @@ class IdeServices private constructor(
                 if (isKotlinSource(file)) rewriteKotlinImports(text, renames)
                 else rewriteJavaImports(text, renames)
             if (updated != text) {
-                openDocuments[key] = updated
                 runCatching { file.writeText(updated) }
+                    .onSuccess { putInStep(key, updated) }
+                    .onFailure { openDocuments[key] = updated }
             }
         }
     }
@@ -3589,18 +3658,11 @@ class IdeServices private constructor(
             ?: return ownedPreview(module, repo, fingerprint, themeName, title, text, request, null)
 
         // Resolve against the user's ACTIVE variant (the persisted per-module choice the editor and build
-        // target), not the default — the merged manifest, exploded AARs, resource link caches and dex caches
+        // target), not the default — the exploded AARs, resource link caches and dex caches
         // are all variant-scoped, so the default here made a variant switch invisible to the preview.
         val selectedVariant = AndroidVariants.select(module, activeVariant(module))
             ?: AndroidVariants.defaultVariant(module)
         val variant = selectedVariant?.name ?: "debug"
-        // Relink the live buffer over the project's resources so the preview reflects the edited (or newly
-        // added) layout. The linker self-builds its base from the live res tree, so a prior successful build
-        // is NOT required and edits to other resources show; it falls back internally to the build's flats.
-        val moduleDir = Paths.get(module.dir.path)
-        val manifestPath =
-            AndroidBuildSystem.mergedManifestPath(module, variant)
-                .takeIf { Files.exists(it) } ?: moduleDir.resolve(facet.manifest)
         val resDirs = AndroidResources.resourceDirs(module, store.workspace)
 
         // The runtime library set + the AAR package names, resolved once. Must be the RUNTIME set (what the APK
@@ -3630,8 +3692,7 @@ class IdeServices private constructor(
 
         // Relink the live buffer over the project's resources so the preview reflects the edited (or newly
         // added) layout. The linker self-builds its base from the live res tree, so a prior successful build
-        // is NOT required and edits to other resources show; it falls back internally to the build's flats. It
-        // also generates a preview `R.jar` (app + [extraPackages]) with ids matching the relinked arsc, so the
+        // is NOT required and edits to other resources show. It also generates a preview `R.jar` (app + [extraPackages]) with ids matching the relinked arsc, so the
         // preview no longer depends on a prior build's (id-mismatched, possibly absent) R.jar.
         val linked = previewResourceLinker?.link(
             module,
@@ -3639,13 +3700,25 @@ class IdeServices private constructor(
             resDirs,
             file,
             text,
-            manifestPath,
             facet.namespace,
             facet.minSdk,
             facet.targetSdk,
             extraPackages = extraPackages,
             progress = { _realViewProgress.value = PreviewProgress(it) },
         )
+        // Broken project resources: report them. Rendering the build's last resources.ap_ (or owned rendering)
+        // here would show the layout wrong with no hint why.
+        if (linked != null && linked.resourceErrors.isNotEmpty()) {
+            return LayoutPreviewResult(
+                RenderNode().apply { renderer = PlaceholderRenderer; tag = "real-view" },
+                ProjectPreviewResources(repo, request.density, request.density, night = request.night, themeName = themeName),
+                request.density,
+                request.density,
+                resourceErrors = linked.resourceErrors.map {
+                    dev.ide.preview.ResourceError(it.file?.toString(), it.line, it.message)
+                },
+            )
+        }
         // The resources.ap_ to render against: the live relink, else the build's own, else owned rendering.
         val resourcesAp = linked?.resourcesAp
             ?: AndroidBuildSystem.resourcesApPath(module, variant)
@@ -4113,6 +4186,45 @@ class IdeServices private constructor(
         sourceIndexGeneration.incrementAndGet()
     }
 
+    /**
+     * How many times the project's sources use the member a completion item labeled [label] names, after a `.`
+     * (see [MemberUsageIndex]), for the app-global `platform.projectUsage` weigher. A Kotlin property and its
+     * Java accessors count as one member (`text` also counts `getText`/`setText`, and the reverse), so a Java
+     * project's `setText(...)` calls rank `text` in a Kotlin file. Memoized per [sourceIndexGeneration]:
+     * completion asks for every candidate on every query.
+     */
+    fun memberUsageCount(label: String): Int {
+        val name = label.takeWhile { it.isLetterOrDigit() || it == '_' }
+        if (name.isEmpty()) return 0
+        val gen = sourceIndexGeneration.get()
+        val memo = memberUsageMemo
+        val counts = if (memo.first == gen) memo.second else ConcurrentHashMap<String, Int>().also { memberUsageMemo = gen to it }
+        return memberNameForms(name).sumOf { form ->
+            counts.computeIfAbsent(form) { indexService.exact<Int>(MemberUsageIndex.id, it).sum() }
+        }
+    }
+
+    @Volatile
+    private var memberUsageMemo: Pair<Long, ConcurrentHashMap<String, Int>> = -1L to ConcurrentHashMap()
+
+    /** [name] and the other spellings of the same member: a property's accessors, or an accessor's property. */
+    private fun memberNameForms(name: String): List<String> {
+        fun decap(rest: String) = rest.takeIf { it.isNotEmpty() && it[0].isUpperCase() }?.let { it[0].lowercaseChar() + it.substring(1) }
+        val property = when {
+            name.startsWith("get") -> decap(name.substring(3))
+            name.startsWith("set") -> decap(name.substring(3))
+            else -> null
+        }
+        return when {
+            property != null -> listOf(name, property)
+            name[0].isLowerCase() && !name.startsWith("is") -> {
+                val cap = name[0].uppercaseChar() + name.substring(1)
+                listOf(name, "get$cap", "set$cap")
+            }
+            else -> listOf(name)
+        }
+    }
+
     /** Memoized [sourceCustomViewScan], keyed by [sourceIndexGeneration] — so the XML analyzer's custom-view tag
      *  list reflects a just-saved project `View` subclass WITHOUT an analyzer rebuild, yet completion stays O(1)
      *  between source edits (the [SubtypeIndex] BFS runs only when a source save/resync bumped the generation). */
@@ -4361,10 +4473,10 @@ class IdeServices private constructor(
         else -> dev.ide.preview.ValueFormat.ANY
     }
 
-    /** The `android.jar` for the preview compile — the device's bundled jar, else a detected desktop SDK's. */
+    /** The `android.jar` for the preview compile: the device's bundled jar, else a desktop SDK's or the desktop
+     *  app's own. */
     private fun previewAndroidJar(): Path? =
-        androidTools?.androidJar ?: (AndroidSdk.findSdkRoot()
-            ?.let { AndroidSdk.detect(it) }?.androidJar)
+        androidTools?.androidJar ?: BundledAndroidToolchain.androidJar()
 
     /** The activity/application theme name (raw dotted, sans `@style/`) and window title from the manifest. */
     private fun manifestThemeAndLabel(
@@ -4754,9 +4866,12 @@ class IdeServices private constructor(
             return IdeServices(platform, store, env = env)
         }
 
-        /** An installed Android SDK's `android.jar` as the workspace SDK, or null if none is found. */
+        /** An Android `android.jar` as the workspace SDK (installed or bundled), or null if there is none. */
         private fun detectAndroidSdk(): SdkData? {
-            val sdk = AndroidSdk.findSdkRoot()?.let(AndroidSdk::detect) ?: return null
+            // An installed SDK, else the toolchain the desktop app ships, so a machine with no SDK still opens
+            // Android projects against android.jar rather than the JDK.
+            val sdk = AndroidSdk.findSdkRoot()?.let(AndroidSdk::detect) ?: BundledAndroidToolchain.bundled()
+                ?: return null
             // android.jar omits java.lang.invoke.StringConcatFactory / LambdaMetafactory; ship the build-tools
             // desugar stubs alongside it on the boot classpath so Java ≥ 9 string-concat (`"a" + b`) and
             // lambdas resolve during analysis (and compilation). Compile-only — see AndroidSdk.coreLambdaStubs.
