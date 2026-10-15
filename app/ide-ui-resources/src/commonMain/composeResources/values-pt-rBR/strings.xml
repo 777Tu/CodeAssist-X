@@ -110,6 +110,9 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="your_codeassist_files_content">Abra esta pasta em qualquer gerenciador de arquivos para navegar pelos seus projetos, adicionar ícones ou recursos, ou editar pelo PC.</string>
     <string name="open_in_the_file_manager">Abrir no gerenciador de arquivos</string>
     <string name="choose_start_point">Escolha um ponto de partida.</string>
+    <string name="templates_search">Buscar modelos</string>
+    <string name="templates_all">Todos</string>
+    <string name="templates_no_match">Nenhum modelo corresponde a “%1$s”.</string>
     <string name="backup">Fazer backup</string>
     <string name="delete_project">Excluir projeto?</string>
     <string name="delete_project_content">“%1$s” e todos os seus arquivos serão excluídos permanentemente. Isso não pode ser desfeito.</string>
@@ -347,6 +350,9 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <!-- app/banners/editor-screen -->
     <string name="gradle_mode_title">Modo de compatibilidade com Gradle</string>
     <string name="gradle_resync">Sincronizar novamente</string>
+    <string name="gradle_kmp_target">Destino multiplataforma</string>
+    <string name="gradle_kmp_android">Android</string>
+    <string name="gradle_kmp_jvm">Desktop (JVM)</string>
     <string name="gradle_syncing">Sincronizando a partir do Gradle…</string>
     <string name="sources_not_installed">As fontes da plataforma Android (%1$s) não estão instaladas. Elas são necessárias para os nomes de parâmetros e a documentação de android.*.</string>
     <string name="sources_download">Baixar</string>
@@ -482,6 +488,18 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="run_building_module">Compilando %1$s…</string>
     <string name="run_running_module">Executando %1$s</string>
     <string name="run_no_output">(sem saída)</string>
+    <string name="run_tab_tests">Testes</string>
+    <string name="run_tab_output">Saída</string>
+    <string name="tests_passed">%1$d aprovados</string>
+    <string name="tests_failed">%1$d falharam</string>
+    <string name="tests_skipped">%1$d ignorados</string>
+    <string name="tests_progress">%1$d de %2$d</string>
+    <string name="tests_rerun_failed">Repetir falhas</string>
+    <string name="tests_run_one">Executar teste</string>
+    <string name="tests_run_class">Executar todos os testes da classe</string>
+    <string name="tests_none_found">Nenhum teste encontrado</string>
+    <string name="tests_none_in_file">Nenhum teste neste arquivo</string>
+    <string name="tests_class_failed">A classe falhou: %1$s</string>
     <string name="run_type_input">Digite a entrada, pressione Enter…</string>
     <string name="run_send">Enviar</string>
     <string name="run_end_input_eof">Encerrar entrada (EOF)</string>
@@ -1178,4 +1196,6 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     </plurals>
     <string name="close_project_building">Uma compilação ainda está em andamento.</string>
     <string name="close_project_save_and_close">Salvar e fechar</string>
+    <string name="sdk_platform_tools">Ferramentas da plataforma</string>
+    <string name="sdk_platform_tools_desc">adb, que o Executar usa para instalar e abrir seu app em um celular ou emulador conectado a este computador.</string>
 </resources>

@@ -110,6 +110,9 @@
     <string name="your_codeassist_files_content">Откройте эту папку в любом файловом менеджере, чтобы просматривать проекты, добавлять иконки или редактировать с ПК.</string>
     <string name="open_in_the_file_manager">Открыть в файловом менеджере</string>
     <string name="choose_start_point">Выберите начальную точку.</string>
+    <string name="templates_search">Поиск шаблонов</string>
+    <string name="templates_all">Все</string>
+    <string name="templates_no_match">Нет шаблонов, соответствующих «%1$s».</string>
     <string name="backup">Создать бэкап</string>
     <string name="delete_project">Удалить проект?</string>
     <string name="delete_project_content">«%1$s» и все его файлы будут удалены навсегда. Это действие нельзя отменить.</string>
@@ -305,6 +308,9 @@
     <string name="find_all">Все</string>
     <string name="gradle_mode_title">Режим совместимости с Gradle</string>
     <string name="gradle_resync">Синхронизировать заново</string>
+    <string name="gradle_kmp_target">Целевая платформа</string>
+    <string name="gradle_kmp_android">Android</string>
+    <string name="gradle_kmp_jvm">Десктоп (JVM)</string>
     <string name="gradle_syncing">Синхронизация из Gradle…</string>
     <string name="sources_not_installed">Исходники платформы Android (%1$s) не установлены. Они нужны для имён параметров android.* и документации.</string>
     <string name="sources_download">Скачать</string>
@@ -432,6 +438,18 @@
     <string name="run_building_module">Сборка %1$s…</string>
     <string name="run_running_module">Выполняется %1$s</string>
     <string name="run_no_output">(нет вывода)</string>
+    <string name="run_tab_tests">Тесты</string>
+    <string name="run_tab_output">Вывод</string>
+    <string name="tests_passed">Пройдено: %1$d</string>
+    <string name="tests_failed">Не пройдено: %1$d</string>
+    <string name="tests_skipped">Пропущено: %1$d</string>
+    <string name="tests_progress">%1$d из %2$d</string>
+    <string name="tests_rerun_failed">Перезапустить упавшие</string>
+    <string name="tests_run_one">Запустить тест</string>
+    <string name="tests_run_class">Запустить все тесты класса</string>
+    <string name="tests_none_found">Тесты не найдены</string>
+    <string name="tests_none_in_file">В этом файле нет тестов</string>
+    <string name="tests_class_failed">Ошибка класса: %1$s</string>
     <string name="run_type_input">Введите данные, нажмите Enter…</string>
     <string name="run_send">Отправить</string>
     <string name="run_end_input_eof">Завершить ввод (EOF)</string>
@@ -1151,4 +1169,6 @@
     </plurals>
     <string name="close_project_building">Сборка ещё выполняется.</string>
     <string name="close_project_save_and_close">Сохранить и закрыть</string>
+    <string name="sdk_platform_tools">Инструменты платформы</string>
+    <string name="sdk_platform_tools_desc">adb: с его помощью «Запуск» устанавливает и открывает приложение на телефоне или эмуляторе, подключённом к этому компьютеру.</string>
 </resources>

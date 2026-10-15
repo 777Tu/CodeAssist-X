@@ -1,5 +1,6 @@
 package dev.ide.core
 
+import dev.ide.ui.backend.TestOutput
 import dev.ide.analysis.ACTION_PROVIDER_EP
 import dev.ide.analysis.ANALYZER_EP
 import dev.ide.analysis.AnalysisEvent
@@ -81,6 +82,7 @@ import dev.ide.core.completion.CompletionStats
 import dev.ide.core.completion.MemberUsageIndex
 import dev.ide.core.completion.PostfixContributor
 import dev.ide.core.gradle.GradleImport
+import dev.ide.core.gradle.GradleKmp
 import dev.ide.core.perf.MB_BYTES
 import dev.ide.core.perf.MEM_SAMPLE_INTERVAL_MS
 import dev.ide.core.perf.MemSample
@@ -89,7 +91,9 @@ import dev.ide.core.project.SampleProject
 import dev.ide.core.sdk.BundledAndroidToolchain
 import dev.ide.core.sdk.SdkManagerService
 import dev.ide.core.sdk.SwingApiStubs
+import dev.ide.core.services.AndroidEditorFeatures
 import dev.ide.core.services.AndroidResourceService
+import dev.ide.core.services.ResourceSwatch
 import dev.ide.core.services.BlockService
 import dev.ide.core.services.BuildService
 import dev.ide.core.services.ComposePreviewService
@@ -245,6 +249,7 @@ import dev.ide.model.impl.ExternalModelApplier
 import dev.ide.model.impl.ModelPersistence
 import dev.ide.model.impl.ProjectModel
 import dev.ide.model.impl.ProjectModelStore
+import dev.ide.model.sync.ProjectImporter
 import dev.ide.model.impl.SdkData
 import dev.ide.model.impl.jdk.CorePlatformProvider
 import dev.ide.model.impl.jdk.JdkSdkProvider
@@ -303,6 +308,7 @@ import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -586,6 +592,7 @@ class IdeServices private constructor(
         override fun sourceRoots(module: Module) = this@IdeServices.sourceRoots(module)
         override fun treeRoots(module: Module) = this@IdeServices.treeRoots(module)
         override fun overlayText(path: Path) = this@IdeServices.openDocuments[path]
+        override fun openDocumentPaths(): Set<Path> = this@IdeServices.openDocuments.keys.toSet()
         override fun flushOpenDocuments() = this@IdeServices.flushOpenDocuments()
         override fun ensureKotlinStdlib() = this@IdeServices.ensureKotlinStdlib()
         override fun parse(file: Path, text: String) = this@IdeServices.parse(file, text)
@@ -749,6 +756,18 @@ class IdeServices private constructor(
     internal val resources: AndroidResourceService
         get() = store.workspaceContainer.getService(ANDROID_RESOURCE_SERVICE)
 
+    /** Android Go to (declaration variants, usages, related files), Quick Doc, resource rename and gutter
+     *  swatches, over one shared view of the project's resources and sources. */
+    private val androidEditor by lazy {
+        AndroidEditorFeatures(
+            engineContext,
+            sdkMetadata = ::sdkLayoutMetadata,
+            customAttrs = { customAttrsMetadata(it) },
+            // A desktop SDK's platform ships its resources beside android.jar; the device's bundled jar doesn't.
+            frameworkResDir = { previewAndroidJar()?.parent?.resolve("data")?.resolve("res")?.takeIf { Files.isDirectory(it) } },
+        )
+    }
+
     /** WORKSPACE-scoped Java rename refactoring (prepare + apply across the project). */
     internal val refactor: RefactorService
         get() = store.workspaceContainer.getService(REFACTOR_SERVICE)
@@ -870,7 +889,7 @@ class IdeServices private constructor(
             // model/classpath/compilers, never the editor index, so that baseline is left free for the dexer/R8.
             memLog.info("build-only engine: skipping editor index")
         } else if (androidTools != null) {
-            openJob = indexScope.launch {
+            openJob = indexScope.launch(start = CoroutineStart.LAZY) {
                 // Phase-0 build-process-isolation instrumentation (docs/build-process-isolation.md): track the
                 // project-open memory peak so it can be compared against a build's peak.
                 val openPeak = PeakHeap().also { it.record() }
@@ -893,19 +912,13 @@ class IdeServices private constructor(
                 }
             }
         } else {
-            openJob = indexScope.launch {
+            openJob = indexScope.launch(start = CoroutineStart.LAZY) {
                 runIndexPass(IndexPassTrigger.OPEN)
                 memLog.info("after index build: ${MemSample.now().fmt()}")
             }
         }
-        // Arm the event hub's reactions only now: init's own commits (ensureKotlinStdlib) must not trigger
-        // invalidation over fields that are still initializing (a throwing reaction would abort the commit).
-        events.activate()
-        // This is now the active project for app-level extension callbacks that fire outside any service scope
-        // (the command actions, the synthetic-R provider, the XML resource host — all registered once on the
-        // app registry). Set LAST in init, so the engine is fully constructed before it can be resolved as the
-        // active one. The backend re-asserts this on project swap; an engine clears it (if still itself) on close.
-        env.activeEngine = this
+        // The open job is created LAZY and started, with the event hub and the active-engine handoff, by the
+        // `init` at the END of the class: see there.
     }
 
     /** Heap a new allocation could still claim before hitting the cap (`max - used`) — the headroom before an
@@ -1962,6 +1975,27 @@ class IdeServices private constructor(
      */
     internal suspend fun syncFromBuildFiles(): ProjectSyncOutcome = projectSync.sync(SyncReason.MANUAL)
 
+    /**
+     * The target this compatibility-mode project's Kotlin Multiplatform modules are imported for, or null
+     * when no module could be imported as either Android or the JVM. Reads the build scripts.
+     */
+    fun kmpTargetChoice(): GradleKmp.Platform? =
+        if (!isCompatibilityMode()) null else GradleImport.kmpTargetChoice(workspaceRoot)
+
+    /**
+     * Import the multiplatform modules for [platform] from now on, and re-sync. The modules the switch
+     * changes are rebuilt rather than refreshed: a refresh keeps a module's type, merges its source roots and
+     * keeps its facets, so the old target's `androidMain` roots and `[android]` facet would survive it.
+     */
+    internal suspend fun switchKmpTarget(platform: GradleKmp.Platform): ProjectSyncOutcome {
+        fun shapes() = GradleImport.parse(workspaceRoot)?.modules.orEmpty()
+            .associate { it.name to (it.kind to it.kmp?.platform) }
+        val before = shapes()
+        GradleKmp.setPreference(workspaceRoot, platform)
+        val changed = shapes().filter { (name, shape) -> before[name] != shape }.keys
+        return projectSync.sync(SyncReason.MANUAL, recreate = changed)
+    }
+
     /** Convert this compatibility-mode project to a native CodeAssist project (see [GradleImport.convertToNative]).
      *  Pure disk operation — the model is already the source of truth, so nothing needs re-resolving. */
     internal fun convertToNative(): GradleImport.ConvertOutcome = GradleImport.convertToNative(workspaceRoot)
@@ -2450,8 +2484,50 @@ class IdeServices private constructor(
             override val text: String = text
             override val languageId: String? = languageFor(file).id.takeIf { it.isNotBlank() }
         }
-        return decorationCollector.collect(ctx) { providerId, error ->
+        val collected = decorationCollector.collect(ctx) { providerId, error ->
             decorationLog.warn("editor decoration provider '$providerId' failed on $file", error)
+        }
+        val tests = runCatching { testGutterMarks(file, text) }.getOrDefault(emptyList())
+        if (tests.isEmpty()) return collected
+        return dev.ide.plugin.editor.EditorDecorations(collected.ranges, collected.gutter + tests, collected.inlays)
+    }
+
+    /**
+     * Run marks for the tests in [file] when it sits in a test source root of a module that can run tests: one
+     * on each test class (all its tests) and one on each test. A mark's action is the `test:` Run task itself,
+     * prefixed so the editor knows to start it as a run ([TestOutput.GUTTER_ACTION_PREFIX]). An app's `androidTest`
+     * file gets `androidTest:` marks, where instrumented tests can run (the desktop, over adb).
+     */
+    private fun testGutterMarks(file: Path, text: String): List<dev.ide.plugin.editor.GutterMark> {
+        val name = file.fileName?.toString() ?: return emptyList()
+        if (!name.endsWith(".kt") && !name.endsWith(".java")) return emptyList()
+        val target = file.toAbsolutePath().normalize()
+        fun under(roots: List<Path>) = roots.any { target.startsWith(it.toAbsolutePath().normalize()) }
+        var kind = TestOutput.LOCAL
+        val module = modules().firstOrNull { m -> under(dev.ide.build.engine.testSourceRootDirs(m)) }
+            ?: modules().firstOrNull { m ->
+                m.type.id == "android-app" && apkInstaller?.runsInstrumentation == true &&
+                    under(dev.ide.build.engine.androidTestSourceRootDirs(m))
+            }?.also { kind = TestOutput.INSTRUMENTED }
+            ?: return emptyList()
+        val hits = if (name.endsWith(".kt")) {
+            dev.ide.lang.kotlin.index.KotlinTestScan.scan(name, text).map { Triple(it.classFqn, it.method, it.offset) }
+        } else {
+            dev.ide.lang.java.index.JavaTestScan.scan(text).map { Triple(it.classFqn, it.method, it.offset) }
+        }
+        if (hits.isEmpty()) return emptyList()
+        val lineStarts = ArrayList<Int>().apply { add(0); text.forEachIndexed { i, c -> if (c == '\n') add(i + 1) } }
+        return hits.map { (cls, method, offset) ->
+            val line = lineStarts.binarySearch(offset).let { if (it >= 0) it else -it - 2 }
+            val taskId = TestOutput.taskId(module.name, listOf(TestOutput.target(cls, method)), kind)
+            dev.ide.plugin.editor.GutterMark(
+                line = line,
+                iconId = "run",
+                tint = dev.ide.plugin.editor.DecorationTint.Success,
+                tooltip = if (method == null) "Run all tests in ${cls.substringAfterLast('.')}" else "Run $method",
+                actionId = TestOutput.GUTTER_ACTION_PREFIX + taskId,
+                order = 100,
+            )
         }
     }
 
@@ -2496,7 +2572,13 @@ class IdeServices private constructor(
     /** Quick documentation (signature + doc comment) for the symbol at [offset] in [file]'s buffer, or null.
      *  Resolves through the live overlay so cross-file references reach their declaration. */
     fun quickDocAt(file: Path, text: String, offset: Int): dev.ide.lang.resolve.QuickDocInfo? =
-        languageFeatures.quickDocAt(file, text, offset)
+        // An Android attribute or resource (incl. `R.string.x` in code) first: the analyzer would only describe
+        // the generated `R` field.
+        androidEditor.quickDoc.quickDocAt(file, text, offset) ?: languageFeatures.quickDocAt(file, text, offset)
+
+    /** Gutter color/drawable previews for the resource references in [file]'s buffer (res XML or code). */
+    fun resourceSwatches(file: Path, text: String): List<ResourceSwatch> =
+        androidEditor.swatches.swatches(file, text)
 
     /** Diagnostics for [text], bound to [file]'s module (empty if outside the project). */
     fun analyze(file: Path, text: String): AnalysisResult? {
@@ -2661,9 +2743,10 @@ class IdeServices private constructor(
 
     /**
      * Source go-to targets for the symbol at [offset] in [file]'s live buffer ([text]), for the requested
-     * navigation [kind] — Declaration / Implementation(s) / Type Declaration / Super. Kotlin source only;
-     * a [dev.ide.lang.kotlin.NavKind.DECLARATION] that resolves no code symbol falls back to the Android
-     * resource reference under the caret (so ⌘B still jumps `@string/…` / `R.…`). Empty when nothing applies.
+     * navigation [kind]. Code symbols come from the Kotlin analyzer; Android answers the rest: a resource's
+     * every declaration, a class or attribute named in XML, Usages and Related files. A Declaration nothing
+     * else resolves falls back to the resource repository (an unsaved, not yet indexed resource) and then to
+     * plugin declarations. Empty when nothing applies.
      */
     fun navigationTargets(
         file: Path,
@@ -2672,7 +2755,9 @@ class IdeServices private constructor(
         kind: dev.ide.lang.kotlin.NavKind,
     ): List<dev.ide.lang.kotlin.NavTarget> {
         val targets = kotlinEditor.navigationTargets(file, text, offset, kind)
-        if (targets.isNotEmpty() || kind != dev.ide.lang.kotlin.NavKind.DECLARATION) return targets
+        if (targets.isNotEmpty()) return targets
+        val android = androidEditor.navigation.targets(file, text, offset, kind)
+        if (android.isNotEmpty() || kind != dev.ide.lang.kotlin.NavKind.DECLARATION) return android
         return resourceDeclaration(file, text, offset) ?: pluginDeclarations(file, text, offset)
     }
 
@@ -2688,6 +2773,9 @@ class IdeServices private constructor(
         offset: Int,
     ): List<Pair<dev.ide.lang.kotlin.NavKind, List<dev.ide.lang.kotlin.NavTarget>>> {
         val opts = kotlinEditor.navigationOptions(file, text, offset).toMutableList()
+        for ((kind, targets) in androidEditor.navigation.options(file, text, offset)) {
+            if (opts.none { it.first == kind }) opts.add(kind to targets)
+        }
         if (opts.none { it.first == dev.ide.lang.kotlin.NavKind.DECLARATION }) {
             resourceDeclaration(file, text, offset)?.let { opts.add(dev.ide.lang.kotlin.NavKind.DECLARATION to it) }
         }
@@ -2960,20 +3048,22 @@ class IdeServices private constructor(
 
     // ---- rename refactoring ----------------------------------------------------------------------
 
-    /** The renameable symbol under the caret (its current name + a kind label), or null. Java only. */
-    /** The rename target under [offset] in [file]'s buffer (old name + kind), or null when not renameable. */
+    /** The rename target under [offset] in [file]'s buffer (old name + kind), or null when not renameable: an
+     *  Android resource anywhere it is named, else a Java symbol. */
     fun prepareRename(file: Path, text: String, offset: Int): RenameInfo? =
-        refactor.prepareRename(file, text, offset)
+        androidEditor.rename.prepareRename(file, text, offset) ?: refactor.prepareRename(file, text, offset)
 
     /**
-     * Rename the symbol under the caret to [newName] across the whole project: resolve the target, find every
-     * reference (binding-key match; a file-local symbol stays in its own file, otherwise project `.java` files
-     * are pre-filtered by name then parsed), then apply a multi-file edit to disk + the editor overlay. When a
-     * top-level public type whose name matches its file is renamed, the backing `.java` file is renamed too
-     * (its new path is returned so the editor can reopen it). Re-indexes and invalidates analyzers.
+     * Rename the symbol under the caret to [newName] across the whole project. An Android resource renames
+     * everywhere it is named (XML, `R.x.y`, binding classes, its files). Otherwise a Java symbol: resolve the
+     * target, find every reference (binding-key match; a file-local symbol stays in its own file, otherwise
+     * project `.java` files are pre-filtered by name then parsed), then apply a multi-file edit to disk + the
+     * editor overlay. When a top-level public type whose name matches its file is renamed, the backing `.java`
+     * file is renamed too (its new path is returned so the editor can reopen it). Re-indexes and invalidates
+     * analyzers.
      */
     suspend fun rename(file: Path, text: String, offset: Int, newName: String): RenameOutcome =
-        refactor.rename(file, text, offset, newName)
+        androidEditor.rename.rename(file, text, offset, newName) ?: refactor.rename(file, text, offset, newName)
 
     /** Every reference to the symbol under [offset] in [file]/[text], project-wide, as (file, range) pairs.
      *  Read-only (Java/JDT); empty when the position is not a resolvable symbol. */
@@ -4994,6 +5084,13 @@ class IdeServices private constructor(
             val templateArgs = TemplateArgs(args)
             template.generate(StoreScaffold(store, languageLevel), templateArgs)
             store.save()
+            // A template may author a foreign build rather than a model (the Kotlin Multiplatform ones write a
+            // Gradle project, which is the only shape a multi-target build has). It then declared no modules,
+            // and the importer that claims what it wrote reads them in, exactly as Import would.
+            if (store.workspace.projects.all { it.modules.isEmpty() }) {
+                ProjectSyncService.importerFor(env.platform.extensions, root)
+                    ?.let { importInto(root, store, it, languageLevel, env) }
+            }
             val services = IdeServices(
                 platform,
                 store,
@@ -5051,6 +5148,21 @@ class IdeServices private constructor(
             val importer = ProjectSyncService.importerFor(env.platform.extensions, root) ?: return false
             val (_, store) = openStore(root, env)
             ensureSdks(store, sdk, root)
+            return importInto(root, store, importer, languageLevel, env)
+        }
+
+        /**
+         * Read [root]'s build files with [importer] into [store] and record the import (marker, repositories,
+         * stamp): what [importExternalProjectAt] does once its store is open, and what [createProjectAt] does
+         * for a template that wrote a foreign build instead of a model.
+         */
+        private fun importInto(
+            root: Path,
+            store: ProjectModelStore,
+            importer: ProjectImporter,
+            languageLevel: LanguageLevel,
+            env: ApplicationEnvironment,
+        ): Boolean {
             val request = SyncRequest(root, NoSyncProgress, SyncReason.IMPORT)
             val outcome = runSync { importer.resolve(request) }
             val rawModel = outcome.model ?: return false
@@ -5100,6 +5212,26 @@ class IdeServices private constructor(
             store.save()
             UnrecognizedProjectMarker.write(root, origin)
         }
+    }
+
+    /**
+     * The last of construction, deliberately after every property: Kotlin runs property initializers and `init`
+     * blocks in source order, so anything that can call back into this engine from ANOTHER thread must not
+     * start before the fields below the first `init` exist. The project-open index pass used to be launched
+     * from that first `init` on `Dispatchers.Default`, and a fast worker reached [runIndexPass] while
+     * [indexSyncMutex] (declared ~200 lines later) was still null: an NPE on `Mutex.lock`.
+     */
+    init {
+        // Arm the event hub's reactions only now: init's own commits (ensureKotlinStdlib) must not trigger
+        // invalidation over fields that are still initializing (a throwing reaction would abort the commit, and a
+        // resync reads fields declared late in the class).
+        events.activate()
+        // This is now the active project for app-level extension callbacks that fire outside any service scope
+        // (the command actions, the synthetic-R provider, the XML resource host — all registered once on the
+        // app registry). Set once the engine is fully constructed, so it can't be resolved half-built. The
+        // backend re-asserts this on project swap; an engine clears it (if still itself) on close.
+        env.activeEngine = this
+        openJob?.start()
     }
 }
 

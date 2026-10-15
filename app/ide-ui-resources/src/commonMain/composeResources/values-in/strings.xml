@@ -110,6 +110,9 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="your_codeassist_files_content">Buka folder ini di manajer file mana pun untuk menjelajahi proyek Anda, menambahkan ikon atau aset, atau mengedit dari PC.</string>
     <string name="open_in_the_file_manager">Buka di manajer file</string>
     <string name="choose_start_point">Pilih titik awal.</string>
+    <string name="templates_search">Cari templat</string>
+    <string name="templates_all">Semua</string>
+    <string name="templates_no_match">Tidak ada templat yang cocok dengan “%1$s”.</string>
     <string name="backup">Cadangkan</string>
     <string name="delete_project">Hapus proyek?</string>
     <string name="delete_project_content">“%1$s” dan semua filenya akan dihapus secara permanen. Ini tidak dapat dibatalkan.</string>
@@ -335,6 +338,9 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="find_all">Semua</string>
     <string name="gradle_mode_title">Mode kompatibilitas Gradle</string>
     <string name="gradle_resync">Sinkron ulang</string>
+    <string name="gradle_kmp_target">Target multiplatform</string>
+    <string name="gradle_kmp_android">Android</string>
+    <string name="gradle_kmp_jvm">Desktop (JVM)</string>
     <string name="gradle_syncing">Menyinkronkan dari Gradle…</string>
     <string name="sources_not_installed">Sumber platform Android (%1$s) belum terpasang. Diperlukan untuk nama parameter &amp; dokumen android.*.</string>
     <string name="sources_download">Unduh</string>
@@ -465,6 +471,18 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="run_building_module">Membangun %1$s…</string>
     <string name="run_running_module">Menjalankan %1$s</string>
     <string name="run_no_output">(tidak ada output)</string>
+    <string name="run_tab_tests">Tes</string>
+    <string name="run_tab_output">Output</string>
+    <string name="tests_passed">%1$d lulus</string>
+    <string name="tests_failed">%1$d gagal</string>
+    <string name="tests_skipped">%1$d dilewati</string>
+    <string name="tests_progress">%1$d dari %2$d</string>
+    <string name="tests_rerun_failed">Ulangi yang gagal</string>
+    <string name="tests_run_one">Jalankan tes</string>
+    <string name="tests_run_class">Jalankan semua tes di kelas</string>
+    <string name="tests_none_found">Tidak ada tes ditemukan</string>
+    <string name="tests_none_in_file">Tidak ada tes di file ini</string>
+    <string name="tests_class_failed">Kelas gagal: %1$s</string>
     <string name="run_type_input">Ketik input, tekan Enter…</string>
     <string name="run_send">Kirim</string>
     <string name="run_end_input_eof">Akhiri input (EOF)</string>
@@ -1101,4 +1119,6 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     </plurals>
     <string name="close_project_building">Build masih berjalan.</string>
     <string name="close_project_save_and_close">Simpan &amp; tutup</string>
+    <string name="sdk_platform_tools">Alat platform</string>
+    <string name="sdk_platform_tools_desc">adb, yang dipakai Jalankan untuk memasang dan membuka aplikasi Anda di ponsel atau emulator yang terhubung ke komputer ini.</string>
 </resources>
