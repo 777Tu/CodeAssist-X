@@ -53,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.ide.ui.IdeUiState
 import dev.ide.ui.LeftPanelId
+import dev.ide.ui.ToolWindowSide
 import dev.ide.ui.backend.RunStatus
 import dev.ide.ui.backend.UiActionPlaces
 import dev.ide.ui.components.DropdownOverlay
@@ -93,7 +94,8 @@ internal fun BoxScope.AppShortcutsHost(
     val switcher = remember { FileSwitcherState() }
     val scope = rememberCoroutineScope()
     var toast by remember { mutableStateOf<String?>(null) }
-    var hidden by remember { mutableStateOf<HiddenToolWindows?>(null) }
+    // The tool windows "Hide all" put away, to bring back on the second press.
+    var hidden by remember { mutableStateOf<Map<ToolWindowSide, String>?>(null) }
     val openSettings by rememberUpdatedState(onOpenSettings)
     val newFile by rememberUpdatedState(onNewFile)
     val noBuildTask = stringResource(Res.string.shortcut_no_build_task)
@@ -121,20 +123,16 @@ internal fun BoxScope.AppShortcutsHost(
 
     fun toggleToolWindows(): Boolean {
         val saved = hidden
-        val anyOpen = state.selectedLeftPanel != null || state.selectedRightPanel != null || state.consoleOpen
+        val shown = state.shownToolWindows()
         when {
-            saved == null && anyOpen -> {
-                hidden = HiddenToolWindows(state.selectedLeftPanel, state.selectedRightPanel, state.consoleOpen)
-                state.selectedLeftPanel = null
-                state.selectedRightPanel = null
-                state.consoleOpen = false
+            saved == null && shown.isNotEmpty() -> {
+                hidden = shown
+                state.hideAllToolWindows()
                 focusEditor()
             }
             saved != null -> {
                 hidden = null
-                saved.left?.let { state.selectLeftPanel(it) }
-                saved.right?.let { state.selectRightPanel(it) }
-                state.consoleOpen = saved.console
+                state.restoreToolWindows(saved)
             }
             else -> return false
         }
@@ -259,11 +257,21 @@ internal fun BoxScope.AppShortcutsHost(
                 }
                 id == AppCommands.HIDE_ALL_TOOL_WINDOWS -> return@Runner toggleToolWindows()
                 id == AppCommands.FOCUS_EDITOR -> if (active == null) return@Runner false else focusEditor()
+                id == AppCommands.TOGGLE_ZEN -> {
+                    if (!state.zenMode && active == null) return@Runner false
+                    state.setZen(!state.zenMode)
+                    focusEditor()
+                }
 
                 id == AppCommands.RUN -> {
                     if (!state.backend.build.supported()) return@Runner false
-                    state.consoleOpen = true
-                    state.requestRun { state.backend.build.runBuild() }
+                    // What the Run button runs: the task last picked or started from the gutter, else the default.
+                    val selected = state.selectedRunTask
+                    if (selected != null) state.startRun(selected)
+                    else {
+                        state.consoleOpen = true
+                        state.requestRun { state.backend.build.runBuild() }
+                    }
                 }
                 id == AppCommands.RUN_TESTS -> {
                     // The file's test classes, from the run marks its editor already shows.
@@ -363,8 +371,6 @@ private val PALETTE_EXCLUDED = setOf(
     AppCommands.GO_TO_SYMBOL, AppCommands.SWITCHER, AppCommands.SWITCHER_BACK,
 )
 
-/** The tool windows "Hide all" put away, to bring back on the second press. */
-private class HiddenToolWindows(val left: String?, val right: String?, val console: Boolean)
 
 internal data class SwitcherItem(val path: String, val name: String, val open: Boolean, val modified: Boolean)
 

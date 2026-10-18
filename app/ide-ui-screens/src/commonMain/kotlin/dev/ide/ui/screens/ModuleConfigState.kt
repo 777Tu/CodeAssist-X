@@ -21,6 +21,7 @@ import dev.ide.ui.backend.UiPackagingOptions
 import dev.ide.ui.backend.UiPackagingRules
 import dev.ide.ui.backend.UiSigningAssignments
 import dev.ide.ui.backend.UiSourceRootRole
+import dev.ide.ui.backend.UiSourceSetScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -94,9 +95,10 @@ internal class ModulesListState(
         typeId: String,
         languageLevel: String?,
         facetValues: Map<String, Map<String, Any?>>,
+        parentDir: String,
     ) {
         scope.launch {
-            val result = backend.modules.createModule(name, typeId, languageLevel, facetValues)
+            val result = backend.modules.createModule(name, typeId, languageLevel, facetValues, parentDir)
             if (report(result)) {
                 newModuleOpen = false
                 reload()
@@ -346,8 +348,14 @@ internal class ModuleSettingsState(
 
     fun closeAddSourceRoot() { addRootOpen = false }
 
-    fun addSourceRoot(module: String, sourceSet: String, dirName: String, role: UiSourceRootRole) {
-        if (backend.modules.addSourceRoot(module, sourceSet, dirName, role) != null) reload()
+    fun addSourceRoot(module: String, sourceSet: String, dirName: String, role: UiSourceRootRole, newSetScope: UiSourceSetScope?) {
+        if (backend.modules.addSourceRoot(module, sourceSet, dirName, role) == null) return
+        if (newSetScope != null) backend.modules.setSourceSetScope(module, sourceSet, newSetScope)
+        reload()
+    }
+
+    fun setSourceSetScope(sourceSet: String, scope: UiSourceSetScope) {
+        if (backend.modules.setSourceSetScope(moduleName, sourceSet, scope)) reload()
     }
 
     fun removeSourceRoot(sourceSet: String, rootPath: String) {

@@ -303,6 +303,15 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="edchrome_more">Mais</string>
     <string name="sidebar_hide_tool_window_bar">Ocultar barra de janelas de ferramentas</string>
     <string name="toolwindow_hide">Ocultar</string>
+    <string name="toolwindow_maximize">Maximizar</string>
+    <string name="toolwindow_restore">Restaurar</string>
+    <string name="toolwindow_move_to">Mover para</string>
+    <string name="toolwindow_options">Opções da janela</string>
+    <string name="toolwindow_dock_bottom">Embaixo</string>
+    <string name="toolwindow_dock_left">Esquerda</string>
+    <string name="toolwindow_dock_right">Direita</string>
+    <string name="zen_mode">Modo zen</string>
+    <string name="zen_exit">Sair do modo zen</string>
     <string name="edchrome_settings_and_tools">Configurações e ferramentas</string>
     <string name="edchrome_toggle_navigator">Alternar navegador</string>
     <string name="edchrome_find_replace">Localizar / substituir</string>
@@ -326,6 +335,7 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     </plurals>
     <string name="edchrome_search_tasks">Pesquisar tarefas…</string>
     <string name="edchrome_nothing_to_run">Nada para executar</string>
+    <string name="run_choose_task">Escolher o que executar</string>
     <string name="edchrome_no_matching_tasks">Nenhuma tarefa correspondente</string>
     <string name="edchrome_build_variant">Variante de compilação</string>
     <string name="edchrome_no_variants">Nenhuma variante</string>
@@ -497,6 +507,7 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="tests_rerun_failed">Repetir falhas</string>
     <string name="tests_run_one">Executar teste</string>
     <string name="tests_run_class">Executar todos os testes da classe</string>
+    <string name="run_main_gutter">Executar main()</string>
     <string name="tests_none_found">Nenhum teste encontrado</string>
     <string name="tests_none_in_file">Nenhum teste neste arquivo</string>
     <string name="tests_class_failed">A classe falhou: %1$s</string>
@@ -603,6 +614,10 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="newfile_set_name_hint">ex.: test  ·  debug</string>
     <string name="newfile_custom_folder_hint">ex.: proto  ·  templates</string>
     <string name="newfile_treat_as">Tratar como</string>
+    <string name="source_scope_label">Contém</string>
+    <string name="source_scope_main">Código principal</string>
+    <string name="source_scope_test">Testes</string>
+    <string name="source_scope_change">Alterar o conteúdo de %1$s</string>
     <string name="newfile_created_at">Criado em %1$s</string>
 
     <!-- dialogs: FileOperationsDialogs -->
@@ -683,6 +698,18 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="settings_all_settings">Todas as configurações</string>
     <string name="settings_backup_ready">Backup pronto</string>
     <string name="settings_inspections_for_language">Inspeções de %1$s</string>
+    <string name="insp_off_slow">Desativada por deixar o editor lento: “%1$s” de %2$s</string>
+    <string name="insp_off_failing">Desativada após falhar repetidamente: “%1$s” de %2$s</string>
+    <string name="insp_off_again_slow">Desativada de novo, ainda lenta: “%1$s” de %2$s</string>
+    <string name="insp_off_again_failing">Desativada de novo, ainda falhando: “%1$s” de %2$s</string>
+    <plurals name="insp_off_many">
+        <item quantity="one">%1$d inspeção de plugin foi desativada por deixar o editor lento</item>
+        <item quantity="other">%1$d inspeções de plugins foram desativadas por deixar o editor lento</item>
+    </plurals>
+    <string name="insp_turn_back_on">Reativar</string>
+    <string name="insp_keep_off">Manter desativada</string>
+    <string name="insp_row_off_slow">Desativada nesta sessão: levou %1$d ms por verificação, acima do limite de %2$d ms. As inspeções rodam na mesma thread que a verificação de erros e o autocompletar, então uma inspeção lenta faz a digitação atrasar.</string>
+    <string name="insp_row_off_failing">Desativada nesta sessão após falhar repetidamente.</string>
     <string name="settings_advanced">Avançado</string>
     <string name="settings_code_style">Estilo de código</string>
     <string name="settings_code_style_subtitle">Perfis de formatação por linguagem e visualização ao vivo</string>
@@ -852,6 +879,7 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="keymap_reset_all">Redefinir tudo</string>
     <string name="keymap_no_results">Nenhum comando corresponde.</string>
     <string name="keymap_recording">Pressione as teclas…</string>
+    <string name="keymap_needs_modifier">Segure %1$s junto com essa tecla</string>
     <string name="keymap_not_set">Não definido</string>
     <string name="keymap_reset">Restaurar padrão</string>
     <string name="modcfg_remove_named">Remover %1$s</string>
@@ -893,6 +921,10 @@ Nunca coletamos seu código, nomes de arquivos ou projetos, quais recursos você
     <string name="modcfg_new_module">Novo módulo</string>
     <string name="modcfg_name">Nome</string>
     <string name="modcfg_module_name_placeholder">ex.: feature, core</string>
+    <string name="modcfg_parent_dir">Diretório pai</string>
+    <string name="modcfg_parent_dir_placeholder">Raiz do projeto, ou ex.: core, feature</string>
+    <string name="modcfg_parent_dir_hint">Deixe vazio para criá-lo na raiz do projeto</string>
+    <string name="modcfg_module_location">Criado em %1$s</string>
     <string name="modcfg_type">Tipo</string>
     <string name="modcfg_java_version">Versão do Java</string>
     <string name="modcfg_couldnt_load_config">Não foi possível carregar a configuração do módulo.</string>

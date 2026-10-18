@@ -16,6 +16,7 @@ import dev.ide.platform.impl.PlatformCore
 import dev.ide.templates.JavaLibModuleType
 import dev.ide.ui.backend.UiConfigField
 import dev.ide.ui.backend.UiModuleConfigEdit
+import dev.ide.ui.backend.UiSourceSetScope
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.exists
@@ -195,6 +196,37 @@ class ModelBridgeTest {
     }
 
     @Test
+    fun aNewSourceSetCanBeMadeATestSetAndItIsSaved() {
+        val bridge = ModuleConfigBridge(workspace())
+        assertNotNull(bridge.addSourceRoot("app", "test", "kotlin", setOf(ContentRole.SOURCE)))
+        fun scopeOf(set: String) = bridge.moduleConfig("app")!!.sourceSets.single { it.name == set }.scope
+        assertEquals("IMPLEMENTATION", scopeOf("test"), "a root's own new set starts as main code")
+
+        assertTrue(bridge.setSourceSetScope("app", "test", ModuleConfigBridge.scopeOf(UiSourceSetScope.Test)))
+        assertEquals("TEST_IMPLEMENTATION", scopeOf("test"))
+        assertEquals("IMPLEMENTATION", scopeOf("main"), "only the named set changes")
+        val toml = dir.resolve("app/module.toml").toFile().readText()
+        assertTrue(Regex("""scope\s*=\s*"TEST_IMPLEMENTATION"""").containsMatchIn(toml), "persisted:\n$toml")
+
+        assertFalse(bridge.setSourceSetScope("app", "test", DependencyScope.TEST_IMPLEMENTATION), "already a test set")
+        assertFalse(bridge.setSourceSetScope("app", "nope", DependencyScope.TEST_IMPLEMENTATION), "no such set")
+        assertTrue(bridge.setSourceSetScope("app", "test", DependencyScope.IMPLEMENTATION), "and back again")
+        assertEquals("IMPLEMENTATION", scopeOf("test"))
+    }
+
+    @Test
+    fun aSetsNameSuggestsWhetherItHoldsTests() {
+        listOf("test", "testDebug", "androidTest", "commonTest", "integrationTest").forEach {
+            assertEquals(UiSourceSetScope.Test, UiSourceSetScope.suggestedFor(it), it)
+        }
+        listOf("main", "debug", "jvmMain", "contest", "mytesting").forEach {
+            assertEquals(UiSourceSetScope.Main, UiSourceSetScope.suggestedFor(it), it)
+        }
+        assertEquals(UiSourceSetScope.Test, UiSourceSetScope.of("TEST_IMPLEMENTATION"))
+        assertEquals(UiSourceSetScope.Main, UiSourceSetScope.of("API"))
+    }
+
+    @Test
     fun aSourceSetIsAddedOnceAndModulesAreCreatedAndRemoved() {
         val bridge = ModuleConfigBridge(workspace())
 
@@ -211,6 +243,29 @@ class ModelBridgeTest {
         assertTrue(bridge.removeModule("core"))
         assertEquals(listOf("app"), bridge.configurableModules().map { it.name })
         assertFalse(bridge.removeModule("core"), "already gone")
+    }
+
+    @Test
+    fun aModuleCanBeCreatedInsideAParentDirectory() {
+        val bridge = ModuleConfigBridge(workspace())
+
+        val created = bridge.createModule("common", "java-lib", null, emptyMap(), parentDir = " \\core\\ ")
+        assertTrue(created.success, created.message)
+        assertEquals(dir.resolve("core/common").toString(), assertNotNull(bridge.module("common")).dir.path)
+        assertTrue(dir.resolve("core/common/src/main/kotlin").exists(), "the layout lands under the parent")
+        assertTrue(bridge.createModule("ui", "java-lib", null, emptyMap(), parentDir = "features/home").success)
+        assertTrue(dir.resolve("features/home/ui/src/main/kotlin").exists(), "a parent may be several folders deep")
+
+        val taken = bridge.createModule("COMMON2", "java-lib", null, emptyMap(), parentDir = "core")
+        assertTrue(taken.success, "a different name in the same parent is fine")
+        assertFalse(bridge.createModule("app", "java-lib", null, emptyMap(), parentDir = "core").success, "names stay unique")
+        listOf("..", "core/../..", ".hidden", "a//b", "C:/x", "has space").forEach { bad ->
+            assertFalse(bridge.createModule("m", "java-lib", null, emptyMap(), parentDir = bad).success, "refused: '$bad'")
+        }
+        assertEquals(
+            setOf("app", "common", "ui", "COMMON2"), bridge.configurableModules().map { it.name }.toSet(),
+            "a refused directory creates nothing",
+        )
     }
 
     // ---- dependencies --------------------------------------------------------------------------------

@@ -2,6 +2,7 @@ package dev.ide.core.backend
 
 import dev.ide.core.BackendContext
 import dev.ide.model.ContentRole
+import dev.ide.model.bridge.ModuleConfigBridge
 import dev.ide.ui.backend.ModuleService
 import dev.ide.ui.backend.UiBuildFeatures
 import dev.ide.ui.backend.UiCompilerPlugins
@@ -14,6 +15,7 @@ import dev.ide.ui.backend.UiMissingProguardFile
 import dev.ide.ui.backend.UiPackagingOptions
 import dev.ide.ui.backend.UiPackagingRules
 import dev.ide.ui.backend.UiSourceRootRole
+import dev.ide.ui.backend.UiSourceSetScope
 import dev.ide.ui.backend.UiToolchainWarning
 import java.nio.file.Paths
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +68,12 @@ internal class ModuleBackend(private val ctx: BackendContext) : ModuleService {
         return ok
     }
 
+    override fun setSourceSetScope(moduleName: String, sourceSetName: String, scope: UiSourceSetScope): Boolean {
+        val ok = ctx.services.moduleService.setSourceSetScope(moduleName, sourceSetName, ModuleConfigBridge.scopeOf(scope))
+        if (ok) ctx.bumpFileSystemEpoch()
+        return ok
+    }
+
     // ---- module management ----
 
     override fun availableModuleTypes(): List<UiModuleTypeOption> =
@@ -75,9 +83,10 @@ internal class ModuleBackend(private val ctx: BackendContext) : ModuleService {
         name: String,
         typeId: String,
         languageLevel: String?,
-        facetValues: Map<String, Map<String, Any?>>
+        facetValues: Map<String, Map<String, Any?>>,
+        parentDir: String,
     ): UiConfigResult = withContext(Dispatchers.IO) {
-        ctx.services.moduleService.createModule(name, typeId, languageLevel, facetValues)
+        ctx.services.moduleService.createModule(name, typeId, languageLevel, facetValues, parentDir)
             .also { if (it.success) ctx.bumpFileSystemEpoch() }
     }
 

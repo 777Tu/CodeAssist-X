@@ -659,18 +659,22 @@ internal class ModuleService(private val ctx: EngineContext) : ModuleSources {
     }
 
     /**
-     * Create a new module [name] of [typeId] with [languageLevel] and [facetValues], laying down the type's
-     * default source-set directories on disk, persisting `module.toml`, and refreshing analyzers/index.
+     * Create a new module [name] of [typeId] with [languageLevel] and [facetValues] in [parentDir]`/`[name]
+     * ([name] alone when [parentDir] is blank), laying down the type's default source-set directories on
+     * disk, persisting `module.toml`, and refreshing analyzers/index.
      */
     fun createModule(
         name: String,
         typeId: String,
         languageLevel: String?,
-        facetValues: Map<String, Map<String, Any?>>
+        facetValues: Map<String, Map<String, Any?>>,
+        parentDir: String = "",
     ): UiConfigResult {
         // `src/main/java` rather than the bridge's Kotlin default: this host compiles Java, and its
         // `JavaPlugin` registers a `compileKotlin` task for any `.kt` under the same root anyway.
-        val result = model.createModule(name, typeId, languageLevel, facetValues, fallbackSourceDir = "src/main/java")
+        val result = model.createModule(
+            name, typeId, languageLevel, facetValues, fallbackSourceDir = "src/main/java", parentDir = parentDir,
+        )
         if (!result.success) return result
         ctx.invalidateAnalyzers()
         ctx.invalidateSyntheticClasses()
@@ -793,6 +797,17 @@ internal class ModuleService(private val ctx: EngineContext) : ModuleSources {
     /** Create an empty source set [name] on [moduleName] (returns false if it already exists). */
     override fun addSourceSet(moduleName: String, name: String): Boolean =
         model.addSourceSet(moduleName, name)
+
+    /**
+     * Give [sourceSetName] of [moduleName] a new [scope]: a test-only scope makes it a test set, built apart
+     * from the main output, so the analyzers and the index re-read the module. True on a model change.
+     */
+    fun setSourceSetScope(moduleName: String, sourceSetName: String, scope: DependencyScope): Boolean {
+        if (!model.setSourceSetScope(moduleName, sourceSetName, scope)) return false
+        ctx.invalidateAnalyzers()
+        ctx.resyncIndex()
+        return true
+    }
 
     /**
      * If [newDir] is a conventionally-named folder (`resources`/`java`/`kotlin`/`res`/`assets`/`aidl`)

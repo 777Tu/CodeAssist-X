@@ -44,6 +44,8 @@ import dev.ide.ui.editor.engine.OpenTabDiagnosticsEffect
 import dev.ide.ui.generated.resources.Res
 import dev.ide.ui.generated.resources.edscreen_project_root
 import dev.ide.ui.platform.PlatformBackHandler
+import dev.ide.ui.platform.HideSystemBars
+import dev.ide.ui.platform.hiddenSystemBarsWidth
 import dev.ide.ui.platform.isMobilePlatform
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.seconds
@@ -127,7 +129,7 @@ fun EditorScreen(
     // sheet) before the app-level handler pops the screen (#997). Desktop has no system back, so this is inert
     // there; the mobile-only panes are gated on [isMobilePlatform] since on wide layouts they're docked panes.
     PlatformBackHandler(
-        enabled = closeProjectConfirm || newEntry != null || newXmlTarget != null || newSource != null || fileOp != null || state.addSourceRootModule != null || state.symbolEditorOpen || state.indexDetailOpen || state.paletteOpen || state.moreOpen || state.selectedRightPanel != null || (isMobilePlatform && (state.leftOpen || state.consoleOpen)),
+        enabled = closeProjectConfirm || newEntry != null || newXmlTarget != null || newSource != null || fileOp != null || state.addSourceRootModule != null || state.symbolEditorOpen || state.indexDetailOpen || state.paletteOpen || state.moreOpen || state.selectedRightPanel != null || (isMobilePlatform && (state.leftOpen || state.consoleOpen)) || state.zenMode,
     ) {
         when {
             closeProjectConfirm -> onCloseProjectConfirmChange(false)
@@ -143,16 +145,28 @@ fun EditorScreen(
             state.selectedRightPanel != null -> state.selectedRightPanel = null
             isMobilePlatform && state.consoleOpen -> state.consoleOpen = false
             isMobilePlatform && state.leftOpen -> state.selectedLeftPanel = null
+            // Last: back leaves zen mode before it can ask to close the project.
+            state.zenMode -> state.setZen(false)
         }
+    }
+    // Zen mode hides the system bars too, for as long as the editor is on screen. With every tab closed there is
+    // nothing left to focus on, nor a tabs strip to leave it from.
+    HideSystemBars(state.zenMode)
+    LaunchedEffect(state.zenMode, state.openFiles.isEmpty()) {
+        if (state.zenMode && state.openFiles.isEmpty()) state.setZen(false)
     }
     // Mirrors the layout choice below for the overlays outside it (the running-run pill).
     var wideLayout by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
+        // Measured as if every system bar showed. In zen mode Android brings the navigation bar back while the
+        // keyboard is up, and on a phone near the breakpoint in landscape the lost width flipped the layout as the
+        // keyboard opened; the editor was rebuilt, which closed the keyboard and hid the bar again.
+        val hiddenBars = hiddenSystemBarsWidth()
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val wide = maxWidth >= COMPACT_BREAKPOINT
-            LaunchedEffect(wide) {
+            val wide = maxWidth - hiddenBars >= COMPACT_BREAKPOINT
+            LaunchedEffect(wide, state.runFullScreen) {
                 wideLayout = wide
-                onRunDockedChange(wide)
+                onRunDockedChange(wide && !state.runFullScreen)
             }
             if (!wide) CompactLayout(
                 state,
@@ -188,7 +202,8 @@ fun EditorScreen(
                 onOpenDependencies,
                 onOpenModuleConfig,
                 requestCloseProject,
-                fileActions
+                fileActions,
+                onOpenRun,
             )
         }
         NewEntryDialog(
@@ -225,9 +240,9 @@ fun EditorScreen(
                 )
             },
             onDismiss = { state.addSourceRootModule = null },
-            onAdd = { module, set, dirName, role ->
+            onAdd = { module, set, dirName, role, newSetScope ->
                 state.addSourceRoot(
-                    module, set, dirName, role
+                    module, set, dirName, role, newSetScope
                 )
             },
         )
@@ -273,9 +288,10 @@ fun EditorScreen(
         // While a console run is active but its terminal isn't on screen (the user backed out mid-run), a
         // tappable pill returns to it — the run keeps going in the background until then.
         // Docked (wide layout), the pill brings the bottom pane's Run terminal forward and hides while it shows.
-        if (!(wideLayout && state.runOpen)) RunningIndicator(
+        val runDocked = wideLayout && !state.runFullScreen
+        if (!(runDocked && state.runOpen)) RunningIndicator(
             state.backend,
-            onClick = { if (wideLayout) state.showRunOutput() else onOpenRun() },
+            onClick = { if (runDocked) state.showRunOutput() else onOpenRun() },
             modifier = Modifier.align(Alignment.BottomEnd)
                 .padding(end = 16.dp, bottom = if (isMobilePlatform) 88.dp else 24.dp),
         )

@@ -50,6 +50,7 @@ import dev.ide.ui.backend.UiQuickDoc
 import dev.ide.ui.backend.UiRepository
 import dev.ide.ui.backend.UiSemanticToken
 import dev.ide.ui.backend.UiSourceRootRole
+import dev.ide.ui.backend.UiSourceSetScope
 import dev.ide.ui.backend.UiTextRange
 import dev.ide.ui.backend.UiVersionConflict
 import dev.ide.lang.dom.Severity
@@ -1127,6 +1128,14 @@ class IosBackend(
     override fun addSourceSet(moduleName: String, name: String): Boolean =
         moduleConfig()?.addSourceSet(moduleName, name) ?: false
 
+    override fun setSourceSetScope(moduleName: String, sourceSetName: String, scope: UiSourceSetScope): Boolean {
+        val changed = moduleConfig()
+            ?.setSourceSetScope(moduleName, sourceSetName, ModuleConfigBridge.scopeOf(scope)) ?: false
+        // Main and test sources are analyzed against different classpaths, so the analysis starts over.
+        if (changed) { bumpFs(); resetAnalysis() }
+        return changed
+    }
+
     /**
      * What a NEW module here can be, which is narrower than what an opened one can be: the Android types
      * are registered so a project that has one reads correctly (see [IosProjectModel]), and creating one
@@ -1142,10 +1151,11 @@ class IosBackend(
         typeId: String,
         languageLevel: String?,
         facetValues: Map<String, Map<String, Any?>>,
+        parentDir: String,
     ): UiConfigResult {
         val bridge = moduleConfig() ?: return UiConfigResult(false, "Open a project first")
         val result = withContext(ioDispatcher) {
-            bridge.createModule(name, typeId, languageLevel, facetValues)
+            bridge.createModule(name, typeId, languageLevel, facetValues, parentDir = parentDir)
         }
         if (result.success) { bumpFs(); resetAnalysis() }
         return result

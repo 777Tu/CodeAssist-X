@@ -865,6 +865,8 @@ data class UiAgentProvider(
     val defaultModel: String,
     /** The user's stored API key for this provider (shown masked + editable in the key manager). */
     val apiKey: String = "",
+    /** Further keys, tried in order when [apiKey] (or the key before) hits a limit or is rejected. */
+    val backupKeys: List<String> = emptyList(),
 )
 
 /** Provider/model selection and permission mode, for the chat drawer header, key manager, and settings. */
@@ -1383,6 +1385,28 @@ enum class TreeViewMode { Project, AllFiles }
 
 /** The kind of content/source root the user can add to a module (maps to a backend `ContentRole`). */
 enum class UiSourceRootRole { Source, Resource, AndroidRes, Assets, Aidl, JniLibs }
+
+/**
+ * What a source set holds, which decides how it builds: [Main] code goes into the module's output, [Test] code
+ * is compiled apart from it against the test classpath and is what the test runner discovers. Maps to the
+ * set's `scope` in `module.toml` (`IMPLEMENTATION` / `TEST_IMPLEMENTATION`).
+ */
+enum class UiSourceSetScope {
+    Main, Test;
+
+    companion object {
+        /** The persisted scope name a [UiSourceSetInfo] carries, read as Main or Test. */
+        fun of(scopeName: String): UiSourceSetScope =
+            if (scopeName.equals("TEST_IMPLEMENTATION", ignoreCase = true)) Test else Main
+
+        /** The scope a new set named [setName] most likely wants: `test`, `testDebug`, `androidTest`,
+         *  `commonTest`, `integrationTest` are tests, anything else is main code. */
+        fun suggestedFor(setName: String): UiSourceSetScope {
+            val n = setName.trim()
+            return if (n.startsWith("test") || n.endsWith("Test") || n.startsWith("androidTest")) Test else Main
+        }
+    }
+}
 
 /**
  * A typed source-file template the file-tree "New" submenu can scaffold. The prefix names the language
@@ -2004,6 +2028,8 @@ data class UiSettings(
     val customAccentColor: Long = 0xFF8B5CF6L,
     /** Keep tool window header actions always visible (off = only while the tool window is hovered or active). */
     val alwaysShowToolWindowActions: Boolean = false,
+    /** Open a run's terminal full screen instead of docking it in the wide layout. */
+    val runFullScreen: Boolean = false,
     val editorFontScale: Float = 1f,
     /** "jetbrains" (bundled JetBrains Mono) | "monospace" (system monospace). */
     val codeFont: String = "jetbrains",
@@ -2101,6 +2127,29 @@ data class UiInspection(
     val enabled: Boolean,
     val severity: UiSeverity,
     val defaultSeverity: UiSeverity,
+)
+
+/**
+ * An installed plugin's inspection that CodeAssist switched off for this session because it slowed the editor
+ * down or kept failing. Every inspection runs on the thread that also produces the compiler's errors and code
+ * completion, so one that keeps running over its time budget is taken off it. It stays off until the user turns
+ * it back on ([SettingsService.reenableInspection]), switches it off or on in the inspection settings, or
+ * restarts.
+ */
+data class UiAutoDisabledInspection(
+    /** The inspection's id, as in [UiInspection.id]. */
+    val id: String,
+    val displayName: String,
+    /** The contributing plugin's name. */
+    val pluginName: String,
+    /** True when it ran over its budget; false when it kept throwing. */
+    val slow: Boolean,
+    /** The pass that tipped it over, in ms (0 when it was failing). */
+    val tookMs: Long,
+    /** The per-pass budget it was held to, in ms. */
+    val budgetMs: Long,
+    /** How many times it has been switched off this session; above 1, turning it back on did not help. */
+    val times: Int,
 )
 
 /**

@@ -109,11 +109,13 @@ import dev.ide.ui.backend.UiModuleRef
 import dev.ide.ui.backend.UiRunConfig
 import dev.ide.ui.backend.UiSigningAssignment
 import dev.ide.ui.backend.UiSourceSetInfo
+import dev.ide.ui.backend.UiSourceSetScope
 import dev.ide.ui.components.AddSourceRootDialog
 import dev.ide.ui.components.AddSourceRootRequest
 import dev.ide.ui.components.Chip
 import dev.ide.ui.components.CircularProgressIndicator
 import dev.ide.ui.components.DropdownOverlay
+import dev.ide.ui.components.sourceScopeLabel
 import dev.ide.ui.generated.resources.Res
 import dev.ide.ui.generated.resources.add
 import dev.ide.ui.generated.resources.back
@@ -147,6 +149,10 @@ import dev.ide.ui.generated.resources.modcfg_missing_keep_rule_files
 import dev.ide.ui.generated.resources.modcfg_missing_keep_rule_files_content
 import dev.ide.ui.generated.resources.modcfg_module_name_placeholder
 import dev.ide.ui.generated.resources.modcfg_name
+import dev.ide.ui.generated.resources.modcfg_module_location
+import dev.ide.ui.generated.resources.modcfg_parent_dir
+import dev.ide.ui.generated.resources.modcfg_parent_dir_hint
+import dev.ide.ui.generated.resources.modcfg_parent_dir_placeholder
 import dev.ide.ui.generated.resources.modcfg_new_badge
 import dev.ide.ui.generated.resources.modcfg_new_module
 import dev.ide.ui.generated.resources.modcfg_no_module_types
@@ -198,6 +204,7 @@ import dev.ide.ui.generated.resources.modcfg_tab_signing
 import dev.ide.ui.generated.resources.modcfg_title_modules
 import dev.ide.ui.generated.resources.modcfg_new_module_action
 import dev.ide.ui.generated.resources.modcfg_type
+import dev.ide.ui.generated.resources.source_scope_change
 import dev.ide.ui.icons.CaIcons
 import dev.ide.ui.icons.CaSymbols
 import dev.ide.ui.itemsKeyed
@@ -846,6 +853,7 @@ private fun ModuleSettingsTab(backend: IdeBackend, state: ModuleSettingsState, c
             state.config, state.loading, codeFont, backend.project.rootPath, state.missingProguard, Modifier.fillMaxSize(),
             onAddSourceRoot = state::openAddSourceRoot,
             onRemoveSourceRoot = state::removeSourceRoot,
+            onSetSourceSetScope = state::setSourceSetScope,
             onCreateProguard = state::createProguardFile,
             onSave = state::applyEdit,
         )
@@ -902,7 +910,7 @@ private fun NewModuleDialog(
     backend: IdeBackend,
     codeFont: FontFamily,
     onDismiss: () -> Unit,
-    onCreate: (name: String, typeId: String, languageLevel: String?, facetValues: Map<String, Map<String, Any?>>) -> Unit,
+    onCreate: (name: String, typeId: String, languageLevel: String?, facetValues: Map<String, Map<String, Any?>>, parentDir: String) -> Unit,
 ) {
     DropdownOverlay(visible = visible, onDismiss = onDismiss, topPadding = 56.dp) {
         val types = remember { backend.modules.availableModuleTypes() }
@@ -915,6 +923,9 @@ private fun NewModuleDialog(
                 Text(stringResource(Res.string.modcfg_no_module_types), color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodyLarge)
             } else {
                 var name by remember { mutableStateOf("") }
+                // Where the module goes, relative to the project root: blank is the root itself, `core` puts
+                // `common` at `core/common`. The backend validates it; this only normalises what is shown.
+                var parentDir by remember { mutableStateOf("") }
                 var typeIdx by remember { mutableStateOf(0) }
                 val type = types[typeIdx.coerceIn(0, types.lastIndex)]
                 var level by remember(type.id) { mutableStateOf(type.defaultLanguageLevel) }
@@ -930,6 +941,27 @@ private fun NewModuleDialog(
                             onValueChange = { name = it },
                             label = { Text(stringResource(Res.string.modcfg_name)) },
                             placeholder = { Text(stringResource(Res.string.modcfg_module_name_placeholder)) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = codeFont),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    item("parentDir") {
+                        val parent = parentDir.trim().replace('\\', '/').trim('/')
+                        val location = listOf(parent, name.trim()).filter { it.isNotEmpty() }.joinToString("/")
+                        OutlinedTextField(
+                            value = parentDir,
+                            onValueChange = { parentDir = it },
+                            label = { Text(stringResource(Res.string.modcfg_parent_dir)) },
+                            placeholder = { Text(stringResource(Res.string.modcfg_parent_dir_placeholder)) },
+                            supportingText = {
+                                Text(
+                                    if (name.isBlank()) stringResource(Res.string.modcfg_parent_dir_hint)
+                                    else stringResource(Res.string.modcfg_module_location, "$location/"),
+                                )
+                            },
+                            leadingIcon = { Icon(CaIcons.folder, null, Modifier.size(18.dp)) },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = codeFont),
                             shape = MaterialTheme.shapes.small,
@@ -954,7 +986,7 @@ private fun NewModuleDialog(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Spacer(Modifier.weight(1f))
                     DialogTextButton(stringResource(Res.string.cancel), destructive = false, onClick = onDismiss)
-                    Button(onClick = { onCreate(name.trim(), type.id, level, forms.associate { it.table to it.toValues() }) }) {
+                    Button(onClick = { onCreate(name.trim(), type.id, level, forms.associate { it.table to it.toValues() }, parentDir.trim()) }) {
                         Icon(CaIcons.check, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(stringResource(Res.string.create))
@@ -977,6 +1009,7 @@ private fun ConfigBody(
     modifier: Modifier,
     onAddSourceRoot: () -> Unit,
     onRemoveSourceRoot: (sourceSet: String, rootPath: String) -> Unit,
+    onSetSourceSetScope: (sourceSet: String, scope: UiSourceSetScope) -> Unit,
     onCreateProguard: (entry: String) -> Unit,
     onSave: (UiModuleConfigEdit) -> Unit,
 ) {
@@ -986,7 +1019,7 @@ private fun ConfigBody(
                 CircularProgressIndicator(Modifier.size(28.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 3.dp)
             }
             config == null -> PaneNotApplicable(stringResource(Res.string.modcfg_couldnt_load_config))
-            else -> ConfigForm(config, codeFont, projectRoot, missingProguard, onAddSourceRoot, onRemoveSourceRoot, onCreateProguard, onSave)
+            else -> ConfigForm(config, codeFont, projectRoot, missingProguard, onAddSourceRoot, onRemoveSourceRoot, onSetSourceSetScope, onCreateProguard, onSave)
         }
     }
 }
@@ -999,6 +1032,7 @@ private fun ConfigForm(
     missingProguard: List<UiMissingProguardFile>,
     onAddSourceRoot: () -> Unit,
     onRemoveSourceRoot: (sourceSet: String, rootPath: String) -> Unit,
+    onSetSourceSetScope: (sourceSet: String, scope: UiSourceSetScope) -> Unit,
     onCreateProguard: (entry: String) -> Unit,
     onSave: (UiModuleConfigEdit) -> Unit,
 ) {
@@ -1044,7 +1078,7 @@ private fun ConfigForm(
 
             // ---- Source sets (add / remove typed roots) ----
             item("sourceSets") {
-                SourceSetsCard(config.sourceSets, codeFont, projectRoot, twoColumn, onAddSourceRoot, onRemoveSourceRoot)
+                SourceSetsCard(config.sourceSets, codeFont, projectRoot, twoColumn, onAddSourceRoot, onRemoveSourceRoot, onSetSourceSetScope)
             }
 
             // ---- Facet panels (generic) ----
@@ -1317,6 +1351,7 @@ private fun SourceSetsCard(
     wide: Boolean,
     onAdd: () -> Unit,
     onRemoveRoot: (sourceSet: String, rootPath: String) -> Unit,
+    onSetScope: (sourceSet: String, scope: UiSourceSetScope) -> Unit,
 ) {
     SectionCard(stringResource(Res.string.modcfg_section_source_sets), action = {
         TextButton(onClick = onAdd) {
@@ -1330,13 +1365,20 @@ private fun SourceSetsCard(
         }
         sets.forEachIndexed { i, ss ->
             if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            SourceSetBlock(ss, codeFont, projectRoot, wide) { root -> onRemoveRoot(ss.name, root) }
+            SourceSetBlock(ss, codeFont, projectRoot, wide, onSetScope = { onSetScope(ss.name, it) }) { root -> onRemoveRoot(ss.name, root) }
         }
     }
 }
 
 @Composable
-private fun SourceSetBlock(ss: UiSourceSetInfo, codeFont: FontFamily, projectRoot: String, wide: Boolean, onRemoveRoot: (rootPath: String) -> Unit) {
+private fun SourceSetBlock(
+    ss: UiSourceSetInfo,
+    codeFont: FontFamily,
+    projectRoot: String,
+    wide: Boolean,
+    onSetScope: (UiSourceSetScope) -> Unit,
+    onRemoveRoot: (rootPath: String) -> Unit,
+) {
     val relative = ss.roots.map { it to shortenPath(it, projectRoot) }
     // The folder every root sits in, when they share one; then a chip only needs the root's own name.
     val parent = relative.map { it.second.substringBeforeLast('/', "") }.distinct().singleOrNull()?.takeIf { it.isNotEmpty() }
@@ -1351,10 +1393,7 @@ private fun SourceSetBlock(ss: UiSourceSetInfo, codeFont: FontFamily, projectRoo
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(ss.name, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleSmall)
-            Text(
-                ss.scope.lowercase(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(Ca.radius.pill)).padding(horizontal = 8.dp, vertical = 2.dp),
-            )
+            SourceScopePill(ss, onSetScope)
             // Beside the name when there is room; on a phone it gets a line of its own rather than being cut short.
             if (wide) folder(Modifier.weight(1f, fill = false))
         }
@@ -1372,6 +1411,45 @@ private fun SourceSetBlock(ss: UiSourceSetInfo, codeFont: FontFamily, projectRoo
                         onRemove = { onRemoveRoot(full) },
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * What a source set contains, main code or tests, as a pill that opens a menu to change it. A scope other than
+ * those two (a plugin's own, or an imported `api`/`compileOnly` set) is shown by its persisted name and can
+ * still be switched to either.
+ */
+@Composable
+private fun SourceScopePill(ss: UiSourceSetInfo, onSetScope: (UiSourceSetScope) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val known = ss.scope.equals("IMPLEMENTATION", ignoreCase = true) || ss.scope.equals("TEST_IMPLEMENTATION", ignoreCase = true)
+    val current = UiSourceSetScope.of(ss.scope)
+    val changeLabel = stringResource(Res.string.source_scope_change, ss.name)
+    Box {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(Ca.radius.pill))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(Ca.radius.pill))
+                .clickable(onClickLabel = changeLabel) { open = true }
+                .padding(start = 8.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                if (known) stringResource(sourceScopeLabel(current)) else ss.scope.lowercase(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
+            )
+            Icon(CaIcons.chevronDown, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            UiSourceSetScope.entries.forEach { s ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(sourceScopeLabel(s))) },
+                    trailingIcon = if (known && s == current) ({ Icon(CaIcons.check, null, Modifier.size(18.dp)) }) else null,
+                    onClick = { open = false; if (!known || s != current) onSetScope(s) },
+                )
             }
         }
     }

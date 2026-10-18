@@ -557,6 +557,9 @@ interface ModuleService {
     /** Create an empty source set [name] on [moduleName]. */
     fun addSourceSet(moduleName: String, name: String): Boolean = false
 
+    /** Make [sourceSetName] of [moduleName] hold main code or tests. True when the model changed. */
+    fun setSourceSetScope(moduleName: String, sourceSetName: String, scope: UiSourceSetScope): Boolean = false
+
     /** Modules whose configuration can be edited. */
     fun configurableModules(): List<UiModuleRef> = emptyList()
 
@@ -631,8 +634,17 @@ interface ModuleService {
     /** The module types a new module can be created as. */
     fun availableModuleTypes(): List<UiModuleTypeOption> = emptyList()
 
-    /** Create a new module [name] of [typeId] with [languageLevel] and [facetValues]. */
-    suspend fun createModule(name: String, typeId: String, languageLevel: String?, facetValues: Map<String, Map<String, Any?>>): UiConfigResult =
+    /**
+     * Create a new module [name] of [typeId] with [languageLevel] and [facetValues], in the directory
+     * [parentDir]`/`[name] under the project root ([name] alone when [parentDir] is blank).
+     */
+    suspend fun createModule(
+        name: String,
+        typeId: String,
+        languageLevel: String?,
+        facetValues: Map<String, Map<String, Any?>>,
+        parentDir: String = "",
+    ): UiConfigResult =
         UiConfigResult(false, "Module management not supported by this backend")
 
     /** Remove the module [name] from the project model (its files are left on disk). */
@@ -1540,6 +1552,12 @@ interface SettingsService {
     /** Enable/disable inspection [id] and set its severity. */
     fun setInspection(id: String, enabled: Boolean, severity: UiSeverity) {}
 
+    /** The installed plugins' inspections CodeAssist switched off this session, oldest first. */
+    val autoDisabledInspections: StateFlow<List<UiAutoDisabledInspection>> get() = MutableStateFlow(emptyList())
+
+    /** Turn the auto-disabled inspection [id] back on. Re-run analysis afterwards to bring its findings back. */
+    fun reenableInspection(id: String) {}
+
     /** Read an app-global preference, or null if unset. */
     fun preference(key: String): String? = null
 
@@ -1769,6 +1787,9 @@ interface AgentService {
 
     /** Store the API key for [providerId] (a built-in id or "gateway"). Blank clears it. */
     fun setProviderKey(providerId: String, key: String)
+
+    /** Store [providerId]'s backup keys, in the order they are tried after the main key. Blank entries are dropped. */
+    fun setProviderBackupKeys(providerId: String, keys: List<String>) {}
 
     /** Configure the custom OpenAI-compatible gateway (base URL + model name, and an optional extra CA
      *  certificate PEM to trust for an endpoint behind a private/regional CA — blank = system trust only). */
