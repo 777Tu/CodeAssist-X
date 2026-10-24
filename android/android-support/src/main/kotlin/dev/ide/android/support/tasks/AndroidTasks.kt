@@ -52,6 +52,7 @@ import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
 import java.util.stream.Collectors
 import java.util.zip.ZipFile
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -375,7 +376,7 @@ internal class GenerateLibraryRTask(
 
     override suspend fun execute(ctx: TaskContext): TaskResult {
         ctx.checkCanceled()
-        val m = if (Files.isRegularFile(manifest)) manifest else synthesizeManifest()
+        val m = if (Files.isRegularFile(manifest)) withPackage(manifest) else synthesizeManifest()
         val compile = aapt2.compile(resDirs, compiledResDir)
         ctx.reportTool("aapt2", compile.result, DiagnosticKind.RESOURCE)
         if (!compile.result.success) return TaskResult.Failed("aapt2 compile (library R) failed")
@@ -394,6 +395,20 @@ internal class GenerateLibraryRTask(
         )
         ctx.reportTool("aapt2", r, DiagnosticKind.RESOURCE)
         return if (r.success) TaskResult.Success else TaskResult.Failed("aapt2 link (library R) failed")
+    }
+
+    /**
+     * [manifest], or a copy of it carrying `package="<namespace>"` when it has none. A modern library declares
+     * only `namespace` in Gradle (AGP injects it), and aapt2 refuses a `<manifest>` without `package`: the KMP
+     * samples' `shared/src/androidMain/AndroidManifest.xml` failed `generateR` exactly so.
+     */
+    private fun withPackage(manifest: Path): Path {
+        val xml = manifest.readText()
+        val fixed = ManifestMergeTask.ensurePackage(xml, packageName)
+        if (fixed == xml) return manifest
+        synthManifest.parent?.let { Files.createDirectories(it) }
+        synthManifest.writeText(fixed)
+        return synthManifest
     }
 
     private fun synthesizeManifest(): Path {
@@ -504,6 +519,34 @@ internal class Aapt2LinkTask(
  * binding classes — same shape, via [LayoutBindingModel]/[ViewBindingJavaSource]). Runs after the layouts
  * exist and before `compileKotlin`/`compileJava`, emitting into [outDir] which joins their source roots.
  */
+/**
+ * `generateBuildConfig`: write the variant's `<namespace>.BuildConfig` (see [dev.ide.android.support.BuildConfigs]).
+ * The source text itself is the task's input, so a changed field, version or build type regenerates it and
+ * nothing else does.
+ */
+internal class GenerateBuildConfigTask(
+    override val name: TaskName,
+    private val packageName: String,
+    private val source: String,
+    private val outDir: Path,
+) : Task {
+    override val inputs: TaskInputs get() = TaskInputsImpl().apply { property("source", source) }
+    override val outputs: TaskOutputs get() = TaskOutputsImpl().apply { dirPath("buildConfig", outDir) }
+
+    override suspend fun execute(ctx: TaskContext): TaskResult {
+        ctx.checkCanceled()
+        withContext(Dispatchers.IO) {
+            if (Files.isDirectory(outDir)) Files.walk(outDir).use { s ->
+                s.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+            val dir = outDir.resolve(packageName.replace('.', '/'))
+            Files.createDirectories(dir)
+            dir.resolve("BuildConfig.java").writeText(source)
+        }
+        return TaskResult.Success
+    }
+}
+
 internal class GenerateViewBindingTask(
     override val name: TaskName,
     private val resDirs: List<Path>,   // the module's OWN res roots — ViewBinding generates from own layouts
@@ -711,6 +754,8 @@ internal class AndroidKotlinCompileTask(
      * target compiles `commonMain` and `androidMain` as one, and only naming the common half lets an `expect`
      * and its `actual` coexist in it (see [KotlinFacet.commonSourceRoots]).
      */
+    private fun optIns(): List<String> = module.facets.get(KotlinFacet.KEY)?.optIns.orEmpty()
+
     private fun commonSources(kt: List<Path>): List<Path> {
         val roots = module.facets.get(KotlinFacet.KEY)?.commonSourceRoots.orEmpty()
         if (roots.isEmpty()) return emptyList()
@@ -727,6 +772,7 @@ internal class AndroidKotlinCompileTask(
             property("level", level)
             // Which sources are common changes what compiles, so it is an input like the language level.
             filePaths("commonSources", commonSources(kt))
+            property("optIns", optIns().joinToString(","))
         }
     override val outputs: TaskOutputs
         get() = TaskOutputsImpl().apply {
@@ -748,6 +794,7 @@ internal class AndroidKotlinCompileTask(
             compilerPlugins = resolved.classpaths, pluginOptions = resolved.options,
             runtimePluginClasspaths = resolved.runtimeClasspaths,
             commonSources = commonSources(kt),
+            optIns = optIns(),
         )
         ctx.reportKotlinProblems(r)
         return if (r.success) TaskResult.Success else TaskResult.Failed(kotlinFailureSummary(r))
@@ -2221,11 +2268,17 @@ internal class SignApkTask(
     private val config: SigningConfig,
     private val signer: ApkSigner,
 ) : Task {
+    // Whether the APK at the output path is one this build recorded (BuiltApks). An unrecorded one (it came with a
+    // clone or an import, or predates the record) flips this input, so the task re-signs and records a fresh APK
+    // instead of reporting up to date over a file the phone will refuse to install. Read once per graph.
+    private val recorded by lazy { dev.ide.android.support.BuiltApks.looksRecorded(signedApk).toString() }
+
     override val inputs: TaskInputs
         get() = TaskInputsImpl().apply {
             filePaths("unsigned", listOf(unsignedApk))
             property("keystore", config.keystore.toString())
             property("alias", config.keyAlias)
+            if (dev.ide.android.support.BuiltApks.enabled) property("recorded", recorded)
         }
     override val outputs: TaskOutputs get() = TaskOutputsImpl().apply { filePath("apk", signedApk) }
 
@@ -2233,6 +2286,8 @@ internal class SignApkTask(
         ctx.checkCanceled()
         val r = signer.sign(unsignedApk, signedApk, config)
         ctx.reportTool("apksigner", r, DiagnosticKind.PACKAGING)
+        // The install points only accept an APK the build recorded (see BuiltApks).
+        if (r.success) dev.ide.android.support.BuiltApks.record(signedApk)
         return if (r.success) TaskResult.Success else TaskResult.Failed("apk signing failed")
     }
 }

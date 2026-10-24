@@ -63,6 +63,7 @@ object AndroidIde {
         // background index concurrency to stop provoking the 32-bit-ART torn-reference SIGSEGV (see RuntimeInfo).
         // `android.os.Process.is64Bit()` reports THIS process, not merely device capability (API 23+; minSdk 26).
         dev.ide.platform.RuntimeInfo.set32Bit(!android.os.Process.is64Bit())
+        initBuiltApks(context)
 
         // App-specific EXTERNAL storage (Android/data/<pkg>/files/codeassist)
         val home = appHomeDir(context).apply { mkdirs() }
@@ -78,7 +79,7 @@ object AndroidIde {
         // most once; non-destructive.
         runCatching { manager.importLegacyProjects() }
 
-        val analytics = buildAnalytics(manager, home)
+        val analytics = buildAnalytics(context, manager, home)
 
         // Crash breadcrumb: the 32-bit-ART SIGSEGV is a native fault, uncatchable in-process — so read what the
         // engine was doing if the PREVIOUS process died natively (via the OS exit reason), THEN arm the file for
@@ -149,9 +150,10 @@ object AndroidIde {
                 NotificationManagerCompat.from(appContext).areNotificationsEnabled()
             },
         )
-        // Process-wide uncaught-exception handler: report app_crash + surface the non-fatal dialog + keep the
-        // app alive (the MainActivity main-thread guard handles the UI looper). See IdeServicesBackend.
-        backend.installCrashReporting()
+        // Process-wide uncaught-exception handler: report app_crash, keep the app alive behind the non-fatal
+        // dialog for a worker-thread crash, and let the system kill the process for a main-thread one (its looper
+        // is gone; swallowing it left a frozen process that Play counted as an ANR). See IdeServicesBackend.
+        backend.installCrashReporting(isFatal = { it === android.os.Looper.getMainLooper().thread })
         AndroidMemory.registerTrimHandler(appContext, backend)
         // Plugins load once per process, so applying an installed plugin's change means starting again. Both
         // halves of that are wired here, and only in the UI process: the restart itself, and the watch that
@@ -436,6 +438,14 @@ object AndroidIde {
      * as `REASON_SIGNALED`, and all three are the system working, not a fault. They were 74% of the crash rows
      * reported for 3.14.0 (479 of 649, across 63 of the 89 crashing installs), which is what made the headline
      * crash-free rate read ~8 points below the truth.
+     *
+     * A process the system killed for not responding (`REASON_ANR`) is reported too, as `app_anr` rather than
+     * a crash ([reportAnrExit]); its trace is a thread dump ([dev.ide.platform.AnrTrace]). Play counts ANRs
+     * separately and they were the one vital over its threshold. Only an ANR that ENDED the process leaves a
+     * record: one the user waited out does not, so this sees a subset.
+     *
+     * Records from before the current APK was installed are skipped for both kinds: they belong to the
+     * previous version, and the event would carry this one's.
      */
     private fun reportPreviousNativeCrash(
         context: Context,
@@ -450,12 +460,20 @@ object AndroidIde {
             // routinely, and with a window of one their exits hide a native death of the IDE process.
             val reported = manager.preference(PREF_NATIVE_CRASH_REPORTED)?.toLongOrNull() ?: 0L
             val now = System.currentTimeMillis()
+            // A death from before this APK was installed belongs to the previous version, and the event would
+            // carry this one's.
+            val installedAt = runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+            }.getOrDefault(0L)
             val candidates = am.getHistoricalProcessExitReasons(context.packageName, 0, 20)
                 .filter {
                     it.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ||
-                        it.reason == android.app.ApplicationExitInfo.REASON_SIGNALED
+                        it.reason == android.app.ApplicationExitInfo.REASON_SIGNALED ||
+                        it.reason == android.app.ApplicationExitInfo.REASON_ANR
                 }
-                .filter { it.timestamp > reported && now - it.timestamp < NATIVE_CRASH_MAX_AGE_MS }
+                .filter {
+                    it.timestamp > reported && it.timestamp > installedAt && now - it.timestamp < NATIVE_CRASH_MAX_AGE_MS
+                }
                 .sortedByDescending { it.timestamp }
                 .take(NATIVE_CRASH_SCAN)
             if (candidates.isEmpty()) return
@@ -466,8 +484,16 @@ object AndroidIde {
             // Newest first, so the ones that survive the filter are the most recent; parse each tombstone once
             // and hand it to the reporter rather than re-reading the trace.
             val reportable = ArrayList<Pair<android.app.ApplicationExitInfo, dev.ide.platform.NativeTombstone?>>()
+            val anrs = ArrayList<Pair<android.app.ApplicationExitInfo, dev.ide.platform.AnrTrace?>>()
             for (exit in candidates) {
-                if (reportable.size >= NATIVE_CRASH_MAX_REPORTED) break
+                if (reportable.size + anrs.size >= NATIVE_CRASH_MAX_REPORTED) break
+                if (exit.reason == android.app.ApplicationExitInfo.REASON_ANR) {
+                    // The trace is a thread dump, not a tombstone.
+                    anrs += exit to runCatching {
+                        exit.traceInputStream?.use { dev.ide.platform.AnrTrace.parse(it) }
+                    }.getOrNull()
+                    continue
+                }
                 val tomb = runCatching {
                     exit.traceInputStream?.use { dev.ide.platform.NativeTombstone.parse(it) }
                 }.getOrNull()
@@ -490,6 +516,7 @@ object AndroidIde {
                 reportable += exit to tomb
             }
             reportable.asReversed().forEach { (exit, tomb) -> reportNativeExit(exit, tomb, analytics, prev) }
+            anrs.asReversed().forEach { (exit, trace) -> reportAnrExit(exit, trace, analytics, prev) }
         }
     }
 
@@ -713,13 +740,79 @@ object AndroidIde {
         )
     }
 
+    /**
+     * Log and track one process killed for not responding, as `app_anr`, with the scrubbed thread dump: what
+     * the main thread was doing, and which thread held the lock it was waiting for.
+     */
+    private fun reportAnrExit(
+        exit: android.app.ApplicationExitInfo,
+        trace: dev.ide.platform.AnrTrace?,
+        analytics: dev.ide.analytics.AnalyticsService,
+        prev: dev.ide.platform.EngineBreadcrumb.Crumb?,
+    ) {
+        val sinceOp = prev?.let { exit.timestamp - it.epochMillis }
+        val crumb = if (sinceOp != null && sinceOp > -60_000L && sinceOp < 10 * 60_000L) prev else null
+        val main = trace?.main
+        val holder = trace?.lockHolder
+        val kind = dev.ide.platform.AnrTrace.kindOf(exit.description)
+        val background = dev.ide.platform.AnrTrace.isBackground(exit.description)
+
+        Log.logger("ide.crash").warn(
+            "A previous session of '${exit.processName}' was stopped for not responding ($kind" +
+                (if (background) ", in the background" else "") + "). " +
+                (main?.let { "Main thread ${it.state}: ${it.frames.take(4).joinToString(" < ")}. " }
+                    ?: "No thread dump available. ") +
+                (holder?.let { "Waiting on a lock held by '${it.name}' (${it.state}): ${it.frames.take(3).joinToString(" < ")}." }
+                    ?: "")
+        )
+        analytics.track(
+            AnalyticsEvent(
+                Events.APP_ANR,
+                EventCategory.CRASH,
+                buildMap {
+                    put("anr_kind", kind)
+                    put("background", background.toString())
+                    put("process", exit.processName.substringAfter(':', missingDelimiterValue = "main"))
+                    put("importance", exit.importance.toString())
+                    put("pss_kb", exit.pss.toString())
+                    put("rss_kb", exit.rss.toString())
+                    put("has_trace", (trace != null).toString())
+                    trace?.let { put("threads", it.threadCount.toString()) }
+                    main?.let {
+                        put("main_state", it.state)
+                        put("main_frames", it.frames.joinToString("\n").take(1500))
+                        it.nativeFrames.ifEmpty { null }?.let { v -> put("main_native", v.joinToString(" < ").take(500)) }
+                        it.firstOwnFrame?.let { v -> put("main_own_frame", v) }
+                    }
+                    holder?.let {
+                        put("lock_holder", it.name)
+                        put("lock_holder_state", it.state)
+                        put("lock_holder_frames", it.frames.joinToString("\n").take(1500))
+                        it.firstOwnFrame?.let { v -> put("lock_holder_own_frame", v) }
+                    }
+                    crumb?.let {
+                        put("engine_lane", it.op)
+                        put("index_building", it.indexBuilding.toString())
+                        put("since_op_ms", sinceOp.toString())
+                    }
+                },
+            )
+        )
+    }
+
     private fun buildAnalytics(
-        manager: ProjectManager, home: File
+        context: Context, manager: ProjectManager, home: File
     ): dev.ide.analytics.AnalyticsService {
         // One shared Supabase project; the analytics sink and the store catalog read the same pair.
         val url = BuildConfig.SUPABASE_URL
         val key = BuildConfig.SUPABASE_KEY
         if (url.isBlank() || key.isBlank()) return dev.ide.analytics.NoopAnalyticsService
+
+        // Report only from a package signed with one of the build's allowed certificates. The no-op service also
+        // hides the consent prompt and the toggle, so a fork's users are never asked to send us data.
+        val signer = signingCertSha256(context)?.let(dev.ide.analytics.Signers::short).orEmpty()
+        val allowed = BuildConfig.ANALYTICS_SIGNERS.split(',').map(String::trim).filter(String::isNotEmpty)
+        if (!dev.ide.analytics.Signers.mayReport(signer, allowed)) return dev.ide.analytics.NoopAnalyticsService
 
         val installId = manager.preference("analytics.install.id") ?: UUID.randomUUID().toString()
             .also { manager.setPreference("analytics.install.id", it) }
@@ -731,6 +824,8 @@ object AndroidIde {
             deviceManufacturer = Build.MANUFACTURER ?: "",
             abi = Build.SUPPORTED_ABIS?.firstOrNull() ?: "",
             locale = Locale.getDefault().toLanguageTag(),
+            appId = context.packageName,
+            signer = signer,
         )
         val service = DefaultAnalyticsService(
             installId = installId,
@@ -750,6 +845,25 @@ object AndroidIde {
         addSink(AnalyticsLogSink(service))
         return service
     }
+
+    /**
+     * SHA-256 (hex) of the certificate that signed the installed package, or null when the package manager will
+     * not say. This is the digest `apksigner verify --print-certs` and Play Console's app-integrity page print.
+     * The current signer, not the oldest in a rotation lineage.
+     */
+    private fun signingCertSha256(context: Context): String? = runCatching {
+        val pm = context.packageManager
+        val certs = if (Build.VERSION.SDK_INT >= 28) {
+            pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+                .signingInfo?.apkContentsSigners
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNATURES).signatures
+        }
+        val cert = certs?.firstOrNull() ?: return null
+        java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+    }.getOrNull()
 
     /** Provision just the bundled `android.jar` for a process that needs only it (the `:preview` render
      *  daemon), without the full [createProjectManager] engine setup. Idempotent (marker-guarded copy). */
@@ -783,6 +897,15 @@ object AndroidIde {
     /** The whole CodeAssist app directory (`<external-files>/codeassist`): projects, the SDK `android.jar`,
      *  the debug keystore, the kotlinc home, shared caches. This is the root surfaced to file managers. */
     fun appHomeDir(context: Context): File = File(externalHome(context), "codeassist")
+
+    /**
+     * Point [dev.ide.android.support.BuiltApks] at its ledger, in every process that builds or installs (the IDE
+     * and the `:build` daemon). App-private internal storage on purpose: the projects folder lives on external
+     * storage, where clones, imports and the FTP inbox write, and the ledger is what says a file did NOT come
+     * from one of those.
+     */
+    fun initBuiltApks(context: Context) =
+        dev.ide.android.support.BuiltApks.init(File(context.noBackupFilesDir, "built-apks").toPath())
 
     /** The on-disk projects directory (`<external-files>/codeassist/projects`). */
     fun projectsDir(context: Context): File = File(appHomeDir(context), "projects")

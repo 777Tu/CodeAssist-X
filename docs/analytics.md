@@ -35,14 +35,16 @@ analytics-impl DefaultAnalyticsService (durable batch buffer) ──► Supabase
 We collect **performance metrics only** — no feature-usage tracking (nothing about which screens, files,
 or features you open). Every shipped row carries the install id, session id, and the device/environment
 context as columns: app version + build, OS API level, device model + manufacturer, CPU ABI, and locale —
-so a timing can be attributed to an app version / device.
+so a timing can be attributed to an app version / device. Since the release after 3.30.1 it also carries
+which build sent it: `app_id` (the application id) and `signer` (the first 16 hex characters of the
+SHA-256 of the certificate that signed the installed APK). See "Builds that are not ours" below.
 
 Events (the `event` column), by category:
 
 | Category      | Events (props in parens) |
 |---------------|--------|
 | `performance` | `cold_start` (`duration_ms` — full on-device bootstrap, once per launch; also the per-launch anchor), `index_perf` (`duration_ms` + `heap_*_mb` — one row per finished full index pass; **plus** `trigger` (why it ran: `open`/`reindex`/`model`/`libraries`/`variant`/`files`/`module`), `scope_ms` (assembling the scope) and `queued_ms` (waiting for an earlier pass), `lib_changed` (`0` for a quiet pass: the classpath was unchanged, so only the source side was updated and no build was announced), `coalesced` (resync requests that joined this pass), the phase split `lib_ms`/`src_ms`, the cache-effectiveness counts `artifacts`/`artifacts_built`/`artifacts_reused`, the parallelism `par_io`/`par_build`, rebuilt-artifact counts by coarse kind `built.<kind>` and `rekeyed.<kind>` (rebuilt under a new key this session; kinds are `jdk`/`bundled`/`sources`/`jar.project_build`/`jar.project`/`jar.cache`/`jar.other`/`res.project`/`res.cache`/`res.other`, never a name or path), the source-diff counts `src_files`/`src_parsed`, and a per-indexer breakdown `idx.<index-id>.ms` for each index that cost ≥1ms — e.g. `idx.java.classNames.ms`, `idx.android.resources.ms` — where the id is a fixed index-kind name, never a file/project/package name, and the time is summed across the threads that ran it. From the release after 3.26.2 every pass is counted; before, passes that finished between two samples of the status flow were missed), `build_result` (`ok`, `duration_ms`, `steps`, `peak_heap_mb`/`min_headroom_mb`/`heap_max_mb`, and on failure `failure_kind` = `compile`/`resource`/`tool`/`oom`/`no_diagnostic` — per build/run), `completion_perf` / `analysis_perf` (`count`, `mean_ms`, `p50_ms`, `p95_ms`, `max_ms`, plus the window's peak `heap_used_mb`/`heap_max_mb`/`heap_headroom_mb`), `frame_perf` / `frame_cpu_perf` (same summary shape, plus `over_count`; see below) |
-| `crash`       | `app_crash` (scrubbed — see below; also carries the crash-time `heap_*_mb` and always pins at least one `dev.ide.*` frame, walking the cause chain if the top of the stack is all framework code), `error_logged` (a caught ERROR-level failure, scrubbed + throttled) |
+| `crash`       | `app_crash` (scrubbed — see below; also carries the crash-time `heap_*_mb` and always pins at least one `dev.ide.*` frame, walking the cause chain if the top of the stack is all framework code), `error_logged` (a caught ERROR-level failure, scrubbed + throttled), `app_anr` (a previous process the system killed for not responding; see below) |
 
 `frame_perf` and `frame_cpu_perf` summarize drawn frames, counted only in bursts (a frame drawn within
 100ms of the one before it) so that typing, scrolling and animation are measured and the idle caret blink is
@@ -89,6 +91,21 @@ sources are combined:
   memory dumps, memory maps, log buffers, open file descriptors) is discarded unparsed. `process` says
   which of our processes died: the IDE, or one of the `build` / `preview` children.
 
+An ANR (`app_anr`, from the release after 3.30.2) comes from the same death history. When the system kills the app for not responding
+(`REASON_ANR`), the record's trace is the thread dump ART wrote at the time, and the next launch reports a
+scrubbed summary of it: `anr_kind` (what timed out: `input`, `broadcast`, `service`, `foreground_service`,
+`provider`, `job`, `other`, from the OS description, which is itself not sent), `background` (the OS marked it
+`bg anr`, which Play does not count as user-perceived), `process`, `importance`, `pss_kb`, `rss_kb`,
+`has_trace`, `threads` (how many threads the dump listed), `main_state` and `main_frames` (the main thread's
+ART state and Java stack), `main_native` (its innermost native frames, `libname.so!symbol`), `main_own_frame`
+(the innermost `dev.ide.*` frame anywhere on it), and, when the main thread was blocked on a monitor,
+`lock_holder` / `lock_holder_state` / `lock_holder_frames` / `lock_holder_own_frame` for the thread holding it.
+Java frames are kept only for this app, the platform and the libraries it bundles; any other run of frames
+collapses to `… (n frames)`, as in a crash report. Lock addresses, thread ids, register state and every other
+thread are dropped. Only an ANR that ended the process leaves a record: one the user waited out does not, so
+these rows are a subset of what Play counts. From the release after 3.30.2, a death record from before the current APK
+was installed is skipped (for crashes too), since the event would carry the new version.
+
 One class of record is deliberately dropped rather than reported: the death of a command-line VM the app
 itself forked to run a build tool (`fault_thread` is a `dalvikvm` launcher). To find the heap a device grants
 R8 and D8, the app forks VMs at rising `-Xmx` values, and ART answers a heap it cannot reserve by aborting
@@ -131,7 +148,9 @@ create table public.events (
   device_manufacturer  text,
   abi                  text,
   locale               text,
-  props                jsonb not null default '{}'
+  props                jsonb not null default '{}',
+  app_id               text,  -- added 2026-10-17 (migration 20261017000100_analytics_origin)
+  signer               text   -- added 2026-10-17
 );
 
 create index events_received_at_idx on public.events (received_at);
@@ -164,6 +183,33 @@ time of day, so the next run re-aggregated a partial oldest day over its complet
 
 Deleting rows does not shrink the table on disk; after a large one-off delete, `vacuum full analyze
 public.events` gives the space back (it locks the table for ~30 s; clients retry from their queue).
+
+## Builds that are not ours
+
+The endpoint and publishable key are build defaults, so any build of this repo that leaves them alone would
+report here. One did: a fork versioned 4.0.0 to 4.1.15 (from 2026-09-18), running our code under its own
+version names. Its users agreed to share data with that fork, not with us, and a fork that kept our version
+names would blend into our crash rates. Two layers keep them out:
+
+- **The client only reports from our certificates.** `BuildConfig.ANALYTICS_SIGNERS` lists the allowed
+  signers; against our endpoint it defaults to the Google Play app signing key (`1361a1abfbb2428b`, installs
+  from Play) and the upload key (`a81bf1e053d77f4d`, the APKs on GitHub Releases). A package signed with
+  anything else gets the no-op service, which also hides the consent prompt and the toggle
+  (`AndroidIde.buildAnalytics`, `Signers.mayReport`). A build pointed at its own endpoint gets no restriction.
+  Debug builds carry the debug certificate, so to test analytics on one, build with `-PANALYTICS_SIGNERS=`
+  (empty = any signer).
+- **The rollup leaves out a labelled row from another signer.** `analytics_signers` holds the same list, and
+  `roll_up_events()` skips rows whose `signer` is set and not listed
+  (`supabase/migrations/20261017000100_analytics_origin.sql`). Rows from clients that predate the columns have
+  no signer and are still counted. The dashboard's `crashsweep.mjs` also sets aside rows with a version newer
+  than the newest release tag.
+
+If the app signing key ever changes (a Play key upgrade), add the new fingerprint to both lists BEFORE
+shipping a release signed with it, or that release reports nothing. The fingerprint is on Play Console's app
+integrity page, or `apksigner verify --print-certs` for an APK.
+
+The `app_id`/`signer` columns had to exist before a client sending them shipped: PostgREST rejects an unknown
+column with a 400, and `SupabaseSink` drops a batch on any 4xx. Any future column follows the same order.
 
 ## Rotating the endpoint / key
 

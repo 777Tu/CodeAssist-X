@@ -181,6 +181,11 @@ class KotlinSourceAnalyzer(ctx: CompilationContext) : SourceAnalyzer, Disposable
     @Volatile
     var javaSourceMemberProvider: (String) -> List<dev.ide.index.MemberValue>? = { null }
 
+    /** Injected by the host: a stamp that moves when the members of a same-project Java SOURCE class may have
+     *  changed, and not for an edit that leaves them alone. See [KotlinSymbolService]. */
+    @Volatile
+    var javaSourceStamp: () -> Long = { 0L }
+
     /** Sync the symbol model to the current live buffers before a query (see [liveOverlayProvider]). */
     private fun refreshOverlay() {
         runCatching { service.setOverlay(liveOverlayProvider()) }
@@ -224,6 +229,7 @@ class KotlinSourceAnalyzer(ctx: CompilationContext) : SourceAnalyzer, Disposable
             excludedTypePrefixes = if (androidNamespacesVisible(isAndroidModule, classpathJars)) emptyList() else ANDROID_TYPE_PREFIXES,
             syntheticMemberProviders = { syntheticMemberProviders() },
             javaSourceMemberProvider = { javaSourceMemberProvider(it) },
+            javaSourceStamp = { javaSourceStamp() },
             apiContext = { apiContext() },
         )
     }
@@ -428,6 +434,12 @@ class KotlinSourceAnalyzer(ctx: CompilationContext) : SourceAnalyzer, Disposable
     fun inheritorMarkers(file: VirtualFile): List<InheritorMarker> = features.inheritorMarkers(file)
 
     fun declarationLocation(fqn: String): Pair<VirtualFile, Int>? = features.declarationLocation(fqn)
+
+    /** Where a Java source type [fqn], or its member, is declared; set by the host (see
+     *  [KotlinEditorFeatures.javaSourceLocator]). */
+    var javaSourceLocator: (fqn: String, member: String?) -> NavTarget?
+        get() = features.javaSourceLocator
+        set(value) { features.javaSourceLocator = value }
 
     fun navigationTargets(file: VirtualFile, text: CharSequence, offset: Int, kind: NavKind): List<NavTarget> =
         features.navigationTargets(file, text, offset, kind)

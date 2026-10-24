@@ -8,6 +8,8 @@ import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -46,11 +48,40 @@ class KotlinInteropCompletionTest {
             class Greeter2 @JvmOverloads constructor(val tag: String = "world") { @JvmName("greetJava") fun greet(): String = "hi" }
             class Overloaded { @JvmOverloads fun box(a: Int, b: Int = 1): Int = a + b }
             class Multi { fun describe(): String = "x"; constructor(a: Int) {}; constructor(a: Int, b: Int) {} }
+            open class KtBase { fun baseCall(): Int = 1 }
+            interface KtNamed { fun label(): String }
+            class KtChild : KtBase(), KtNamed { override fun label(): String = "c" }
+            abstract class KtShape { abstract fun area(): Double }
+            class Names { fun all(): List<String> = emptyList(); fun byId(): Map<Int, String> = emptyMap() }
+            class Clicker { fun onClick(listener: (String) -> Unit) {}; fun transform(f: (Int, Int) -> String): String = f(1, 2) }
+            class Inferred {
+                val title = "hi"
+                val count = 3
+                var enabled = true
+                val ratio = 0.5
+                val child = KtChild()
+                fun describe() = "x"
+                fun total() = 42
+            }
             """.trimIndent(),
             trim = false,
         )
-        s.invalidateSyntheticClasses() // the .kt was written after bootstrap; rebuild the facade overlay
-        awaitIndexReady(s)
+        // The .kt was written after bootstrap: give the module the stdlib it would have had at open (the light
+        // classes name `kotlin.Unit` / `kotlin.jvm.functions.*`), and rebuild the facade overlay.
+        val before = s.indexService.status.stats
+        s.ensureKotlinStdlib()
+        s.invalidateSyntheticClasses()
+        // Adding the stdlib commits the model (more than once), and each commit re-syncs the index in the
+        // background; `ready` can still read true from before a pass starts. Wait for a pass that finished after
+        // this point, then for the index to stay ready and idle for a full second.
+        val deadline = System.currentTimeMillis() + 90_000
+        while (System.currentTimeMillis() < deadline && s.indexService.status.stats === before) Thread.sleep(50)
+        var quietSince = System.currentTimeMillis()
+        while (System.currentTimeMillis() < deadline && System.currentTimeMillis() - quietSince < 1_000) {
+            val st = s.indexService.status
+            if (!st.ready || st.building) quietSince = System.currentTimeMillis()
+            Thread.sleep(50)
+        }
         return s
     }
 
@@ -84,6 +115,143 @@ class KotlinInteropCompletionTest {
         val text = "package com.example.core;\nclass Probe { void m() { new KtGreeter().; } }"
         val items = labels(s, probe, text, "new KtGreeter().")
         assertTrue("hello" in items, "Kotlin class instance method 'hello' should complete: $items")
+    }
+
+    /** An UNSAVED Kotlin edit reaches Java code: the light classes are read from the open buffer, and the Java
+     *  environment, which already resolved `KtGreeter` once, drops its cached copy when the shape changes. */
+    @Test
+    fun unsavedKotlinEditIsVisibleFromJava() {
+        val s = bootstrapWithKotlin()
+        val kt = root.resolve("core/src/main/java/com/example/core/Greetings.kt")
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { new KtGreeter().; } }"
+        assertTrue("hello" in labels(s, probe, text, "new KtGreeter()."))
+        val edited = kt.toFile().readText()
+            .replace("class KtGreeter { fun hello(): String = \"hi\" }", "class KtGreeter { fun hello(): String = \"hi\"; fun added(n: Int) {} }")
+        s.updateDocument(kt, edited)
+        val items = labels(s, probe, text, "new KtGreeter().")
+        assertTrue("added" in items, "a method added in an unsaved Kotlin buffer should complete from Java: $items")
+    }
+
+    /** An edit inside a Kotlin function body changes no light class, so the overlay the Java environment sees is
+     *  the very same map and none of its caches are dropped. A new member does change it. */
+    @Test
+    fun aKotlinBodyEditLeavesTheJavaOverlayAlone() {
+        val s = bootstrapWithKotlin()
+        val kt = root.resolve("core/src/main/java/com/example/core/Greetings.kt")
+        val original = kt.toFile().readText()
+        val before = s.syntheticOverlay()
+        val bodyEdit = original.replace("println(\"Hello World\")", "println(\"Hello there\")")
+        assertTrue(bodyEdit != original, "sanity: the body edit applies")
+        s.updateDocument(kt, bodyEdit)
+        assertSame(before, s.syntheticOverlay(), "a body-only edit must hand back the same overlay")
+        s.updateDocument(kt, original + "\nfun another() {}\n")
+        assertNotSame(before, s.syntheticOverlay(), "a new top-level fun changes the facade")
+    }
+
+    /** A saved Kotlin edit stays visible once its tab is closed (the light classes go back to reading disk). */
+    @Test
+    fun savedKotlinEditIsVisibleFromJavaAfterTheTabCloses() {
+        val s = bootstrapWithKotlin()
+        val kt = root.resolve("core/src/main/java/com/example/core/Greetings.kt")
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { GreetingsKt.; } }"
+        assertTrue("helloWorld" in labels(s, probe, text, "GreetingsKt."))
+        s.save(kt, kt.toFile().readText() + "\nfun savedTopLevel(): Int = 1\n")
+        s.documentClosed(kt)
+        val items = labels(s, probe, text, "GreetingsKt.")
+        assertTrue("savedTopLevel" in items, "a saved top-level fun should be on the facade: $items")
+    }
+
+    /** A Kotlin class's supertypes reach Java: members inherited from a Kotlin superclass complete on it. */
+    @Test
+    fun inheritedKotlinMembersCompleteFromJava() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val items = labels(s, probe, "package com.example.core;\nclass Probe { void m() { new KtChild().; } }", "new KtChild().")
+        assertTrue("baseCall" in items, "inherited from KtBase: $items")
+        assertTrue("label" in items, "its own override: $items")
+    }
+
+    /** A Kotlin subclass is assignable to its Kotlin superclass and interface in Java, with no false error. */
+    @Test
+    fun kotlinSubclassIsAssignableInJava() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { KtBase b = new KtChild(); KtNamed n = new KtChild(); } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isEmpty(), "KtChild is a KtBase and a KtNamed: $errs")
+    }
+
+    /** An abstract Kotlin class can't be instantiated from Java either. */
+    @Test
+    fun abstractKotlinClassIsAbstractInJava() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { new KtShape(); } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isNotEmpty(), "KtShape is abstract: $errs")
+    }
+
+    /** Generic Kotlin signatures keep their type arguments, so Java sees the element type. */
+    @Test
+    fun genericKotlinReturnTypesKeepTheirArguments() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val items = labels(s, probe, "package com.example.core;\nclass Probe { void m() { new Names().all().get(0).; } }", "get(0).")
+        assertTrue("length" in items, "List<String>.get(0) is a String: $items")
+        val text = "package com.example.core;\nclass Probe { void m() { String s = new Names().byId().get(1); for (String n : new Names().all()) {} } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isEmpty(), "Map<Integer, String>.get is a String, List<String> iterates Strings: $errs")
+    }
+
+    /** A Kotlin function-type parameter takes a Java lambda: it is a `kotlin.jvm.functions.FunctionN` to Java. */
+    @Test
+    fun javaLambdaFitsAKotlinFunctionTypeParameter() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { new Clicker().onClick(s -> { s.length(); return null; }); String r = new Clicker().transform((a, b) -> \"\" + (a + b)); } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isEmpty(), "a lambda fits Function1/Function2: $errs")
+    }
+
+    /** A declaration whose type Kotlin infers from a literal or a constructor call has that type in Java, not
+     *  Object: assigning it to the real type is no error. */
+    @Test
+    fun inferredKotlinTypesReachJava() {
+        val s = bootstrapWithKotlin()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { Inferred i = new Inferred(); " +
+            "String t = i.getTitle(); int c = i.getCount(); boolean e = i.getEnabled(); double r = i.getRatio(); " +
+            "KtChild k = i.getChild(); String d = i.describe(); int n = i.total(); } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isEmpty(), "inferred types: $errs")
+    }
+
+    /** `const val` and `lateinit var` are FIELDS to Java, `@file:JvmName` renames the file facade, and an
+     *  `object`'s plain members are reached through `INSTANCE`. */
+    @Test
+    fun kotlinFieldShapesAndRenamedFacadeReachJava() {
+        val s = bootstrapWithKotlin()
+        root.writeSource(
+            "core/src/main/java/com/example/core/Settings.kt",
+            """
+            @file:JvmName("SettingsUtil")
+            package com.example.core
+            const val MAX_ITEMS = 10
+            fun settingsHelper(): Int = 1
+            object Config { const val VERSION = "1"; fun load(): Int = 0 }
+            class Holder { lateinit var name: String; companion object { const val TAG = "h" } }
+            """.trimIndent(),
+            trim = false,
+        )
+        s.invalidateSyntheticClasses()
+        val probe = root.resolve("core/src/main/java/com/example/core/Probe.java")
+        val text = "package com.example.core;\nclass Probe { void m() { " +
+            "int a = SettingsUtil.MAX_ITEMS; int b = SettingsUtil.settingsHelper(); String v = Config.VERSION; " +
+            "int c = Config.INSTANCE.load(); String t = Holder.TAG; String n = new Holder().name; } }"
+        val errs = runBlocking { s.analyzeDiagnostics(probe, text) }.filter { it.severity.name == "ERROR" }.map { it.message }
+        assertTrue(errs.isEmpty(), "$errs")
     }
 
     /** A Kotlin `var` property is visible to Java as BOTH `get<Name>()` and `set<Name>(…)` (the crude facade

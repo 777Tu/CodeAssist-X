@@ -198,6 +198,7 @@ import dev.ide.lang.kotlin.index.KotlinSourceSubtypeIndex
 import dev.ide.lang.kotlin.index.KotlinTypeShapeIndex
 import dev.ide.lang.kotlin.interp.ResolvedClass
 import dev.ide.lang.kotlin.interp.ResolvedFunction
+import dev.ide.lang.kotlin.synthetic.KotlinLightClasses
 import dev.ide.lang.kotlin.synthetic.KotlinSyntheticClassProvider
 import dev.ide.lang.resolve.ApiLevelContext
 import dev.ide.lang.resolve.SourceDocProvider
@@ -246,6 +247,8 @@ import dev.ide.model.ResourceWrite
 import dev.ide.model.SdkResolution
 import dev.ide.model.contentRootsFor
 import dev.ide.model.impl.DefaultFileIconProvider
+import dev.ide.core.kmp.KmpShapes
+import dev.ide.core.kmp.KmpSwitch
 import dev.ide.model.impl.ExternalModelApplier
 import dev.ide.model.impl.ModelPersistence
 import dev.ide.model.impl.ProjectModel
@@ -611,7 +614,7 @@ class IdeServices private constructor(
         override fun removeOverlay(path: Path): String? {
             val norm = path.toAbsolutePath().normalize()
             this@IdeServices.diskBaselines.remove(norm)
-            return this@IdeServices.openDocuments.remove(norm)
+            return this@IdeServices.openDocuments.remove(norm).also { this@IdeServices.overlayChanged(norm) }
         }
 
         override fun projectJavaFiles() = this@IdeServices.projectJavaFiles()
@@ -678,6 +681,7 @@ class IdeServices private constructor(
                         // refresh source-index snapshots (custom-view tag list). XML resource reindexes don't touch
                         // source declarations, so they skip the bump.
                         if (!path.toString().endsWith(".xml")) bumpSourceIndexGeneration()
+                        if (path.toString().endsWith(".java")) javaIndexGeneration.incrementAndGet()
                     }
                 }
             }
@@ -685,6 +689,8 @@ class IdeServices private constructor(
             override fun dropJavaBindingCaches() {
                 invalidateAnalyzerCaches(CacheInvalidation.BINDINGS)
             }
+
+            override fun kotlinSourceChanged(path: Path) = this@IdeServices.kotlinSourceChanged(path)
 
             override fun dropOverlaysUnder(root: Path) = this@IdeServices.dropOverlaysUnder(root)
             override fun rekeyOverlays(from: Path, to: Path) =
@@ -1208,9 +1214,34 @@ class IdeServices private constructor(
      * [EngineContext.ensureKotlinStdlib].
      */
     fun ensureKotlinStdlib() {
-        val libName = "kotlin-stdlib"
+        provisionKotlinStdlib { moduleHasKotlin(it) }
+    }
+
+    /**
+     * Whether Kotlin is set up for [module]: its compile classpath carries kotlin-stdlib, whether as the bundled
+     * library [ensureKotlinStdlib] adds or as a declared (or transitive) dependency of the build. A Java module
+     * that just got its first `.kt` file is not, until [configureKotlin] or the next build/open provisions it.
+     */
+    fun kotlinConfigured(module: Module): Boolean {
+        if (module.dependencies.any { it is LibraryDependency && it.library.name == KOTLIN_STDLIB }) return true
+        return runCatching {
+            module.classpath(DependencyScope.IMPLEMENTATION).entries.any { it.root.name.startsWith(KOTLIN_STDLIB) }
+        }.getOrDefault(false)
+    }
+
+    /** Set Kotlin up for [module] now: add the bundled kotlin-stdlib to it, as a build would. False when there is
+     *  no stdlib to add (none bundled, none on the host). */
+    fun configureKotlin(module: Module): Boolean {
+        provisionKotlinStdlib { it.id == module.id }
+        return modules().firstOrNull { it.id == module.id }?.let(::kotlinConfigured) == true
+    }
+
+    /** Make sure the `kotlin-stdlib` library exists and points at the bundled jar, and add it to every module
+     *  [wanted] selects that doesn't depend on it yet. */
+    private fun provisionKotlinStdlib(wanted: (Module) -> Boolean) {
+        val libName = KOTLIN_STDLIB
         val kotlinModules = store.workspace.projects.flatMap { p -> p.modules.map { p to it } }
-            .filter { (_, m) -> moduleHasKotlin(m) }
+            .filter { (_, m) -> wanted(m) }
         if (kotlinModules.isEmpty()) return
 
         // Ensure the bundled jar is actually on disk AND the `kotlin-stdlib` library points at it. [extractTo]
@@ -1341,6 +1372,7 @@ class IdeServices private constructor(
     private fun putInStep(norm: Path, text: String) {
         openDocuments[norm] = text
         diskBaselines[norm] = text
+        overlayChanged(norm)
     }
 
     /** Called by the editor on every change so cross-file analysis sees the latest text. */
@@ -1351,7 +1383,10 @@ class IdeServices private constructor(
         // save — drop the synthetic caches + nudge the live Java analyzers so the next analyze/complete
         // regenerates `R` from the now-buffer-aware resource repository (its fingerprint includes open res
         // buffers). Cheap cache-drops; the lazy repo rebuild is fingerprint-gated (only when content changed).
-        if (changed && isResourcePath(norm)) invalidateSyntheticClasses()
+        if (changed && isResourcePath(norm)) invalidateResourceSynthetics()
+        // An unsaved Kotlin edit reaches Java code through the light classes, and an unsaved Java edit reaches
+        // Kotlin code through the buffer members, both read from this overlay.
+        if (changed) overlayChanged(norm)
     }
 
     /**
@@ -1392,7 +1427,8 @@ class IdeServices private constructor(
         val previous = openDocuments.replace(norm, disk) ?: return
         diskBaselines[norm] = disk
         if (previous == disk) return
-        if (isResourcePath(norm)) invalidateSyntheticClasses()
+        if (isResourcePath(norm)) invalidateResourceSynthetics()
+        overlayChanged(norm)
     }
 
     /**
@@ -1407,8 +1443,10 @@ class IdeServices private constructor(
         val norm = file.toAbsolutePath().normalize()
         diskBaselines.remove(norm)
         if (openDocuments.remove(norm) == null) return
-        // Same reason as [updateDocument]: dropping a `res/` buffer changes what the synthetic `R` resolves.
-        if (isResourcePath(norm)) invalidateSyntheticClasses()
+        // Same reason as [updateDocument]: dropping a `res/` buffer changes what the synthetic `R` resolves,
+        // and dropping a Kotlin buffer puts its light classes back on what disk holds.
+        if (isResourcePath(norm)) invalidateResourceSynthetics()
+        overlayChanged(norm)
     }
 
     /** Overlay-preferred current text: the live editor buffer if [file] is open, else its disk content. */
@@ -1449,6 +1487,7 @@ class IdeServices private constructor(
         // destroy the asset (an opened PNG becomes ~150 bytes of text). Leave such a file untouched.
         if (isBinaryOnDisk(path)) return
         openDocuments[path] = text
+        overlayChanged(path)
         path.parent?.let { Files.createDirectories(it) }
         path.writeText(text)
         diskBaselines[path] = text
@@ -1505,15 +1544,17 @@ class IdeServices private constructor(
         }
     }.getOrDefault(false)
 
-    // Synthetic ("light") classes (e.g. Android R) contributed via `platform.syntheticClass`, rendered to
-    // Java source and merged into the overlay so they resolve for completion AND analysis like real types.
-    // Cached (the scan walks resource dirs); invalidated when resources change (save/createFile/reindex).
+    // Synthetic classes (e.g. Android R) contributed via `platform.syntheticClass`, rendered to Java source and
+    // merged into the overlay so they resolve for completion AND analysis like real types. Cached (the scan walks
+    // resource dirs); invalidated when resources change (save/createFile/reindex). The Kotlin light classes are
+    // NOT in here: they change with every Kotlin edit, so they are kept incrementally by [kotlinLightClasses].
     @Volatile
     private var syntheticCache: Map<String, CharArray>? = null
 
-    private fun syntheticOverlay(): Map<String, CharArray> {
+    private fun resourceSyntheticOverlay(): Map<String, CharArray> {
         syntheticCache?.let { return it }
         val providers = platform.extensions.extensions(SYNTHETIC_CLASS_EP)
+            .filterNot { it is KotlinSyntheticClassProvider }
         if (providers.isEmpty()) return emptyMap<String, CharArray>().also { syntheticCache = it }
         val out = HashMap<String, CharArray>()
         for (m in modules()) {
@@ -1530,6 +1571,91 @@ class IdeServices private constructor(
         }
         return out.also { syntheticCache = it }
     }
+
+    /**
+     * The Java-visible shapes of every module's Kotlin source, kept per file and read from the open buffer when
+     * there is one, so Java code sees a Kotlin edit before it is saved and a save re-reads one file, not the
+     * project. Bumping [kotlinLightGeneration] is what tells [syntheticOverlay] to look again; it stays a field
+     * read while nothing changed, because the resolver asks for the overlay on every class lookup.
+     */
+    private val kotlinLightClasses = KotlinLightClasses()
+    private val kotlinLightGeneration = AtomicLong()
+
+    /** What [syntheticOverlay] last handed out, with the inputs it was built from. */
+    private class SyntheticSnapshot(
+        val resources: Map<String, CharArray>,
+        val generation: Long,
+        val kotlin: List<List<SyntheticClass>>,
+        val map: Map<String, CharArray>,
+    )
+
+    @Volatile
+    private var syntheticSnapshot: SyntheticSnapshot? = null
+    private val syntheticLock = Any()
+
+    /** fqName -> a light class and its Java text, so an unchanged class keeps the same array (the Java
+     *  environment compares overlay entries by identity first, then by content). */
+    private val lightClassSources = HashMap<String, Pair<SyntheticClass, CharArray>>()
+
+    /**
+     * Every synthetic class as FQN -> Java source: the resource-generated ones plus the Kotlin light classes
+     * (a real Kotlin class wins over a generated one of the same name). Returns the SAME map instance until one
+     * of them changes, and an edit that leaves every light class's shape alone (a function body) changes
+     * nothing, so the Java environment keeps its caches.
+     */
+    internal fun syntheticOverlay(): Map<String, CharArray> {
+        val resources = resourceSyntheticOverlay()
+        val generation = kotlinLightGeneration.get()
+        syntheticSnapshot?.let { if (it.resources === resources && it.generation == generation) return it.map }
+        synchronized(syntheticLock) {
+            val last = syntheticSnapshot
+            if (last != null && last.resources === resources && last.generation == generation) return last.map
+            val kotlin = kotlinLightClassLists()
+            val map = if (last != null && last.resources === resources && last.kotlin.size == kotlin.size &&
+                kotlin.indices.all { kotlin[it] === last.kotlin[it] }
+            ) {
+                last.map
+            } else {
+                val out = HashMap<String, CharArray>(resources)
+                val live = HashSet<String>()
+                for (classes in kotlin) for (sc in classes) {
+                    val cached = lightClassSources[sc.fqName]
+                    val chars = if (cached != null && (cached.first === sc || cached.first == sc)) cached.second
+                    else runCatching { SyntheticJavaSource.emit(sc).toCharArray() }.getOrNull() ?: continue
+                    lightClassSources[sc.fqName] = sc to chars
+                    out[sc.fqName] = chars
+                    live += sc.fqName
+                }
+                lightClassSources.keys.retainAll(live)
+                out
+            }
+            return map.also { syntheticSnapshot = SyntheticSnapshot(resources, generation, kotlin, it) }
+        }
+    }
+
+    /** Each module's Kotlin light classes, or nothing when the Kotlin provider isn't installed. */
+    private fun kotlinLightClassLists(): List<List<SyntheticClass>> {
+        if (platform.extensions.extensions(SYNTHETIC_CLASS_EP).none { it is KotlinSyntheticClassProvider }) {
+            return emptyList()
+        }
+        val buffers = kotlinOverlay()
+        return modules().map { m ->
+            runCatching {
+                kotlinLightClasses.classesFor(
+                    m.id.value, KotlinSyntheticClassProvider.kotlinSourceRoots(m), buffers::get,
+                )
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    /** A Kotlin file changed on disk (save, outside write): its light classes are read again on next use. */
+    private fun kotlinSourceChanged(path: Path) {
+        kotlinLightClasses.invalidate(path.toAbsolutePath().normalize().toString())
+        kotlinLightGeneration.incrementAndGet()
+    }
+
+    private fun isKotlinPath(path: Path): Boolean =
+        path.fileName?.toString()?.let { it.endsWith(".kt") || it.endsWith(".kts") } == true
 
     // Structured synthetic classes a KOTLIN file in a module should see (the Kotlin backend resolves them
     // directly, not via rendered Java source). Cached per module, swapped out (fresh list) on invalidation so
@@ -1568,11 +1694,19 @@ class IdeServices private constructor(
             byName.values.toList()
         }
 
-    /** Drop the cached synthetic classes so the next analyze/complete regenerates them (e.g. after a res edit). */
+    /** Drop the cached synthetic classes so the next analyze/complete regenerates them (e.g. after a res edit),
+     *  and list the Kotlin source roots again (files may have come or gone). */
     fun invalidateSyntheticClasses() {
-        // Drop the rendered synthetic R/facade caches. The shared resource repository ([repoCache]) is NOT
-        // dropped here: it is fingerprint-keyed on the res files, so a resource edit invalidates it on its own,
-        // while an unrelated .kt edit (which also calls this) must not throw away the parsed resource set.
+        kotlinLightClasses.rescan()
+        kotlinLightGeneration.incrementAndGet()
+        invalidateResourceSynthetics()
+    }
+
+    /** Drop the resource-generated synthetic classes (R, BuildConfig, ViewBinding) only: what an edit under
+     *  `res/` changes. Leaves the Kotlin light classes alone. */
+    private fun invalidateResourceSynthetics() {
+        // Drop the rendered synthetic R caches. The shared resource repository ([repoCache]) is NOT dropped
+        // here: it is fingerprint-keyed on the res files, so a resource edit invalidates it on its own.
         syntheticCache = null; kotlinSyntheticCache.clear()
         // The lang-java analyzers hold a LIVE IntelliJ env whose facade caches the resolved synthetic `R` by
         // modification count — clearing the ide-core caches above regenerates the R SOURCE, but the Java env
@@ -1667,10 +1801,61 @@ class IdeServices private constructor(
         return out
     }
 
-    // owner FQN -> its public members, parsed from the OPEN `.java` buffers, cached under a content fingerprint
-    // of those buffers so it rebuilds only when a Java buffer actually changed (String hashCodes are cached).
+    /** One open `.java` buffer's members by owner FQN, kept until that buffer's text changes. */
+    private class JavaBufferEntry(val text: String, val members: Map<String, Collection<MemberValue>>)
+
+    /** The members of every open `.java` buffer, merged; [version] moves only when they differ in value. */
+    private class JavaBufferSnapshot(val generation: Long, val members: Map<String, List<MemberValue>>, val version: Long)
+
+    private val javaBufferEntries = HashMap<Path, JavaBufferEntry>()
+    private val javaBufferLock = Any()
+
+    /** Bumped on every change to a `.java` overlay, so [javaBufferSnapshot] is a field read while none changed. */
+    private val javaBufferGeneration = AtomicLong()
+
     @Volatile
-    private var javaBufferMembers: Pair<Int, Map<String, List<MemberValue>>>? = null
+    private var javaBufferSnapshot: JavaBufferSnapshot? = null
+
+    /** Bumped after a saved `.java` file is re-indexed: the members the index serves for it may have changed. */
+    private val javaIndexGeneration = AtomicLong()
+
+    /**
+     * The members declared by the open `.java` buffers. A buffer is parsed again only when its own text changed,
+     * and the merged map keeps its [JavaBufferSnapshot.version] when the re-parse found the same members, which
+     * is the case for any edit inside a method body.
+     */
+    private fun javaBufferSnapshot(): JavaBufferSnapshot {
+        val generation = javaBufferGeneration.get()
+        javaBufferSnapshot?.let { if (it.generation == generation) return it }
+        synchronized(javaBufferLock) {
+            val last = javaBufferSnapshot
+            if (last != null && last.generation == generation) return last
+            val openPaths = HashSet<Path>()
+            var changed = false
+            for ((path, content) in openDocuments) {
+                if (!path.toString().endsWith(".java")) continue
+                openPaths.add(path)
+                val entry = javaBufferEntries[path]
+                if (entry != null && (entry.text === content || entry.text == content)) continue
+                val members = runCatching { JavaMembersByOwnerIndex.membersFor(JavaSourceIndexer.parse(content)) }
+                    .getOrNull() ?: emptyMap()
+                if (entry == null || entry.members != members) changed = true
+                javaBufferEntries[path] = JavaBufferEntry(content, members)
+            }
+            if (javaBufferEntries.keys.retainAll(openPaths)) changed = true
+            val snapshot = if (last != null && !changed) {
+                JavaBufferSnapshot(generation, last.members, last.version)
+            } else {
+                val merged = HashMap<String, MutableList<MemberValue>>()
+                for (entry in javaBufferEntries.values) {
+                    entry.members.forEach { (owner, members) -> merged.getOrPut(owner) { ArrayList() }.addAll(members) }
+                }
+                JavaBufferSnapshot(generation, merged, (last?.version ?: 0L) + 1)
+            }
+            javaBufferSnapshot = snapshot
+            return snapshot
+        }
+    }
 
     /**
      * Members of a currently-OPEN Java SOURCE class [fqn], parsed from its live editor buffer, so a Kotlin file
@@ -1679,22 +1864,18 @@ class IdeServices private constructor(
      * back to the index. Reuses the ONE producer ([JavaMembersByOwnerIndex.membersFor], same shape encoding) so
      * live and saved members decode identically. Wired to [KotlinSourceAnalyzer.javaSourceMemberProvider].
      */
-    private fun javaSourceBufferMembers(fqn: String): List<MemberValue>? {
-        val javaBuffers = openDocuments.entries.filter { it.key.toString().endsWith(".java") }
-        if (javaBuffers.isEmpty()) return null
-        val fingerprint = javaBuffers.fold(1) { acc, e -> acc * 31 + e.key.hashCode() * 31 + e.value.hashCode() }
-        var cached = javaBufferMembers
-        if (cached == null || cached.first != fingerprint) {
-            val map = HashMap<String, MutableList<MemberValue>>()
-            for (e in javaBuffers) {
-                val parsed = runCatching { JavaSourceIndexer.parse(e.value) }.getOrNull() ?: continue
-                JavaMembersByOwnerIndex.membersFor(parsed)
-                    .forEach { (owner, members) -> map.getOrPut(owner) { ArrayList() }.addAll(members) }
-            }
-            cached = fingerprint to map.mapValues { it.value.toList() }
-            javaBufferMembers = cached
+    private fun javaSourceBufferMembers(fqn: String): List<MemberValue>? = javaBufferSnapshot().members[fqn]
+
+    /** Moves when a Java source class's members may have changed: an open buffer's members, or a re-indexed
+     *  save. Wired to [KotlinSourceAnalyzer.javaSourceStamp]. */
+    internal fun javaSourceStamp(): Long = javaBufferSnapshot().version * 1_000_003L + javaIndexGeneration.get()
+
+    /** The overlay for [path] was set, changed or removed: tell whatever reads that kind of buffer to look again. */
+    private fun overlayChanged(path: Path) {
+        when {
+            isKotlinPath(path) -> kotlinLightGeneration.incrementAndGet()
+            path.toString().endsWith(".java") -> javaBufferGeneration.incrementAndGet()
         }
-        return cached.second[fqn]
     }
 
     /** The IDE's stable, path-free index-segment key for a BUNDLED jar (android.jar / desugar stubs / the
@@ -2016,11 +2197,32 @@ class IdeServices private constructor(
         if (!isCompatibilityMode()) null else GradleImport.kmpTargetChoice(workspaceRoot)
 
     /**
+     * The targets a NATIVE project's multiplatform modules record ([dev.ide.lang.kotlin.build.KotlinFacet.targets])
+     * and the one they are shaped for, or null when there is nothing to switch between (or the project is a Gradle
+     * import, whose choice is [kmpTargetChoice]).
+     */
+    internal fun nativeKmpChoice(): KmpSwitch.Choice? = if (isCompatibilityMode()) null else KmpSwitch.choice(store)
+
+    /**
+     * Reshape a native project's multiplatform modules for [target] from what their facets record (no build
+     * scripts involved), then save. The caller re-resolves dependencies and re-indexes, as after a sync.
+     */
+    internal fun switchNativeKmpTarget(target: String): ProjectSyncOutcome {
+        val level = modules().firstOrNull()?.languageLevel ?: LanguageLevel.JAVA_17
+        val changed = KmpSwitch.switch(store, target, level)
+        if (changed.isEmpty()) return ProjectSyncOutcome(true, "Already on $target.")
+        invalidateAnalyzers()
+        invalidateSyntheticClasses()
+        return ProjectSyncOutcome(true, "Switched ${changed.joinToString()} to $target.", modelChanged = true)
+    }
+
+    /**
      * Import the multiplatform modules for [platform] from now on, and re-sync. The modules the switch
      * changes are rebuilt rather than refreshed: a refresh keeps a module's type, merges its source roots and
      * keeps its facets, so the old target's `androidMain` roots and `[android]` facet would survive it.
      */
     internal suspend fun switchKmpTarget(platform: GradleKmp.Platform): ProjectSyncOutcome {
+        if (!isCompatibilityMode()) return switchNativeKmpTarget(if (platform == GradleKmp.Platform.ANDROID) KmpShapes.ANDROID else KmpShapes.JVM)
         fun shapes() = GradleImport.parse(workspaceRoot)?.modules.orEmpty()
             .associate { it.name to (it.kind to it.kmp?.platform) }
         val before = shapes()
@@ -2262,6 +2464,7 @@ class IdeServices private constructor(
                     // analyzer also self-detects androidx on its own classpath, so this need not be exhaustive.)
                     it.isAndroidModule =
                         module.facets.get(AndroidFacet.KEY) != null || module.type.platform == PlatformKind.ANDROID
+                    it.javaSourceLocator = { fqn, member -> javaSourceTarget(module, fqn, member) }
                     it.apiContext = { apiLevelContext(module.id) }
                     it.extensionCacheDir = store.rootPath.resolve(".platform/caches/kotlin-ext")
                     // Lowered Compose-preview declarations persist across launches, so the first preview after
@@ -2288,6 +2491,7 @@ class IdeServices private constructor(
                     // buffer, so a Java edit reflects in a calling Kotlin file before save (the mirror of
                     // liveOverlayProvider for the .kt→.java direction).
                     it.javaSourceMemberProvider = ::javaSourceBufferMembers
+                    it.javaSourceStamp = ::javaSourceStamp
                     // Editor support for a compiler plugin's generated members (kotlinx.serialization's
                     // `serializer()`): the contributed providers, or the built-ins when nothing is registered.
                     it.syntheticMemberProviders = {
@@ -2825,6 +3029,10 @@ class IdeServices private constructor(
     ): List<dev.ide.lang.kotlin.NavTarget> {
         val targets = kotlinEditor.navigationTargets(file, text, offset, kind)
         if (targets.isNotEmpty()) return targets
+        val java = javaNavKind(kind)?.let { k ->
+            javaAnalyzerFor(file)?.let { a -> javaNavTargets(file, a.navigationTargets(store.vfs.fileFor(file), text, offset, k)) }
+        }.orEmpty()
+        if (java.isNotEmpty()) return java
         val android = androidEditor.navigation.targets(file, text, offset, kind)
         if (android.isNotEmpty() || kind != dev.ide.lang.kotlin.NavKind.DECLARATION) return android
         return resourceDeclaration(file, text, offset) ?: pluginDeclarations(file, text, offset)
@@ -2842,6 +3050,10 @@ class IdeServices private constructor(
         offset: Int,
     ): List<Pair<dev.ide.lang.kotlin.NavKind, List<dev.ide.lang.kotlin.NavTarget>>> {
         val opts = kotlinEditor.navigationOptions(file, text, offset).toMutableList()
+        javaAnalyzerFor(file)?.navigationOptions(store.vfs.fileFor(file), text, offset)?.forEach { (k, targets) ->
+            val mapped = javaNavTargets(file, targets)
+            if (mapped.isNotEmpty()) opts.add(fromJavaNavKind(k) to mapped)
+        }
         for ((kind, targets) in androidEditor.navigation.options(file, text, offset)) {
             if (opts.none { it.first == kind }) opts.add(kind to targets)
         }
@@ -2901,6 +3113,74 @@ class IdeServices private constructor(
     }
 
     private val navigationLog by lazy { Log.logger("ide.navigation") }
+
+    /** The Java analyzer of [file]'s module, for a `.java` file in one. */
+    private fun javaAnalyzerFor(file: Path): dev.ide.lang.java.JavaSourceAnalyzer? {
+        if (!file.toString().endsWith(".java")) return null
+        val module = moduleForEditableFile(file) ?: return null
+        return analyzerFor(module) as? dev.ide.lang.java.JavaSourceAnalyzer
+    }
+
+    private fun javaNavKind(kind: dev.ide.lang.kotlin.NavKind): dev.ide.lang.java.navigate.JavaNavKind? = when (kind) {
+        dev.ide.lang.kotlin.NavKind.DECLARATION -> dev.ide.lang.java.navigate.JavaNavKind.DECLARATION
+        dev.ide.lang.kotlin.NavKind.IMPLEMENTATION -> dev.ide.lang.java.navigate.JavaNavKind.IMPLEMENTATION
+        dev.ide.lang.kotlin.NavKind.TYPE_DECLARATION -> dev.ide.lang.java.navigate.JavaNavKind.TYPE_DECLARATION
+        dev.ide.lang.kotlin.NavKind.SUPER -> dev.ide.lang.java.navigate.JavaNavKind.SUPER
+        else -> null
+    }
+
+    private fun fromJavaNavKind(kind: dev.ide.lang.java.navigate.JavaNavKind): dev.ide.lang.kotlin.NavKind = when (kind) {
+        dev.ide.lang.java.navigate.JavaNavKind.DECLARATION -> dev.ide.lang.kotlin.NavKind.DECLARATION
+        dev.ide.lang.java.navigate.JavaNavKind.IMPLEMENTATION -> dev.ide.lang.kotlin.NavKind.IMPLEMENTATION
+        dev.ide.lang.java.navigate.JavaNavKind.TYPE_DECLARATION -> dev.ide.lang.kotlin.NavKind.TYPE_DECLARATION
+        dev.ide.lang.java.navigate.JavaNavKind.SUPER -> dev.ide.lang.kotlin.NavKind.SUPER
+    }
+
+    /**
+     * Java go-to targets as editor destinations. A class with no file in the Java environment is either an open
+     * `.java` buffer (opened at the same offset, since it was resolved from that buffer's text) or a Kotlin light
+     * class (opened at the Kotlin declaration it renders). Anything else generated, like Android `R`, is dropped
+     * here, which lets a Declaration fall through to the resource lookup.
+     */
+    private fun javaNavTargets(
+        from: Path?,
+        targets: List<dev.ide.lang.java.navigate.JavaNavTarget>,
+    ): List<dev.ide.lang.kotlin.NavTarget> = targets.mapNotNull { t ->
+        val (path, offset) = when (val loc = t.location) {
+            is dev.ide.lang.java.navigate.JavaNavLocation.ThisFile -> (from ?: return@mapNotNull null) to loc.offset
+            is dev.ide.lang.java.navigate.JavaNavLocation.SourceFile -> Paths.get(loc.path) to loc.offset
+            is dev.ide.lang.java.navigate.JavaNavLocation.Library -> return@mapNotNull dev.ide.lang.kotlin.NavTarget(
+                dev.ide.lang.kotlin.LibraryFile(dev.ide.lang.kotlin.libraryPath(loc.classFqn, loc.member)), 0, t.label, t.kind,
+            )
+            is dev.ide.lang.java.navigate.JavaNavLocation.Generated ->
+                openJavaBufferDeclaring(loc.topLevelFqn)?.let { it to loc.offset }
+                    ?: kotlinLightClassLocation(loc.classFqn, loc.member)
+                    ?: return@mapNotNull null
+        }
+        dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(path), offset, t.label, t.kind)
+    }
+
+    /** A Kotlin file's go-to into the project's Java source: the class [fqn] or its [member], resolved by the
+     *  Java analyzer of [module]. */
+    private fun javaSourceTarget(module: Module, fqn: String, member: String?): dev.ide.lang.kotlin.NavTarget? {
+        val java = analyzerFor(module) as? dev.ide.lang.java.JavaSourceAnalyzer ?: return null
+        val target = runCatching { java.declarationOf(fqn, member) }.getOrNull() ?: return null
+        return javaNavTargets(null, listOf(target)).firstOrNull()
+    }
+
+    /** The open `.java` buffer whose top-level class is [fqn]. */
+    private fun openJavaBufferDeclaring(fqn: String): Path? =
+        javaOverlayEntries.entries.firstOrNull { (path, e) -> e.fqcn == fqn && openDocuments.containsKey(path) }?.key
+
+    /** Where the Kotlin declaration rendered as light class [classFqn]'s [member] is. */
+    private fun kotlinLightClassLocation(classFqn: String, member: String?): Pair<Path, Int>? {
+        val path = Paths.get(kotlinLightClasses.fileDeclaring(classFqn) ?: return null)
+        val text = openDocuments[path] ?: runCatching { path.readText() }.getOrNull() ?: return null
+        val offset = runCatching {
+            dev.ide.lang.kotlin.synthetic.LightClassDeclarations.offsetOf(path.fileName.toString(), text, classFqn, member)
+        }.getOrDefault(0)
+        return path to offset
+    }
 
     /**
      * The go-to-declaration targets plugins contribute for [offset] in [file] ([text] = live buffer), through
@@ -3148,7 +3428,7 @@ class IdeServices private constructor(
     private fun dropOverlaysUnder(root: Path) {
         val r = normPath(root)
         openDocuments.keys.filter { it == r || it.startsWith(r) }
-            .forEach { openDocuments.remove(it); diskBaselines.remove(it) }
+            .forEach { openDocuments.remove(it); diskBaselines.remove(it); overlayChanged(it) }
     }
 
     /** Re-point open-document overlays from [from] (a file or directory) to [to] after a move/rename. */
@@ -3159,6 +3439,7 @@ class IdeServices private constructor(
             val dest = if (k == f) t else t.resolve(f.relativize(k))
             openDocuments.remove(k)?.let { openDocuments[normPath(dest)] = it }
             diskBaselines.remove(k)?.let { diskBaselines[normPath(dest)] = it }
+            overlayChanged(k)
         }
     }
 
@@ -3231,7 +3512,7 @@ class IdeServices private constructor(
             else rewriteJavaPackage(f, text, newPkg)) ?: continue
             runCatching { f.writeText(rewrite.updated) }
                 .onSuccess { putInStep(key, rewrite.updated) }
-                .onFailure { openDocuments[key] = rewrite.updated }
+                .onFailure { openDocuments[key] = rewrite.updated; overlayChanged(key) }
             if (updateReferences) for (type in rewrite.topLevelNames) {
                 val oldFqn = if (rewrite.oldPkg.isEmpty()) type else "${rewrite.oldPkg}.$type"
                 val newFqn = if (newPkg.isEmpty()) type else "$newPkg.$type"
@@ -3292,7 +3573,7 @@ class IdeServices private constructor(
             if (updated != text) {
                 runCatching { file.writeText(updated) }
                     .onSuccess { putInStep(key, updated) }
-                    .onFailure { openDocuments[key] = updated }
+                    .onFailure { openDocuments[key] = updated; overlayChanged(key) }
             }
         }
     }
@@ -4803,6 +5084,7 @@ class IdeServices private constructor(
                     sb.replace(s, en, e.newText.toString())
                 }
                 openDocuments[p] = sb.toString()
+                overlayChanged(p)
             }
             return edit
         }
@@ -4871,6 +5153,8 @@ class IdeServices private constructor(
     }
 
     companion object {
+        /** The name of the library [ensureKotlinStdlib] adds, and the prefix of a kotlin-stdlib jar. */
+        private const val KOTLIN_STDLIB = "kotlin-stdlib"
         /** Cache subdirs under `.platform/caches` the "Clear caches" action removes — all regenerable, none
          *  shared across projects (the static SDK/library index segments live under the shared caches root). */
         private val CLEARABLE_CACHE_DIRS =

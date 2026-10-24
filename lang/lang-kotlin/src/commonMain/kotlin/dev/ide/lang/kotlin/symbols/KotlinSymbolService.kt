@@ -97,9 +97,14 @@ class KotlinSymbolService(
      *  via [dev.ide.index.JavaSourceMemberCodec]), parsed from its live editor buffer. Non-null return =
      *  "this fqn is a same-project Java source class, use these members" (an UNSAVED edit is visible before it
      *  is saved + reindexed); null = not an open Java buffer, so the save-driven `java.membersByOwner` index
-     *  answers instead. A same-project Java source class is treated as VOLATILE (never pinned in the classpath
-     *  memos) so both live-buffer and post-save edits show at once. */
+     *  answers instead. A same-project Java source class is never pinned in the session-stable classpath memos:
+     *  it is cached against [javaSourceStamp] instead, so both live-buffer and post-save edits show at once. */
     private val javaSourceMemberProvider: (String) -> List<MemberValue>? = { null },
+    /** Optional: a stamp that moves whenever the members of a project Java SOURCE class may have changed (an
+     *  open buffer's members changed, a buffer closed, a saved `.java` was re-indexed), and stays put for an edit
+     *  that leaves them alone (a method body). It keys the Java-source memo and is part of
+     *  [externalContentStamp], so a Kotlin file's cached analysis is redone when a Java class it uses changes. */
+    private val javaSourceStamp: () -> Long = { 0L },
     /** Optional: the module's API-level context (the Android platform's table, or the JDK's for a JVM module),
      *  for the "Added in API N" / "Since Java N" line of a platform symbol's docs. Null when there is none. */
     private val apiContext: () -> ApiLevelContext? = { null },
@@ -320,6 +325,53 @@ class KotlinSymbolService(
 
     // The same member lists bound to a generic receiver's plain type arguments (see [boundMembersCached]).
     private val classpathBoundMembersMemo = ConcurrentMap<String, List<KotlinSymbol>>()
+
+    // The same member lists for a project Java SOURCE class, which an edit can change, so each entry carries the
+    // [javaSourceStamp] it was computed under and is served only while the stamp is unchanged. Keys are the
+    // sibling memo's key behind a tag naming that memo.
+    private val javaSourceMemo = ConcurrentMap<String, Pair<Long, List<KotlinSymbol>>>()
+
+    // A project Java SOURCE class's [TypeShape] ([javaSourceShape]) and supertype closure, under the same stamp.
+    private val javaSourceShapeMemo = ConcurrentMap<String, Pair<Long, Holder<TypeShape>>>()
+    private val javaSourceSupertypeMemo = ConcurrentMap<String, Pair<Long, List<String>>>()
+
+    @Volatile
+    private var javaSourceMemoStamp = Long.MIN_VALUE
+
+    /** The current [javaSourceStamp]. When it moved, drop what was computed from Java source under the old one:
+     *  [javaSourceMemo], and the source members memo, since a Kotlin class can inherit from a Java source class. */
+    private fun syncJavaSourceStamp(): Long {
+        val stamp = javaSourceStamp()
+        if (stamp != javaSourceMemoStamp) {
+            javaSourceMemo.clear()
+            javaSourceShapeMemo.clear()
+            javaSourceSupertypeMemo.clear()
+            sourceOwnMembersMemo = ConcurrentMap()
+            javaSourceMemoStamp = stamp
+        }
+        return stamp
+    }
+
+    /**
+     * [memo]'s entry for [key], else [compute]d and cached: in [memo] for a classpath type, or in [javaSourceMemo]
+     * against the current stamp for a project Java source class ([fqn]). The [isJavaSourceType] probe runs only on
+     * a miss.
+     */
+    private fun memoizedMembers(
+        memo: ConcurrentMap<String, List<KotlinSymbol>>,
+        tag: Char,
+        key: String,
+        fqn: String,
+        compute: () -> List<KotlinSymbol>,
+    ): List<KotlinSymbol> {
+        memo[key]?.let { return it }
+        val stamp = syncJavaSourceStamp()
+        val javaKey = "$tag|$key"
+        javaSourceMemo[javaKey]?.let { if (it.first == stamp) return it.second }
+        val result = compute()
+        if (isJavaSourceType(fqn)) javaSourceMemo[javaKey] = stamp to result else memo[key] = result
+        return result
+    }
     @Volatile
     private var sourceOwnMembersMemo = ConcurrentMap<String, List<KotlinSymbol>>()
 
@@ -621,11 +673,17 @@ class KotlinSymbolService(
     /** A stamp over the content versions of every edited source file EXCEPT [exceptPath] — so a file's analyze
      *  cache can tell that a DIFFERENT file (a cross-file dependency) changed and invalidate itself, while its
      *  OWN edits (excluded here, handled by the per-declaration text diff) don't force a full re-analyze. */
-    fun externalContentStamp(exceptPath: String): Long = stateLock.withLock {
+    fun externalContentStamp(exceptPath: String): Long {
+        // Read outside [stateLock]: the host may parse an open Java buffer to answer.
+        val java = javaSourceStamp()
+        return stateLock.withLock { kotlinContentStamp(exceptPath) * 31L + java }
+    }
+
+    private fun kotlinContentStamp(exceptPath: String): Long {
         var h = 0L
         for ((p, v) in fileVersions) if (p != exceptPath) h =
             h * 1_000_003L + (p.hashCode().toLong() * 31L + v)
-        h
+        return h
     }
 
     private fun model(): ModuleSourceModel =
@@ -1447,13 +1505,11 @@ class KotlinSymbolService(
             )
         )
             return membersNamed(typeFqn, typeArgs, name)
-        val key = "$typeFqn $name"
-        checkMembersMemo[key]?.let { return it }
-        val result = membersNamed(typeFqn, emptyList(), name)
-        // A project JAVA SOURCE receiver is volatile too (an edit adds/removes a member) — so a member the user
-        // just typed into the Java class isn't wrongly flagged unresolved. The probe runs only on a memo MISS.
-        if (!isJavaSourceType(typeFqn)) checkMembersMemo[key] = result
-        return result
+        // A project JAVA SOURCE receiver changes on edit, so it is cached against the Java source stamp: a member
+        // the user just typed into the Java class isn't wrongly flagged unresolved.
+        return memoizedMembers(checkMembersMemo, 'c', "$typeFqn $name", typeFqn) {
+            membersNamed(typeFqn, emptyList(), name)
+        }
     }
 
     override fun supertypesOf(typeFqn: String): List<TypeRef> =
@@ -1491,6 +1547,10 @@ class KotlinSymbolService(
             classpathSupertypeMemo
         }
         memo[fqn]?.let { return it }
+        // A project Java source class's supertypes can change on an edit: cached against the Java source stamp,
+        // never pinned in the session-stable classpath memo.
+        val stamp = if (memo === classpathSupertypeMemo) syncJavaSourceStamp() else null
+        if (stamp != null) javaSourceSupertypeMemo[fqn]?.let { if (it.first == stamp) return it.second }
         val running = supertypeWalkInProgress.get()
         if (!running.add(fqn)) return emptyList()
         // Computed OUTSIDE the map, then stored. `getOrPut` is `computeIfAbsent`, and this walk re-enters the
@@ -1503,7 +1563,8 @@ class KotlinSymbolService(
         } finally {
             running.remove(fqn)
         }
-        memo[fqn] = computed
+        if (stamp != null && isJavaSourceType(fqn)) javaSourceSupertypeMemo[fqn] = stamp to computed
+        else memo[fqn] = computed
         return computed
     }
 
@@ -1531,10 +1592,7 @@ class KotlinSymbolService(
             (idx == null || classpathCacheUsable(idx))
         val key = if (cacheable) boundKey(kfqn, typeArgs) else null
         if (key == null) return ownAndInherited(fqn, typeArgs, HashSet())
-        classpathBoundMembersMemo[key]?.let { return it }
-        val members = ownAndInherited(fqn, typeArgs, HashSet())
-        if (!isJavaSourceType(kfqn)) classpathBoundMembersMemo[key] = members
-        return members
+        return memoizedMembers(classpathBoundMembersMemo, 'b', key, kfqn) { ownAndInherited(fqn, typeArgs, HashSet()) }
     }
 
     private fun boundKey(fqn: String, typeArgs: List<TypeRef>): String? {
@@ -1578,12 +1636,9 @@ class KotlinSymbolService(
             // for the owner class — other classes stay cached), like the mid-build partial-shape guard below.
             model().classByFqn.containsKey(kfqn) ->
                 if (isInferringOwner(kfqn)) ownAndInherited(fqn, emptyList(), HashSet())
-                else sourceOwnMembersMemo.getOrPut(kfqn) {
-                    ownAndInherited(
-                        fqn,
-                        emptyList(),
-                        HashSet()
-                    )
+                else {
+                    syncJavaSourceStamp() // a Kotlin class can inherit members from a Java source class
+                    sourceOwnMembersMemo.getOrPut(kfqn) { ownAndInherited(fqn, emptyList(), HashSet()) }
                 }
             // A synthetic class (Android `R`/`BuildConfig`, ViewBinding) is VOLATILE — its members change when
             // resources change — and cheap to enumerate (in-memory). Pinning it in the session-stable classpath
@@ -1596,15 +1651,9 @@ class KotlinSymbolService(
                 emptyList(),
                 HashSet()
             ) // mid-build: don't pin a partial shape
-            else -> {
-                classpathOwnMembersMemo[kfqn]?.let { return it }
-                val members = ownAndInherited(fqn, emptyList(), HashSet())
-                // A project JAVA SOURCE class is VOLATILE — its members change on an edit/save, so it must not be
-                // pinned in the session-stable classpath memo (the same reason a synthetic class isn't). The
-                // [isJavaSourceType] probe runs only here, on a memo MISS. Classpath binaries cache as before.
-                if (!isJavaSourceType(kfqn)) classpathOwnMembersMemo[kfqn] = members
-                members
-            }
+            // A project JAVA SOURCE class's members change on an edit/save, so it is never pinned in the
+            // session-stable classpath memo; [memoizedMembers] caches it against the Java source stamp instead.
+            else -> memoizedMembers(classpathOwnMembersMemo, 'o', kfqn, kfqn) { ownAndInherited(fqn, emptyList(), HashSet()) }
         }
     }
 
@@ -1702,6 +1751,223 @@ class KotlinSymbolService(
     private fun javaSourceMembers(fqn: String): List<KotlinSymbol> {
         javaSourceMemberProvider(fqn)?.let { return it.map(::memberFromIndex) }
         return index?.exact<MemberValue>(MEMBERS_BY_OWNER, fqn)?.map(::memberFromIndex)?.toList() ?: emptyList()
+    }
+
+    /**
+     * A project Java SOURCE class as the same [TypeShape] a bytecode-read Java class gets, so everything built on
+     * shapes applies to it unchanged: inherited members through its supertypes (Java or library), assignability
+     * to them, its type parameters bound by a receiver's type arguments, its constructors for a `Foo(...)` call,
+     * bean properties for its getters. Built from the members the host serves for an open buffer, else the
+     * `java.membersByOwner` index, and cached against the Java source stamp. Null for anything that isn't one,
+     * and for an index entry from before the type entry existed (the members-only fallback still covers that).
+     */
+    private fun javaSourceShape(fqn: String): TypeShape? {
+        val stamp = syncJavaSourceStamp()
+        javaSourceShapeMemo[fqn]?.let { if (it.first == stamp) return it.second.value }
+        val values = javaSourceMemberProvider(fqn)
+            ?: index?.exact<MemberValue>(MEMBERS_BY_OWNER, fqn)?.toList()
+            ?: emptyList()
+        val computed = runCatching { buildJavaSourceShape(fqn, values) }.getOrNull()
+        // A miss while the index is still building may only mean the file isn't indexed yet: don't pin it.
+        if (computed != null || index?.status?.ready != false) javaSourceShapeMemo[fqn] = stamp to Holder(computed)
+        return computed
+    }
+
+    private fun buildJavaSourceShape(fqn: String, values: List<MemberValue>): TypeShape? {
+        val typeValue = values.firstOrNull { it.kind == JavaSourceMemberCodec.TYPE } ?: return null
+        val type = JavaSourceMemberCodec.decodeType(typeValue.signature) ?: return null
+        val names = JavaSourceNames(fqn, type)
+        val classTypeParams = type.typeParameters.map { it.first }
+        val classScope = classTypeParams.toSet()
+        val simple = fqn.substringAfterLast('.')
+        val ownerSym = KotlinSymbol(simple, SymbolKind.CLASS, origin = SOURCE)
+        fun mods(sig: String, isMethod: Boolean, static: Boolean): Set<Modifier> = buildSet {
+            when (JavaSourceMemberCodec.visibilityOf(sig, isMethod)) {
+                "public" -> add(Modifier.PUBLIC)
+                "protected" -> add(Modifier.PROTECTED)
+            }
+            if (static) add(Modifier.STATIC)
+        }
+        val members = ArrayList<KotlinSymbol>()
+        var declaredConstructors = 0
+        for (mv in values) when (mv.kind) {
+            "method", JavaSourceMemberCodec.CONSTRUCTOR -> {
+                val m = JavaSourceMemberCodec.decodeMethod(mv.signature) ?: continue
+                val isCtor = mv.kind == JavaSourceMemberCodec.CONSTRUCTOR
+                if (isCtor) declaredConstructors++
+                if (JavaSourceMemberCodec.visibilityOf(mv.signature, isMethod = true) == "private") continue
+                val ownTypeParams = JavaSourceMemberCodec.typeParametersOf(mv.signature)
+                val scope = classScope + ownTypeParams.map { it.first }
+                val paramTypes = m.paramTypes.mapIndexed { i, t ->
+                    javaSourceType(if (i == m.varargIndex) t.removeSuffix("...").trim() else t, names, scope)
+                }
+                val returnType = if (isCtor) KotlinType(fqn, context = this) else javaSourceType(m.returnType, names, scope)
+                members += KotlinSymbol(
+                    name = if (isCtor) simple else mv.name,
+                    kind = if (isCtor) SymbolKind.CONSTRUCTOR else SymbolKind.METHOD,
+                    type = returnType,
+                    owner = ownerSym,
+                    modifiers = mods(mv.signature, isMethod = true, static = m.static),
+                    origin = SOURCE,
+                    signature = javaMethodDisplaySignature(m, if (isCtor) null else returnType),
+                    typeParameters = ownTypeParams.map { it.first },
+                    typeParameterBounds = ownTypeParams.map { (_, bound) ->
+                        javaSourceType(bound.substringBefore('&'), names, scope) ?: KotlinType("kotlin.Any", context = this)
+                    },
+                    paramTypes = paramTypes,
+                    paramNames = m.paramNames,
+                    declaringClassFqn = fqn,
+                    // Java has no default parameters, so arity is judged precisely.
+                    paramHasDefault = List(paramTypes.size) { false },
+                    varargParamIndex = m.varargIndex,
+                )
+            }
+            "field" -> {
+                val f = JavaSourceMemberCodec.decodeField(mv.signature) ?: continue
+                val fieldType = javaSourceType(f.type, names, classScope)
+                members += KotlinSymbol(
+                    name = mv.name,
+                    kind = SymbolKind.FIELD,
+                    type = fieldType,
+                    owner = ownerSym,
+                    modifiers = mods(mv.signature, isMethod = false, static = f.static),
+                    origin = SOURCE,
+                    signature = fieldType?.let { ": $it" },
+                    declaringClassFqn = fqn,
+                )
+            }
+        }
+        // A class that declares no constructor has the implicit public no-arg one.
+        if (type.kind == "class" && declaredConstructors == 0) {
+            members += KotlinSymbol(
+                simple, SymbolKind.CONSTRUCTOR, type = KotlinType(fqn, context = this), owner = ownerSym,
+                modifiers = setOf(Modifier.PUBLIC), origin = SOURCE, signature = "()", declaringClassFqn = fqn,
+            )
+        }
+        if (type.kind == "enum") members += enumSyntheticMembers(fqn)
+        val self = KotlinType(fqn, classTypeParams.map { KotlinType(it, isTypeParameter = true, context = this) }, context = this)
+        val written = type.supertypes.map { if (it.isEmpty()) null else javaSourceType(it, names, classScope) }
+        val supertypes = ArrayList<TypeRef>()
+        when (type.kind) {
+            "class" -> {
+                supertypes += written.firstOrNull() ?: KotlinType(JAVA_OBJECT, context = this)
+                written.drop(1).filterNotNullTo(supertypes)
+            }
+            "enum" -> { supertypes += KotlinType("java.lang.Enum", listOf(self), context = this); written.filterNotNullTo(supertypes) }
+            "record" -> { supertypes += KotlinType("java.lang.Record", context = this); written.filterNotNullTo(supertypes) }
+            "annotation" -> supertypes += KotlinType("java.lang.annotation.Annotation", context = this)
+            else -> { written.filterNotNullTo(supertypes); supertypes += KotlinType(JAVA_OBJECT, context = this) }
+        }
+        return TypeShape(
+            typeParameters = classTypeParams,
+            typeParameterBounds = type.typeParameters.map { (_, bound) ->
+                javaSourceType(bound.substringBefore('&'), names, classScope) ?: KotlinType(JAVA_OBJECT, context = this)
+            },
+            supertypes = supertypes,
+            members = members,
+            isInterface = type.kind == "interface" || type.kind == "annotation",
+            isAbstract = type.isAbstract,
+            isFinalClass = (type.isFinal && type.kind == "class") || type.kind == "record",
+        )
+    }
+
+    /** What a name written in a Java source file resolves against: the declaring type [fqn] (and so its enclosing
+     *  types), and the file's package, imports and declared types, from [type]. */
+    private class JavaSourceNames(val fqn: String, val type: JavaSourceMemberCodec.SourceType) {
+        val pkg = type.packageName
+        /** The declaring type's dotted path within the file (`Outer.Inner`). */
+        val path = if (pkg.isEmpty()) fqn else fqn.removePrefix("$pkg.")
+        fun inFile(path: String) = if (pkg.isEmpty()) path else "$pkg.$path"
+    }
+
+    /**
+     * A Java type AS WRITTEN in [names]' file, as the [KotlinType] a bytecode read of it would give: JVM class
+     * names (`java.lang.String`, mapped to Kotlin later exactly as for a library), primitives as Kotlin
+     * classifiers, arrays per [JAVA_PRIMITIVE_ARRAYS], wildcards as projections, and a name in [typeParams] as a
+     * type parameter. Null when the head doesn't resolve; a type argument that doesn't resolve leaves the type raw.
+     */
+    private fun javaSourceType(raw: String?, names: JavaSourceNames, typeParams: Set<String>): KotlinType? {
+        if (raw.isNullOrBlank()) return null
+        var t = raw.trim()
+        // Type-use annotations (`@NonNull String`) say nothing about the type itself.
+        while (t.startsWith("@")) t = t.substringAfter(' ', "").trim()
+        if (t.isEmpty()) return null
+        if (t.endsWith("...")) t = t.removeSuffix("...").trim() + "[]"
+        if (t.endsWith("[]")) {
+            val element = t.removeSuffix("[]").trim()
+            JAVA_PRIMITIVE_ARRAYS[element]?.let { return KotlinType(it, context = this) }
+            val e = javaSourceType(element, names, typeParams) ?: return null
+            return KotlinType("kotlin.Array", listOf(e), context = this)
+        }
+        JAVA_PRIMITIVES[t]?.let { return KotlinType(it, context = this) }
+        if (t == "?") return KotlinType("kotlin.Any", context = this, projection = "*")
+        if (t.startsWith("?")) {
+            val rest = t.removePrefix("?").trim()
+            return when {
+                rest.startsWith("extends ") -> javaSourceType(rest.removePrefix("extends "), names, typeParams)?.withProjection("out")
+                rest.startsWith("super ") -> javaSourceType(rest.removePrefix("super "), names, typeParams)?.withProjection("in")
+                else -> KotlinType("kotlin.Any", context = this, projection = "*")
+            }
+        }
+        val lt = t.indexOf('<')
+        val head = (if (lt < 0) t else t.substring(0, lt)).trim()
+        val argTexts = if (lt < 0) emptyList() else splitTypeArguments(t.substring(lt + 1, t.lastIndexOf('>').coerceAtLeast(lt + 1)))
+        if (argTexts.isEmpty() && head in typeParams) return KotlinType(head, isTypeParameter = true, context = this)
+        val fqn = resolveJavaSourceName(head, names) ?: return null
+        val args = argTexts.map { javaSourceType(it, names, typeParams) }
+        return KotlinType(fqn, if (args.any { it == null }) emptyList() else args.filterNotNull(), context = this)
+    }
+
+    /** [text]'s top-level comma-separated parts (`Map<K, List<V>>`'s inside → `K`, `List<V>`). */
+    private fun splitTypeArguments(text: String): List<String> {
+        val out = ArrayList<String>()
+        var depth = 0
+        var start = 0
+        for (i in text.indices) when (text[i]) {
+            '<' -> depth++
+            '>' -> depth--
+            ',' -> if (depth == 0) { out += text.substring(start, i).trim(); start = i + 1 }
+        }
+        text.substring(start).trim().takeIf { it.isNotEmpty() }?.let { out += it }
+        return out
+    }
+
+    /**
+     * A type name written in a Java source file, resolved by Java's rules: a type nested in the declaring type or
+     * one enclosing it, a single-type import, the file's own package, an on-demand import, `java.lang`. A dotted
+     * name resolves its first segment that way and keeps the rest, else is taken as fully qualified.
+     */
+    private fun resolveJavaSourceName(name: String, names: JavaSourceNames): String? {
+        if ('.' in name) {
+            val first = name.substringBefore('.')
+            return resolveJavaSourceName(first, names)?.let { "$it.${name.substringAfter('.')}" } ?: name
+        }
+        // Nested in the declaring type or an enclosing one (innermost first), or a top-level type of the file.
+        var scope: String? = names.path
+        while (scope != null) {
+            val candidate = "$scope.$name"
+            if (candidate in names.type.fileTypes) return names.inFile(candidate)
+            scope = scope.substringBeforeLast('.', "").ifEmpty { null }
+        }
+        if (name in names.type.fileTypes) return names.inFile(name)
+        names.type.imports.firstOrNull { it.substringAfterLast('.') == name }?.let { return it }
+        val samePackage = names.inFile(name)
+        if (javaSourceNameExists(samePackage)) return samePackage
+        for (star in names.type.starImports) {
+            val candidate = "$star.$name"
+            if (javaSourceNameExists(candidate)) return candidate
+        }
+        val lang = "java.lang.$name"
+        if (name in JAVA_LANG_COMMON || javaSourceNameExists(lang)) return lang
+        return null
+    }
+
+    /** Whether a class named [fqn] exists, by name only (no shape is built, so resolving one Java class's names
+     *  never recurses into building another's). */
+    private fun javaSourceNameExists(fqn: String): Boolean {
+        if (model().classByFqn.containsKey(fqn)) return true
+        if (javaSourceMemberProvider(fqn) != null) return true
+        return index?.exactAll<ClassNameValue>(CLASS_NAMES, fqn.substringAfterLast('.'))?.any { it.fqn == fqn } == true
     }
 
     /** Whether [fqn] is a project JAVA SOURCE class (no `.class`) — an open buffer the host serves, or a
@@ -2121,7 +2387,10 @@ class KotlinSymbolService(
      * depth-carrying overload below, which is deliberately NOT memoized: the depth is part of its meaning, and
      * the chain is bounded and rare.
      */
-    private fun typeShape(fqn: String): TypeShape? {
+    /** The shape of [fqn]: a classpath binary's, else a project Java source class's ([javaSourceShape]). */
+    private fun typeShape(fqn: String): TypeShape? = classpathTypeShape(fqn) ?: javaSourceShape(fqn)
+
+    private fun classpathTypeShape(fqn: String): TypeShape? {
         // The raw [index] here, not [queryIndex]: this gate is about whether the ANSWER is stable enough to
         // cache, which [classpathCacheUsable] already decides (a settled-but-partial index answers from the
         // live reader, and jars can't change under us, so those answers memoize too). Which source answers is
@@ -4175,6 +4444,15 @@ class KotlinSymbolService(
 
         // Java primitive type text -> its Kotlin classifier, for mapping a Java SOURCE member's parameter/return
         // type (`int`, `void`, …) to a resolvable [KotlinType]. `void` -> Unit (a Java `void` return is Unit).
+        private const val JAVA_OBJECT = "java.lang.Object"
+
+        // `java.lang` names a Java file uses unimported, resolved even before the index can confirm them.
+        private val JAVA_LANG_COMMON = setOf(
+            "Object", "String", "Integer", "Long", "Short", "Byte", "Character", "Boolean", "Float", "Double",
+            "Number", "CharSequence", "Comparable", "Iterable", "Runnable", "Throwable", "Exception",
+            "RuntimeException", "Error", "Class", "Enum", "Void", "StringBuilder", "Thread", "AutoCloseable",
+        )
+
         private val JAVA_PRIMITIVES = mapOf(
             "int" to "kotlin.Int", "long" to "kotlin.Long", "short" to "kotlin.Short", "byte" to "kotlin.Byte",
             "char" to "kotlin.Char", "boolean" to "kotlin.Boolean", "float" to "kotlin.Float",
