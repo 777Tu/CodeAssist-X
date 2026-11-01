@@ -103,9 +103,15 @@ fun smartInsert(
     val pos = selStart
     val nextChar = text.charOrNull(pos)
 
+    // 0. A Java `;` typed at the end of a call ends the statement instead of landing inside the parentheses.
+    if (ch == ';' && language == CodeLanguage.Java) javaSemicolon(text, pos)?.let { return it }
     // 1. Skip-over: typing the closing char that's already there just moves past it.
     if ((ch in CLOSE_TO_OPEN || ch in QUOTES) && nextChar == ch) {
         return RangeEdit(pos, pos, "", pos + 1)
+    }
+    // 1a. A `.` typed to start a line continues a call chain: move the line to the chain's indent.
+    if (ch == '.' && (language == CodeLanguage.Kotlin || language == CodeLanguage.Java)) {
+        chainDotIndent(text, pos, language)?.let { return it }
     }
     // 1b. Dedent a typed closing bracket to its opener's indent when it's the first thing on its line — the
     // classic auto-align (typing `}` under `fun foo() {\n    …\n    ` snaps it to the opener's column).
@@ -127,6 +133,15 @@ fun smartInsert(
             RangeEdit(pos, pos, ch.toString(), pos + 1)
         }
     }
+    // 3a. The third quote in a row. Opening a Kotlin raw string or a Java text block, it closes the triple and
+    // parks the caret inside, as Android Studio does: `""|` → `"""|"""` (Enter then lays it out, see
+    // BraceNewlineHandler). Closing one, or in another language, it goes in alone: pairing it, as 3 would,
+    // leaves a stray quote after the caret (`""|` → `"""|"`).
+    if (ch in QUOTES && text.charOrNull(pos - 1) == ch && text.charOrNull(pos - 2) == ch) {
+        val opensRawString = ch == '"' && (language == CodeLanguage.Kotlin || language == CodeLanguage.Java) &&
+            text.charOrNull(pos - 3) != '"' && shouldAutoClose(nextChar) && !insideRawString(text, pos)
+        return RangeEdit(pos, pos, if (opensRawString) "\"\"\"\"" else ch.toString(), pos + 1)
+    }
     // 3. Auto-close quotes (not when finishing an identifier, not in plain text files).
     if (ch in QUOTES && language != CodeLanguage.Plain && shouldAutoClose(nextChar) && !isIdentChar(
             text.charOrNull(pos - 1)
@@ -145,6 +160,68 @@ fun smartInsert(
     if (ch == '\n') return newlineHandlerFor(language).onEnter(text, pos)
 
     return RangeEdit(pos, pos, ch.toString(), pos + 1)
+}
+
+/**
+ * Where a `;` typed at [pos] belongs in Java, after IntelliJ's typed handler, or null to insert it as typed:
+ *  - right before an existing `;` (`foo(x)|;`): move over it;
+ *  - followed by only closing parentheses to the end of the line (`foo(x|)`): put it after the last one, ending
+ *    the statement (`foo(x);|`);
+ *  - followed by closing parentheses and the statement's `;` (`foo(x|);`): move past that `;`. IntelliJ inserts
+ *    a stray `;` inside the parentheses here, which is never what was meant.
+ * Not inside a string, character literal or comment, and not in the header of a `for` (whose `;`s are its
+ * own), `try (` resources, or `if`/`while`/`switch`/`catch`/`synchronized` (where `if (x);` would be a bug).
+ */
+private fun javaSemicolon(text: CharSequence, pos: Int): RangeEdit? {
+    val lineStart = lineStartOf(text, pos)
+    if (inLiteralOrComment(text, lineStart, pos)) return null
+    if (text.charOrNull(pos) == ';') return RangeEdit(pos, pos, "", pos + 1)
+    var i = pos
+    var afterLastParen = -1
+    while (i < text.length && text[i] != '\n') {
+        when (text[i]) {
+            ')' -> afterLastParen = i + 1
+            ' ', '\t', '\r' -> Unit
+            ';' -> {
+                if (afterLastParen < 0 || !isBlankToLineEnd(text, i + 1)) return null
+                return if (opensControlHeader(text, lineStart)) null else RangeEdit(pos, pos, "", i + 1)
+            }
+            else -> return null
+        }
+        i++
+    }
+    if (afterLastParen < 0 || opensControlHeader(text, lineStart)) return null
+    return RangeEdit(afterLastParen, afterLastParen, ";", afterLastParen + 1)
+}
+
+/** Whether the line at [lineStart] begins a control statement whose parentheses a `;` must not close. */
+private fun opensControlHeader(text: CharSequence, lineStart: Int): Boolean {
+    var i = lineStart
+    while (i < text.length && (text[i] == ' ' || text[i] == '\t' || text[i] == '}')) i++
+    val wordStart = i
+    while (i < text.length && text[i].isLetter()) i++
+    val word = text.subSequence(wordStart, i).toString()
+    if (word == "else") return opensControlHeader(text, i)
+    return word in CONTROL_HEADERS
+}
+
+private val CONTROL_HEADERS = setOf("for", "try", "if", "while", "switch", "catch", "synchronized")
+
+/** Whether [pos] sits inside a string or character literal, or after a `//`, on the line from [lineStart]. */
+private fun inLiteralOrComment(text: CharSequence, lineStart: Int, pos: Int): Boolean {
+    var quote: Char? = null
+    var i = lineStart
+    while (i < pos) {
+        val c = text[i]
+        when {
+            quote != null && c == '\\' -> i++
+            quote != null && c == quote -> quote = null
+            quote == null && (c == '"' || c == '\'') -> quote = c
+            quote == null && c == '/' && text.charOrNull(i + 1) == '/' -> return true
+        }
+        i++
+    }
+    return quote != null
 }
 
 /**

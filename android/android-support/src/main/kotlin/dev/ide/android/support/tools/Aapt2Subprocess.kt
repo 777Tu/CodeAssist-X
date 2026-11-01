@@ -59,6 +59,8 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
         protoFormat: Boolean,
         overlays: List<Path>,
         rTxt: Path?,
+        includes: List<Path>,
+        packageId: Int?,
     ): ToolResult {
         Files.createDirectories(genJavaDir)
         outApk.parent?.let { Files.createDirectories(it) }
@@ -68,6 +70,11 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
             add(aapt2.toString()); add("link")
             add("-o"); add(outApk.toString())
             add("-I"); add(androidJar.toString())
+            includes.forEach { add("-I"); add(it.toString()) }
+            packageId?.let {
+                add("--package-id"); add("0x" + it.toString(16))
+                if (it < 0x7f) add("--allow-reserved-package-id")
+            }
             add("--manifest"); add(manifest.toString())
             add("--java"); add(genJavaDir.toString())
             add("--custom-package"); add(customPackage)
@@ -91,6 +98,31 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
         }
         val r = Subprocess.run(cmd)
         return if (r.success) r else ToolResult(false, r.log + selfTest())
+    }
+
+    override fun linkAgainst(
+        compiled: List<Path>,
+        manifest: Path,
+        includes: List<Path>,
+        packageId: Int,
+        minSdk: Int,
+        targetSdk: Int,
+        outApk: Path,
+    ): ToolResult {
+        outApk.parent?.let { Files.createDirectories(it) }
+        val cmd = buildList {
+            add(aapt2.toString()); add("link")
+            add("-o"); add(outApk.toString())
+            includes.forEach { add("-I"); add(it.toString()) }
+            add("--manifest"); add(manifest.toString())
+            add("--package-id"); add("0x" + packageId.toString(16))
+            // Ids below 0x7f are reserved for system packages; a scratch package outside the app is all this is.
+            if (packageId < 0x7f) add("--allow-reserved-package-id")
+            add("--min-sdk-version"); add(minSdk.toString())
+            add("--target-sdk-version"); add(targetSdk.toString())
+            addAll(compiled.map { it.toString() })
+        }
+        return Subprocess.run(cmd)
     }
 
     override fun convert(input: Path, output: Path, toProto: Boolean): ToolResult {

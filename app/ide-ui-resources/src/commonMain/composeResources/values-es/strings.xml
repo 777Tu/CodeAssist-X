@@ -11,7 +11,7 @@ Haga una copia de seguridad de sus proyectos en un archivo .zip ahora, sus archi
     <string name="help_improve_codeassist">Ayuda a mejorar CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[Comparta datos de rendimiento anónimos para que podamos ver qué es lento y qué está fallando, y solucionar las cosas correctas.
 
-Recopilamos: la versión de su aplicación y el modelo de su dispositivo, cuánto tiempo toman las compilaciones, la indexación y la finalización del código, el éxito o fracaso de la compilación y los informes de fallos limpios.
+Recopilamos: la versión de su aplicación y el modelo de su dispositivo, cuánto tiempo toman las compilaciones, la indexación y la finalización del código, el éxito o fracaso de la compilación, los informes de fallos limpios, y cuándo se muestran o cierran los anuncios y los cambios en su configuración de anuncios.
 
 Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones usa o cualquier cosa que lo identifique. Puede cambiar esto en cualquier momento en Más mientras un proyecto está abierto.]]></string>
     <string name="learn_more">Más información</string>
@@ -61,7 +61,7 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="import_deps_bundled">Dependencias incluidas</string>
     <string name="import_failed">No se pudo importar el paquete del proyecto.</string>
     <string name="import_unrecognized_title">No se puede importar este archivo</string>
-    <string name="import_unrecognized">CodeAssist no reconoce este archivo. Elige un paquete de proyecto .caproj para importar.</string>
+    <string name="import_unrecognized">CodeAssist no reconoce este archivo. Elige un paquete de proyecto .caproj o un .zip de un proyecto para importar.</string>
     <plurals name="caproj_files">
         <item quantity="one">%1$d archivo</item>
         <item quantity="other">%1$d archivos</item>
@@ -560,6 +560,12 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="run_conflict_message">Todavía se está ejecutando una compilación o un programa. ¿Detenerlo e iniciar esta ejecución en su lugar?</string>
     <string name="run_conflict_stop_and_run">Detener y ejecutar</string>
     <string name="run_conflict_dont_ask">No volver a preguntar</string>
+    <string name="unsaved_close_title">Cambios sin guardar</string>
+    <string name="unsaved_close_message_one">¿Guardar los cambios de %1$s antes de cerrarlo?</string>
+    <string name="unsaved_close_message_many">¿Guardar los cambios de estos archivos antes de cerrarlos?</string>
+    <string name="unsaved_close_discard">No guardar</string>
+    <string name="unsaved_close_dont_ask">No volver a preguntar</string>
+    <string name="unsaved_close_dont_ask_hint">Puedes cambiarlo en Configuración ▸ Editor.</string>
 
     <!-- Build notifications -->
     <string name="build_notif_title">¿Mostrar notificaciones de compilación?</string>
@@ -963,6 +969,15 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="modcfg_created">Se creó %1$s</string>
     <string name="modcfg_couldnt_create">No se pudo crear %1$s</string>
     <string name="modcfg_remove_module">Quitar módulo</string>
+    <string name="modcfg_rename_app">Renombrar paquete y nombre de la app</string>
+    <string name="modcfg_rename_app_name">Nombre de la app</string>
+    <string name="modcfg_rename_app_package">Paquete</string>
+    <string name="modcfg_rename_app_change_id">Cambiar también el id de la app</string>
+    <string name="modcfg_rename_app_change_id_note">Desactivado conserva %1$s, así sigue actualizando la app instalada y publicada.</string>
+    <string name="modcfg_rename_app_review">Revisar cambios</string>
+    <string name="modcfg_rename_app_summary">Archivos que cambian: %1$d. Movidos al nuevo paquete: %2$d.</string>
+    <string name="modcfg_rename_app_apply">Renombrar</string>
+    <string name="modcfg_rename_app_nothing">Este módulo no tiene paquete ni nombre de app que renombrar.</string>
     <string name="modcfg_remove_module_content">¿Quitar '%1$s' del proyecto? Sus archivos permanecen en el disco; se eliminan las dependencias de otros módulos hacia él.</string>
     <string name="modcfg_remove">Quitar</string>
     <string name="modcfg_no_module_types">No hay tipos de módulo disponibles.</string>
@@ -1078,6 +1093,18 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="codestyle_wrap_never">Nunca</string>
     <string name="codestyle_wrap_if_long">Si es larga</string>
     <string name="codestyle_wrap_one_per_line">Uno por línea</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">El formato de XML vuelve a sangrar las etiquetas, ajusta los atributos y ordena el espaciado dentro de las etiquetas. El texto, los valores de atributo y los comentarios se mantienen tal como están escritos.</string>
+    <string name="codestyle_markup">Marcado</string>
+    <string name="codestyle_xml_android_conventions">Reglas de Android por tipo de archivo</string>
+    <string name="codestyle_xml_android_conventions_desc">Los diseños, el manifiesto, los valores y los demás recursos se organizan como en Android Studio</string>
+    <string name="codestyle_xml_wrap_attributes">Ajustar atributos</string>
+    <string name="codestyle_xml_wrap_attributes_desc">Para el XML que las reglas de Android no cubren</string>
+    <string name="codestyle_xml_space_in_empty_tag">Espacio en etiqueta vacía</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">`&lt;View /&gt;` en lugar de `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">Reordenar atributos</string>
+    <string name="codestyle_xml_rearrange_desc">Ordena los atributos como Android Studio al reformatear un archivo completo</string>
 
     <!-- Common verbs / actions -->
     <string name="save">Guardar</string>
@@ -1124,6 +1151,7 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="set_page_privacy">Privacidad y datos</string>
     <string name="set_grp_gestures">Gestos</string>
     <string name="set_grp_keyboard">Teclado</string>
+    <string name="set_grp_tabs">Pestañas</string>
     <string name="set_grp_preview_sandbox">Espacio aislado de la vista previa</string>
     <string name="set_grp_privacy">Privacidad</string>
     <string name="set_grp_storage">Almacenamiento</string>
@@ -1164,6 +1192,11 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="set_editor_pinch_desc">Pellizca con dos dedos para cambiar el tamaño de la fuente del código</string>
     <string name="set_editor_kbd_suggest">Sugerencias del teclado</string>
     <string name="set_editor_kbd_suggest_desc">Permite que el teclado en pantalla autocorrija, sugiera y agregue espacios automáticamente (un teclado normal). Desactívalo para introducir código sin procesar, de modo que un '.' escrito no reciba un espacio automático, a costa de la barra de sugerencias.</string>
+    <string name="set_editor_close_unsaved">Cerrar una pestaña con cambios sin guardar</string>
+    <string name="set_editor_close_unsaved_desc">Preguntar primero, o guardar o descartar siempre los cambios sin preguntar</string>
+    <string name="set_editor_close_unsaved_ask">Preguntar</string>
+    <string name="set_editor_close_unsaved_save">Guardar</string>
+    <string name="set_editor_close_unsaved_discard">No guardar</string>
     <string name="set_completion_auto">Mostrar sugerencias automáticamente</string>
     <string name="set_completion_auto_desc">Muestra la lista mientras escribes (desactivado = solo con Ctrl-Space)</string>
     <string name="set_completion_postfix">Plantillas postfix</string>
@@ -1206,7 +1239,7 @@ Nunca recopilamos su código, nombres de archivos o proyectos, qué funciones us
     <string name="set_br_dexbatch_desc">En una app muy grande, el paso final de dexing fusiona las clases por lotes para no necesitarlas todas en memoria a la vez. Los lotes más pequeños mantienen baja esa memoria (bueno para dispositivos con poca memoria) pero hacen el APK ligeramente más grande (menos compresión compartida entre clases); los lotes más grandes comprimen mejor pero necesitan más memoria por fusión. La mayoría de las apps nunca llegan a esto, solo entra en juego a partir de unos pocos miles de clases.</string>
     <string name="set_br_dexfork">Máximo de forks de dex concurrentes</string>
     <string name="set_privacy_analytics">Compartir análisis de rendimiento</string>
-    <string name="set_privacy_analytics_desc">Solo métricas de rendimiento anónimas, nunca tu código ni nombres de archivos</string>
+    <string name="set_privacy_analytics_desc">Solo métricas anónimas de rendimiento y de anuncios, nunca tu código ni nombres de archivos</string>
     <string name="set_privacy_clear">Borrar cachés</string>
     <string name="set_privacy_clear_desc">Libera cachés regenerables de dependencias / lenguaje / vista previa (nunca las fuentes)</string>
     <string name="set_privacy_clear_btn">Borrar</string>

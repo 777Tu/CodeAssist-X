@@ -1,5 +1,7 @@
 package dev.ide.ui
 
+import dev.ide.ui.components.HalloweenCard
+import dev.ide.ui.components.HalloweenCardMode
 import dev.ide.ui.generated.resources.home_account
 import dev.ide.ui.generated.resources.notif_title
 import dev.ide.ui.icons.CaSymbols
@@ -455,6 +457,7 @@ private fun AppRoute(
             onOpenKeystoreManager = { app.openKeystoreManager(Screen.ModuleConfig, inProject = true) },
             codeFont = codeFont,
             fileActions = fileActions,
+            onFilesRelocated = state::afterFilesRelocated,
         )
 
         Screen.SdkManager -> SdkManagerScreen(
@@ -588,7 +591,7 @@ private fun AppRoute(
             IconManagerScreen(
                 backend = state.backend,
                 onBack = { app.navigateTo(app.iconManagerReturn) },
-                onOpenAppIconStudio = { repoId, name -> app.openAppIconStudio(repoId, name) },
+                onOpenAppIconStudio = { seed -> app.openAppIconStudio(seed) },
                 // Offered only when there is an editor tab to write into; the edits drive that tab's own
                 // session, then the user is handed back to it so they see the result in place.
                 onInsert = if (tab == null) null else { ref ->
@@ -605,16 +608,36 @@ private fun AppRoute(
                 insertionTarget = insertionTarget,
                 initialResDir = app.iconManagerResDir,
                 fileActions = fileActions,
+                onOpenFile = { path, offset ->
+                    state.openAt(path, offset)
+                    app.navigateTo(Screen.Editor)
+                },
+                onFilesRelocated = state::afterFilesRelocated,
+                initialTab = app.iconManagerTab,
+                onTabChanged = { app.iconManagerTab = it },
             )
         }
 
         Screen.AppIconStudio -> AppIconStudioScreen(
             backend = state.backend,
             onBack = { app.navigateTo(Screen.IconManager) },
-            onChooseIcon = { app.navigateTo(Screen.IconManager) },
-            seedRepoId = app.appIconSeedRepoId,
-            seedIconName = app.appIconSeedName,
+            seed = app.appIconSeed,
             fileActions = fileActions,
+            onOpenFile = { path ->
+                state.openAt(path, 0)
+                app.navigateTo(Screen.Editor)
+            },
+            // The same run the editor's Run button starts, with the console open to follow it.
+            onRunApp = if (state.backend.build.supported()) {
+                {
+                    state.consoleOpen = true
+                    state.requestRun {
+                        val selected = state.selectedRunTask
+                        if (selected != null) state.backend.build.runTask(selected.id) else state.backend.build.runBuild()
+                    }
+                    app.navigateTo(Screen.Editor)
+                }
+            } else null,
         )
 
         Screen.KeystoreCreate -> KeystoreCreateScreen(
@@ -717,7 +740,19 @@ private fun ProjectPickerRoute(
 ) {
     val backend = app.backend
     var notificationsVisible by remember { mutableStateOf(false) }
+    val halloween = remember(app) { HalloweenDressUp(app) }
+    val halloweenMode = halloween.mode()
     ProjectsHomeScreen(
+        seasonalCard = halloweenMode?.let { mode ->
+            { cardModifier ->
+                HalloweenCard(
+                    mode = mode,
+                    onPrimary = if (mode == HalloweenCardMode.Offer) halloween::dressUp else halloween::putBack,
+                    onSecondary = if (mode == HalloweenCardMode.Applied) halloween::putBack else halloween::dismiss,
+                    modifier = cardModifier,
+                )
+            }
+        },
         bell = { NotificationBell(backend, onClick = { notificationsVisible = true }) },
         accountRequested = accountRequested,
         onAccountRequestHandled = onAccountRequestHandled,
@@ -726,6 +761,7 @@ private fun ProjectPickerRoute(
         // Straight to the full-screen Create-Project gallery, which owns the template picker.
         onNewProject = { app.createProject() },
         onDeleteProject = app::deleteProject,
+        onRenameProject = if (backend.projects.projectRenameSupported) app::renameProject else null,
         // One "Import project" entry for both sources; it asks which when the host can do both.
         onImportProject = if (fileActions.canPickDirectory || fileActions.canPickFile) app::requestProjectImport else null,
         // Cloning is the other way into a project, and it is the only one a user with no projects yet can

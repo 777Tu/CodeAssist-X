@@ -9,6 +9,7 @@ import dev.ide.core.project.ImportableKind
 import dev.ide.core.project.CaprojFormat
 import dev.ide.core.project.ProjectIconLocator
 import dev.ide.core.project.ProjectPackaging
+import dev.ide.model.impl.ModelPersistence
 import dev.ide.model.template.ProjectTemplate
 import dev.ide.model.template.TemplateParameter
 import dev.ide.model.template.TextValidation
@@ -16,6 +17,7 @@ import dev.ide.platform.log.Log
 import dev.ide.platform.storage.StorageUsage
 import dev.ide.ui.backend.ProjectInfo
 import dev.ide.ui.backend.ProjectService
+import dev.ide.ui.backend.UiArchiveProject
 import dev.ide.ui.backend.UiCompatibilityInfo
 import dev.ide.ui.backend.UiExportModule
 import dev.ide.ui.backend.UiExportOptions
@@ -24,6 +26,7 @@ import dev.ide.ui.backend.UiGradleExport
 import dev.ide.ui.backend.UiImportPreview
 import dev.ide.ui.backend.UiPackagedEntry
 import dev.ide.ui.backend.UiPackagedModule
+import dev.ide.ui.backend.UiProjectArchive
 import dev.ide.ui.backend.UiProjectIcon
 import dev.ide.ui.backend.UiOpenTab
 import dev.ide.ui.backend.UiOpenTabs
@@ -62,7 +65,11 @@ internal fun ImportableKind.toUi(): UiProjectFolderKind = when (this) {
  * per-project open-tab session. Open/create drive the engine swap through [BackendContext.swapEngine] (the
  * swap + epoch bump are lifecycle-owned by the aggregator).
  */
-internal class ProjectBackend(private val ctx: BackendContext) : ProjectService {
+internal class ProjectBackend(
+    private val ctx: BackendContext,
+    /** Told after a delete, so the store stops offering to open a project that is gone. */
+    private val onProjectDeleted: () -> Unit = {},
+) : ProjectService {
 
     private val log = Log.logger("ide.backend")
 
@@ -126,6 +133,12 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
         return withContext(Dispatchers.IO) {
             runCatching {
                 if (Paths.get(rootPath) == ctx.servicesOrNull?.workspaceRoot) return@runCatching true
+                // A folder with no project in it opens as an empty one, which is never what the caller meant:
+                // the store's Open on a project deleted since, or a remembered path that is gone.
+                if (!ModelPersistence.exists(rootPath)) {
+                    log.warn("Not opening $rootPath: there is no project in it")
+                    return@runCatching false
+                }
                 ctx.swapEngine(mgr.open(rootPath)); true
             }.getOrElse { e ->
                 // Surface the failure (console + the critical-error dialog) instead of swallowing it, so a
@@ -140,7 +153,34 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
         val mgr = ctx.manager ?: return false
         iconCache.remove(rootPath)
         return withContext(Dispatchers.IO) {
-            runCatching { mgr.delete(rootPath); true }.getOrDefault(false)
+            // The loaded project stays loaded behind the picker, and its engine keeps writing into the folder
+            // (caches, open tabs, completion stats). Close it first, or a late write recreates the folder.
+            if (ctx.servicesOrNull?.workspaceRoot == Paths.get(rootPath)) ctx.closeEngine()
+            val deleted = runCatching { mgr.delete(rootPath) }
+                .onFailure { log.warn("Couldn't delete the project at $rootPath", it) }
+                .getOrDefault(false)
+            onProjectDeleted()
+            if (!deleted) {
+                ctx.showError(
+                    "Couldn't delete the project",
+                    "Some of its files could not be removed. Try again, or remove the folder with a file manager.",
+                    rootPath,
+                )
+            }
+            deleted
+        }
+    }
+
+    override val projectRenameSupported: Boolean get() = ctx.manager != null
+
+    override suspend fun renameProject(rootPath: String, name: String): Boolean {
+        val mgr = ctx.manager ?: return false
+        return withContext(Dispatchers.IO) {
+            // The loaded project renames through its live store; see ProjectManager.rename.
+            val live = ctx.servicesOrNull?.takeIf { it.workspaceRoot == Paths.get(rootPath) }?.store
+            runCatching { mgr.rename(rootPath, name, live) }
+                .onFailure { log.warn("Couldn't rename the project at $rootPath", it) }
+                .getOrDefault(false)
         }
     }
 
@@ -157,7 +197,9 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
             runCatching {
                 val summaries = mgr.list()
                 val androidByPath = summaries.associate { it.rootPath to it.isAndroid }
-                val r = StorageUsage.report(mgr.storageRoot, summaries.map { Paths.get(it.rootPath) }, mgr.sharedRoot)
+                val r = StorageUsage.report(
+                    mgr.storageRoot, summaries.map { Paths.get(it.rootPath) }, mgr.sharedRoot, mgr.leftoverFolders(),
+                )
                 UiStorageReport(
                     storageRootPath = r.storageRoot,
                     totalBytes = r.totalBytes,
@@ -183,6 +225,8 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
         val mgr = ctx.manager ?: return false
         return withContext(Dispatchers.IO) {
             runCatching {
+                // Removing folders, not regenerable caches: kept to the manager's own narrow test of a leftover.
+                if (id == StorageUsage.LEFTOVERS) return@runCatching mgr.deleteLeftoverFolders()
                 StorageUsage.clearCategory(id, mgr.list().map { Paths.get(it.rootPath) }, mgr.sharedRoot)
                 true
             }.getOrElse { e -> log.error("Couldn't clear storage category $id", e); false }
@@ -198,6 +242,7 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
         StorageUsage.LANGUAGE -> "gitModified"
         StorageUsage.SDK -> "warning"
         StorageUsage.PROJECTS -> "accentStrong"
+        StorageUsage.LEFTOVERS -> "error"
         else -> "textTertiary"
     }
 
@@ -294,7 +339,7 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
         val mgr = ctx.manager ?: return UiProjectResult(false, "Project import not supported by this backend")
         return withContext(Dispatchers.IO) {
             runCatching {
-                val next = mgr.importExternalProject(Paths.get(sourceRootPath))
+                val next = mgr.importProjectFolder(Paths.get(sourceRootPath))
                     ?: return@runCatching UiProjectResult(false, "That folder isn't a CodeAssist or Gradle project.")
                 ctx.swapEngine(next)
                 UiProjectResult(true, "Imported ${next.projectDisplayName()}", next.workspaceRoot.toString())
@@ -303,6 +348,24 @@ internal class ProjectBackend(private val ctx: BackendContext) : ProjectService 
                 UiProjectResult(false, e.message ?: "Failed to import the project")
             }
         }
+    }
+
+    override suspend fun extractProjectArchive(archivePath: String): UiProjectArchive? {
+        val mgr = ctx.manager ?: return null
+        return withContext(Dispatchers.IO) {
+            try {
+                val contents = mgr.extractProjectArchive(archivePath) ?: return@withContext null
+                UiProjectArchive(contents.projects.map { UiArchiveProject(it.path.toString(), it.relativePath, it.kind.toUi()) })
+            } catch (e: Exception) {
+                log.error("Couldn't unpack the archive at $archivePath", e)
+                UiProjectArchive(emptyList(), e.message ?: "Couldn't unpack the archive")
+            }
+        }
+    }
+
+    override suspend fun discardProjectArchive() {
+        val mgr = ctx.manager ?: return
+        withContext(Dispatchers.IO) { mgr.discardProjectArchive() }
     }
 
     // ---- shareable project packages (.caproj) ----

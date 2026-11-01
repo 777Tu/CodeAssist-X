@@ -1,5 +1,9 @@
 package dev.ide.ui
 
+import dev.ide.ui.components.BuildSuccessBats
+import dev.ide.ui.components.HalloweenBuildFx
+import dev.ide.ui.theme.LocalSeason
+import dev.ide.ui.theme.Season
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import dev.ide.ui.ext.AppKeys
@@ -31,11 +35,13 @@ import dev.ide.ui.components.OnboardingSheet
 import dev.ide.ui.ext.UiPluginHost
 import dev.ide.ui.generated.resources.Res
 import dev.ide.ui.generated.resources.import_gradle_failed
+import dev.ide.ui.generated.resources.import_archive_empty
 import dev.ide.ui.generated.resources.import_unrecognized
 import dev.ide.ui.navigation.ScreenHost
 import dev.ide.ui.platform.PlatformBackHandler
 import dev.ide.ui.platform.PointerInputModeHost
 import dev.ide.ui.platform.PlatformSystemBars
+import dev.ide.ui.screens.ArchiveProjectDialog
 import dev.ide.ui.screens.GradleImportModeDialog
 import dev.ide.ui.screens.ImportSourceDialog
 import dev.ide.ui.theme.CodeAssistTheme
@@ -119,10 +125,12 @@ fun CodeAssistApp(
     // The import notice is raised as a reason by the state holder and localized here.
     val importUnrecognizedMsg = stringResource(Res.string.import_unrecognized)
     val importGradleFailedMsg = stringResource(Res.string.import_gradle_failed)
+    val importArchiveEmptyMsg = stringResource(Res.string.import_archive_empty)
     val importErrorMessage = when (val error = app.importError) {
         null -> null
         ImportError.Unrecognized -> importUnrecognizedMsg
         is ImportError.GradleFailed -> error.message.ifBlank { importGradleFailedMsg }
+        is ImportError.ArchiveFailed -> error.message.ifBlank { importArchiveEmptyMsg }
     }
 
     CodeAssistTheme(
@@ -142,7 +150,11 @@ fun CodeAssistApp(
         PlatformBackHandler(enabled = app.canNavigateBack, onBack = app::navigateBack)
         // The M3 background fills the whole window edge-to-edge (behind the system bars); content is
         // then inset by `safeDrawing`. On desktop these insets are empty, so this is a no-op there.
+        // Read once per composition of the root: a session that crosses midnight into the season picks it up
+        // on the next settings change or launch, which is soon enough for a decoration.
+        val season = if (app.settings.seasonalTouches) Season.current() else null
         CompositionLocalProvider(
+            LocalSeason provides season,
             LocalAds provides app.adController,
             LocalHostFileActions provides fileActions,
             LocalPluginNavigator provides app::openPluginScreen,
@@ -181,6 +193,13 @@ fun CodeAssistApp(
                                 dark = dark,
                                 modifier = Modifier.fillMaxSize(),
                             )
+                            // Over everything in the content area, drawing only while a flock is in the air.
+                            BuildSuccessBats(
+                                backend = backend,
+                                enabled = season == Season.Halloween,
+                            )
+                            // Boo on a failed build, candy when a program starts; nothing outside the season.
+                            HalloweenBuildFx(backend = backend)
                         }
                     }
                     AppOverlays(
@@ -209,6 +228,11 @@ fun CodeAssistApp(
                         onFolder = app::chooseFolderImport,
                         onPackage = app::choosePackageImport,
                         onDismiss = app::dismissImportSourceChoice,
+                    )
+                    ArchiveProjectDialog(
+                        projects = app.archiveChoices,
+                        onPick = app::chooseArchiveProject,
+                        onDismiss = app::dismissArchiveChoice,
                     )
                     GradleImportModeDialog(
                         visible = app.showImportModeChoice,

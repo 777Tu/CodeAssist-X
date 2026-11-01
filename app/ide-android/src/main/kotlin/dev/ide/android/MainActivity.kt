@@ -1,5 +1,7 @@
 package dev.ide.android
 
+import dev.ide.core.settings.AppIcons
+import dev.ide.core.settings.BuiltInSettingsPages
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -87,9 +89,11 @@ class MainActivity : ComponentActivity() {
         // `SystemBarStyle.dark` here forced light icons even in light mode.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Lets Settings offer "App icon"; the engine shared with the desktop has no launcher of its own.
+        AppIcons.host = AndroidAppIcons(applicationContext)
         // Before extractStream: a sign-in redirect is an ACTION_VIEW with a URI, which would otherwise be
         // taken for a file to import.
-        if (!takeAuthRedirect(intent) && !takeStoreLink(intent)) inbound.value = extractStream(intent)
+        if (!takeAuthRedirect(intent) && !takeStoreLink(intent) && !takeAgentReturn(intent)) inbound.value = extractStream(intent)
         // Gather UMP consent BEFORE initializing the Ads SDK (mediation + EEA/UK requirement). Failure resolves
         // too, so a consent hiccup never blocks the IDE. The SDK itself starts later, once launch has settled
         // (see the LaunchedEffect below the ad host).
@@ -101,6 +105,9 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(Unit) {
                 runCatching { withContext(Dispatchers.IO) { AndroidIde.bootstrap(applicationContext) } }.onSuccess { s ->
                     session = s; backend = s.backend
+                    // Bring the launcher in line with the saved choice. They only disagree after something
+                    // reset one and not the other, such as a backup restored onto a fresh install.
+                    s.backend.settings.preference(BuiltInSettingsPages.APP_ICON_KEY)?.let { AppIcons.host?.apply(it) }
                     AndroidFrameMetrics.register(this@MainActivity, s.backend)
                     // A redirect that landed mid-bootstrap now has somewhere to go.
                     deliverAuthRedirect()
@@ -175,11 +182,14 @@ class MainActivity : ComponentActivity() {
                     override val canPickFile: Boolean = true
                     override fun pickFile(extensions: List<String>, onPicked: (String?) -> Unit) {
                         pendingPick = onPicked
-                        // Custom extensions (e.g. .caproj) have no registered MIME, so fall back to */* and let
-                        // the caller validate the picked file; known extensions narrow the SAF picker.
+                        // Custom extensions (e.g. .caproj) have no registered MIME, so when any of them lacks one fall
+                        // back to */* and let the caller validate the picked file (narrowing to the known ones would
+                        // hide the rest); only all-known extensions narrow the SAF picker. No extensions means any
+                        // file: an empty MIME list matches nothing, and the picker opens with no items and no roots.
                         val mimes = extensions.mapNotNull { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
+                        val any = extensions.isEmpty() || mimes.size < extensions.size
                         try {
-                            pickLauncher.launch(if (mimes.isEmpty()) arrayOf("*/*") else mimes.toTypedArray())
+                            pickLauncher.launch(if (any) arrayOf("*/*") else mimes.toTypedArray())
                         } catch (e: ActivityNotFoundException) {
                             // Some ROMs ship no SAF/documents provider; don't crash — signal cancel + tell the user.
                             pendingPick = null
@@ -276,18 +286,21 @@ class MainActivity : ComponentActivity() {
                 adHost.start()
             }
 
-            // A `.caproj` package handed in via "Open with" opens the import preview (see the branch below); any
-            // other inbound file is copied into the open project's first source root as before.
+            // A `.caproj` package or a `.zip` handed in via "Open with" goes to project import (a package's preview,
+            // or the project inside the zip); any other inbound file is copied into the open project's first
+            // source root as before.
             var importPackagePath by remember { mutableStateOf<String?>(null) }
             LaunchedEffect(backend, inbound.value) {
                 val b = backend
                 val uri = inbound.value
                 if (b != null && uri != null) {
                     val name = fileOps.queryDisplayName(uri) ?: ""
-                    if (name.endsWith(".${CaprojFormat.EXTENSION}", ignoreCase = true)) {
+                    val archive = name.endsWith(".zip", ignoreCase = true) ||
+                        contentResolver.getType(uri) in setOf("application/zip", "application/x-zip-compressed")
+                    if (name.endsWith(".${CaprojFormat.EXTENSION}", ignoreCase = true) || archive) {
                         val path = withContext(Dispatchers.IO) { fileOps.copyInboundToCache(uri, name) }
                         if (path != null) importPackagePath = path
-                        else Toast.makeText(this@MainActivity, "Couldn't open the project package", Toast.LENGTH_SHORT).show()
+                        else Toast.makeText(this@MainActivity, "Couldn't open the project file", Toast.LENGTH_SHORT).show()
                     } else {
                         val target = firstSourceRoot(b.files.fileTree())
                         val path = if (target != null) fileOps.importUri(uri, target, b) else null
@@ -351,6 +364,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (takeAuthRedirect(intent)) return
         if (takeStoreLink(intent)) return
+        if (takeAgentReturn(intent)) return
         extractStream(intent)?.let { inbound.value = it }
     }
 
@@ -367,6 +381,18 @@ class MainActivity : ComponentActivity() {
         if (!dev.ide.store.StoreLink.isStoreLink(url)) return false
         // A bare `codeassist://store` names no item, which the app reads as "the Store tab".
         storeLink.value = dev.ide.store.StoreLink.itemId(url) ?: ""
+        intent.data = null
+        return true
+    }
+
+    /**
+     * Claim [intent] if it is the "Back to CodeAssist" link from the OpenRouter sign-in page. Arriving here already
+     * brought the app forward, which is all it is for; the URI is cleared so it is never read as a file to open.
+     */
+    private fun takeAgentReturn(intent: Intent?): Boolean {
+        if (intent?.action != Intent.ACTION_VIEW) return false
+        val data = intent.data ?: return false
+        if (data.scheme != "codeassist" || data.host != "agent") return false
         intent.data = null
         return true
     }

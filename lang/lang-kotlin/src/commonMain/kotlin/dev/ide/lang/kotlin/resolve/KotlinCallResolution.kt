@@ -260,12 +260,34 @@ internal fun KotlinResolver.bestOverload(
         if (key.first > bestKey.first ||
             (key.first == bestKey.first && key.second > bestKey.second) ||
             (key.first == bestKey.first && key.second == bestKey.second && key.third > bestKey.third) ||
-            (key == bestKey && paramMoreSpecific(c, best))
+            (key == bestKey && paramMoreSpecific(c, best)) ||
+            (key == bestKey && overridesWithNarrowerReturn(c, best))
         ) {
             best = c; bestKey = key
         }
     }
     return best
+}
+
+/**
+ * Whether [a] is an override of [b] with a narrower return type: the same parameter list, and a return type
+ * that is a strict subtype of [b]'s. Both arrive as candidates because a member is collected once per supertype
+ * that declares it, in lookup order, and the narrowest override is the one the call actually binds to.
+ * `MutableList<T>.iterator()` reaches `Collection.iterator(): Iterator<T>` through `List` before
+ * `MutableCollection.iterator(): MutableIterator<T>`, and taking the first made `it.remove()` on a list's
+ * iterator "Unresolved reference: remove".
+ */
+private fun overridesWithNarrowerReturn(a: KotlinSymbol, b: KotlinSymbol): Boolean {
+    if (a.paramTypes.size != b.paramTypes.size) return false
+    for (i in a.paramTypes.indices) {
+        val ap = a.paramTypes[i] ?: return false
+        val bp = b.paramTypes[i] ?: return false
+        if (ap.qualifiedName != bp.qualifiedName) return false
+    }
+    val ar = a.type as? KotlinType ?: return false
+    val br = b.type as? KotlinType ?: return false
+    if (ar.isTypeParameter || br.isTypeParameter || ar.qualifiedName == br.qualifiedName) return false
+    return br.isAssignableFrom(ar)
 }
 
 /** The most-specific ranking key for [sym] at [call] (higher is more specific): function-type parameter over
@@ -610,10 +632,12 @@ internal fun KotlinResolver.sourceCtorSymbol(
 )
 
 /** The value parameters available for named-argument completion at a [call], distinct by name and with
- *  synthetic bytecode names (`p0`/`p1`) dropped. */
+ *  synthetic bytecode names (`p0`/`p1`) dropped. A Java callee offers none: Kotlin rejects named arguments
+ *  for it, even though its parameter names are known (debug info, sources) for signature help. */
 fun KotlinResolver.callParameters(call: KtCallExpression): List<ParamInfo> {
     val out = LinkedHashMap<String, ParamInfo>()
     for (s in callTargets(call)) {
+        if (isJavaCallable(s)) continue
         s.paramNames.forEachIndexed { i, n ->
             if (n.isNotEmpty() && !isSyntheticParamName(n)) {
                 out.getOrPut(n) { ParamInfo(n, s.paramTypes.getOrNull(i) as? KotlinType) }
@@ -658,7 +682,7 @@ fun KotlinResolver.delegationCallParameters(marker: KtElement?): List<ParamInfo>
 private fun KotlinResolver.constructorParams(fqn: String): List<ParamInfo> {
     val out = LinkedHashMap<String, ParamInfo>()
     fun add(symbols: List<KotlinSymbol>) {
-        for (s in symbols) s.paramNames.forEachIndexed { i, n ->
+        for (s in symbols) if (!isJavaCallable(s)) s.paramNames.forEachIndexed { i, n ->
             if (n.isNotEmpty() && !isSyntheticParamName(n)) {
                 out.getOrPut(n) { ParamInfo(n, s.paramTypes.getOrNull(i) as? KotlinType) }
             }
@@ -668,6 +692,10 @@ private fun KotlinResolver.constructorParams(fqn: String): List<ParamInfo> {
     service.sourceClass(fqn)?.constructors?.let { ctors -> add(ctors.map { sourceCtorSymbol(it, fqn) }) }
     return out.values.toList()
 }
+
+/** A function or constructor declared in a Java class, which Kotlin calls with positional arguments only. */
+private fun KotlinResolver.isJavaCallable(s: KotlinSymbol): Boolean =
+    s.declaringClassFqn?.let(service::isJavaType) == true
 
 /** ASM surfaces stripped Java parameters as `p0`, `p1`, … — useless as named arguments, so they're hidden. */
 internal fun KotlinResolver.isSyntheticParamName(n: String): Boolean =

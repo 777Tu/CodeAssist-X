@@ -5,6 +5,7 @@ import android.util.AttributeSet
 import android.view.InflateException
 import android.view.LayoutInflater
 import android.view.View
+import dev.ide.jvm.ClassAlias
 import dev.ide.jvm.ClassBytesSource
 import dev.ide.jvm.InterpretPolicy
 import dev.ide.jvm.PeerFactory
@@ -13,6 +14,8 @@ import dev.ide.jvm.Vm
 import dev.ide.jvm.VmMethodView
 import dev.ide.jvm.hasInterpretedClass
 import dev.ide.jvm.interpretedConstructors
+import dev.ide.jvm.interpretedMethods
+import dev.ide.jvm.isInterpretedInstanceOf
 import dev.ide.platform.log.Log
 import java.nio.file.Files
 import java.nio.file.Path
@@ -46,6 +49,8 @@ internal class VmViewFactory(
     peerFactory: PeerFactory,
     /** Test seam: overrides where class bytes come from (default: the [classpath] class dirs + jars). */
     source: ClassBytesSource? = null,
+    /** The app's package, whose `R` every library's `R` aliases (see [useResourceClasses]); null for none. */
+    appPackage: String? = null,
 ) : LayoutInflater.Factory2, AutoCloseable {
 
     private val bootLoader: ClassLoader =
@@ -53,9 +58,9 @@ internal class VmViewFactory(
     private val bootLoadable = ConcurrentHashMap<String, Boolean>()
 
     // Class dirs are consulted BEFORE jars so the user's freshly built classes shadow a same-named class in a
-    // library jar; within the jars the caller's order decides (the preview puts `preview-r.jar` first so its
-    // R — ids matching the relinked arsc — shadows any stale R elsewhere). One open JarFile per jar for the
-    // factory's lifetime (a render reads many classes); [close] releases them.
+    // library jar; within the jars the caller's order decides. `R` classes come only from the resource-class
+    // jar ([useResourceClasses]), whose ids match the linked table. One open JarFile per jar for the factory's
+    // lifetime (a render reads many classes); [close] releases them.
     private val classDirs = classpath.filter { Files.isDirectory(it) }
     private val jarFiles = classpath.filter { Files.isRegularFile(it) && it.toString().endsWith(".jar") }
         .mapNotNull { runCatching { JarFile(it.toFile()) }.getOrNull() }
@@ -66,8 +71,19 @@ internal class VmViewFactory(
         log.info("VM view factory: ${jarFiles.size} library jars, ${classDirs.size} class dirs on the interpret classpath")
     }
 
+    /** `com/example/app/R`, the class every library `R` resolves to. */
+    private val appR: String? = appPackage?.replace('.', '/')?.plus("/R")
+
+    /** The open resource-class jar (the preview's `R`) and the key of the file it was opened from. Swapped by
+     *  [useResourceClasses] without rebuilding the VM. */
+    @Volatile private var rJar: JarFile? = null
+    private var rJarKey: String? = null
+
     private val vm = Vm(
         source = source ?: ClassBytesSource { internalName ->
+            if (isResourceClass(internalName)) return@ClassBytesSource rJar?.let { jar ->
+                jar.getJarEntry("$internalName.class")?.let { e -> jar.getInputStream(e).use { it.readBytes() } }
+            }
             classDirs.firstNotNullOfOrNull { d ->
                 d.resolve("$internalName.class").takeIf { Files.isRegularFile(it) }
                     ?.let { runCatching { Files.readAllBytes(it) }.getOrNull() }
@@ -87,7 +103,35 @@ internal class VmViewFactory(
             log.warn("interpreted preview callback failed (skipped): ${t.message ?: t.javaClass.simpleName}")
         }),
         peerFactory = peerFactory,
+        // A library's `R` holds the app's table under its own package name (aapt2 `--extra-packages`), so it
+        // IS the app's `R`: one class, initialized once, instead of a renamed copy per library.
+        classAlias = ClassAlias { name ->
+            val app = appR ?: return@ClassAlias null
+            if (!isResourceClass(name) || name.startsWith("$app\$") || name == app) null
+            else app + name.substring(name.lastIndexOf('/') + 2)
+        },
     )
+
+    /**
+     * Reads `R` classes from [jar] from now on. When it is a different file (or the same one rewritten) the VM
+     * forgets the `R` classes it loaded, so the next render reads the new ids, and keeps everything else: an
+     * edit that adds an `@+id` no longer costs a new VM and a cold re-inflate.
+     */
+    fun useResourceClasses(jar: Path?) {
+        val key = jar?.let { "$it:${runCatching { Files.getLastModifiedTime(it).toMillis() }.getOrDefault(0)}:${runCatching { Files.size(it) }.getOrDefault(0)}" }
+        if (key == rJarKey) return
+        val old = rJar
+        rJar = jar?.let { runCatching { JarFile(it.toFile()) }.getOrNull() }
+        rJarKey = key
+        old?.let { runCatching { it.close() } }
+        vm.forgetClasses(::isResourceClass)
+    }
+
+    /** `…/R` or `…/R$type`: an Android resource class. */
+    private fun isResourceClass(internalName: String): Boolean {
+        val simple = internalName.substring(internalName.lastIndexOf('/') + 1)
+        return simple == "R" || simple.startsWith("R\$")
+    }
 
     /** Total interpreted bytecode instructions executed by this factory's VM (diagnostics / throughput). */
     val steps: Long get() = vm.steps
@@ -134,12 +178,27 @@ internal class VmViewFactory(
             )
     }
 
+    /**
+     * Fills [view], when it is the project's RecyclerView, with [count] items of [layoutId] through the generated
+     * `ToolsList` installer (`dev.ide.android.support.PreviewToolsClasses`, on the interpret classpath). False when
+     * [view] is not a RecyclerView or the installer is not on the classpath.
+     */
+    fun installListItems(view: View, layoutId: Int, count: Int): Boolean {
+        if (!vm.isInterpretedInstanceOf(view, RECYCLER_VIEW) || !vm.hasInterpretedClass(TOOLS_LIST)) return false
+        val install = vm.interpretedMethods(TOOLS_LIST).firstOrNull { it.name == "install" && it.isStatic } ?: return false
+        install.invoke(null, listOf(view, layoutId, count))
+        return true
+    }
+
     override fun close() {
         jarFiles.forEach { runCatching { it.close() } }
+        rJar?.let { runCatching { it.close() } }
     }
 
     private companion object {
         const val CONTEXT = "Landroid/content/Context;"
         const val ATTRS = "Landroid/util/AttributeSet;"
+        const val RECYCLER_VIEW = "androidx.recyclerview.widget.RecyclerView"
+        const val TOOLS_LIST = "dev.ide.preview.tools.ToolsList"
     }
 }

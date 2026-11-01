@@ -119,9 +119,13 @@ internal class KotlinSemanticChecks(
     /** The module's API-level check inputs (Android minSdk, or a JVM module's Java release), read each pass;
      *  null skips the check. */
     private val apiContext: () -> ApiLevelContext? = { null },
+    /** The module's missing-permission check inputs (an Android module's declared permissions + SDK levels),
+     *  read each pass; null skips the check. */
+    private val permissionContext: () -> dev.ide.lang.resolve.PermissionContext? = { null },
 ) {
 
     private val apiLevelCheck = KotlinApiLevelCheck(service)
+    private val permissionCheck = KotlinPermissionCheck(service)
 
     /** The whole-file checks (duplicate declarations, unused/conflicting imports, unused privates). Cheap (no
      *  type resolution), so [IncrementalSemanticAnalysis] recomputes them every analyze rather than caching. */
@@ -280,6 +284,7 @@ internal class KotlinSemanticChecks(
                 KotlinPerf.span("call.deprecation") { if (resolveReady) report(deprecatedCall(psi, resolver)) }
                 KotlinPerf.span("call.optIn") { if (resolveReady) report(optInCallUsage(psi, resolver)) }
                 KotlinPerf.span("call.newApi") { if (resolveReady) apiContext()?.let { report(apiLevelCheck.call(psi, resolver, it)) } }
+                KotlinPerf.span("call.permission") { if (resolveReady) permissionContext()?.let { report(permissionCheck.call(psi, resolver, it)) } }
                 KotlinPerf.span("call.inferType") { report(cannotInferType(psi, resolver)) }
                 KotlinPerf.span("call.abstractInst") { if (resolveReady) report(abstractInstantiation(psi, resolver)) }
             }
@@ -289,6 +294,9 @@ internal class KotlinSemanticChecks(
             KotlinPerf.span("sem.qualified") { report(unsafeNullableAccess(psi as KtDotQualifiedExpression, resolver)) }
             KotlinPerf.span("sem.newApi") {
                 if (resolveReady) apiContext()?.let { report(apiLevelCheck.accessorProperty(psi as KtDotQualifiedExpression, resolver, it)) }
+            }
+            KotlinPerf.span("sem.permission") {
+                if (resolveReady) permissionContext()?.let { report(permissionCheck.accessorProperty(psi as KtDotQualifiedExpression, resolver, it)) }
             }
         },
         KotlinChecker(KtSafeQualifiedExpression::class) { psi ->
@@ -2361,7 +2369,7 @@ internal class KotlinSemanticChecks(
         if (left !is KtNameReferenceExpression && left !is KtDotQualifiedExpression) return null
         val right = expr.right ?: return null
         val declared = assignmentTargetType(left, resolver) ?: return null
-        nullForNonNull(declared, right)?.let { return it }
+        if (!isJavaDeclaredProperty(left, resolver)) nullForNonNull(declared, right)?.let { return it }
         val actual = resolver.inferType(right) ?: return null
         if (!isMismatch(declared, actual)) return null
         val r = right.textRange
@@ -2369,25 +2377,40 @@ internal class KotlinSemanticChecks(
     }
 
     /**
-     * The DECLARED type of an assignment target, which is not the same as its type at the assignment.
+     * Whether the assignment target is a property a JAVA class declares: a bean accessor seen as a property
+     * (`paint.shader`, from `setShader(Shader)`) or a Java field. Its type is a platform type (`Shader!`), and
+     * Kotlin lets `null` through to it. The parse-only model has no platform types, so without this the
+     * accessor's parameter read as plain non-null `Shader` and `paint.shader = null` (the usual way to clear a
+     * gradient) was "Null can not be a value of a non-null type Shader".
      *
-     * `inferType` applies smart casts, and a variable is routinely assigned inside a narrowing of itself:
-     * `var p = e.parent; while (p is Paren) { p = p.parent }` advances the walk by assigning the wider
-     * declared type back, which is legal Kotlin and simply ends the smart cast. Reading the narrowed type as
-     * the target's type made that read "inferred type is KtElement? but KtParenthesizedExpression was
-     * expected" -- a complaint about the only line that could ever terminate the loop.
-     *
-     * A local's declaration type is taken straight from its binding; anything else (a qualified property
-     * target) keeps the inferred type, since Kotlin does not smart-cast a mutable property anyway.
+     * A qualified target asks its receiver's type; a bare name that is not a local asks the enclosing class,
+     * which is how `shader = null` inside a Java subclass resolves.
      */
-    private fun assignmentTargetType(left: KtExpression, resolver: KotlinResolver): KotlinType? {
-        if (left is KtNameReferenceExpression) {
-            val name = left.getReferencedName()
-            resolver.localsAt(left.textRange.startOffset).firstOrNull { it.name == name }
-                ?.let { return it.type as? KotlinType }
+    private fun isJavaDeclaredProperty(left: KtExpression, resolver: KotlinResolver): Boolean {
+        val (ownerType, name) = when (left) {
+            is KtDotQualifiedExpression -> {
+                val selector = left.selectorExpression as? KtNameReferenceExpression ?: return false
+                val recv = resolver.inferType(left.receiverExpression) ?: return false
+                recv to selector.getReferencedName()
+            }
+            is KtNameReferenceExpression -> {
+                val name = left.getReferencedName()
+                if (resolver.localsAt(left.textRange.startOffset).any { it.name == name }) return false
+                val cls = enclosingClassFqnOf(left) ?: return false
+                (service.typeByFqn(cls) ?: return false) to name
+            }
+            else -> return false
         }
-        return resolver.inferType(left)
+        if (ownerType.isTypeParameter) return false
+        val property = service.membersNamedForCheck(ownerType.qualifiedName, ownerType.typeArguments, name)
+            .firstOrNull { it.kind == SymbolKind.FIELD } ?: return false
+        val declaring = property.declaringClassFqn ?: return false
+        return service.isJavaType(declaring)
     }
+
+    /** See [KotlinResolver.assignmentTargetDeclaredType]: the target's declared type, never a smart-cast one. */
+    private fun assignmentTargetType(left: KtExpression, resolver: KotlinResolver): KotlinType? =
+        resolver.assignmentTargetDeclaredType(left)
 
     /**
      * A Java bean accessor called explicitly on a Java receiver where Kotlin's synthetic-property syntax reads

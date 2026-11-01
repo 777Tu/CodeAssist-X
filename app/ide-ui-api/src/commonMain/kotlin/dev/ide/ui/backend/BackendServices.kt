@@ -573,6 +573,18 @@ interface ModuleService {
     /** The Android `buildFeatures` toggles for [moduleName], or null when it is not an Android module. */
     suspend fun getBuildFeatures(moduleName: String): UiBuildFeatures? = null
 
+    /** What the rename-package-and-app-name refactor starts from for [moduleName], or null where this backend
+     *  can't run it. */
+    suspend fun appIdentity(moduleName: String): UiAppIdentity? = null
+
+    /** The files [request] would change, without changing anything. */
+    suspend fun previewAppRename(request: UiAppRenameRequest): UiAppRenamePreview =
+        UiAppRenamePreview(error = "Renaming is not supported by this backend")
+
+    /** Rename the package and/or app name across the workspace as [request] says (see [previewAppRename]). */
+    suspend fun applyAppRename(request: UiAppRenameRequest): UiAppRenameResult =
+        UiAppRenameResult(false, "Renaming is not supported by this backend")
+
     /**
      * Turn an Android build feature ([feature] = `viewBinding`/`compose`) on or off for [moduleName].
      * Enabling a feature also adds the dependencies it needs (the ViewBinding/Compose runtime), like AGP.
@@ -742,6 +754,13 @@ interface ProjectService {
     /** Permanently delete the project rooted at [rootPath] from disk. */
     suspend fun deleteProject(rootPath: String): Boolean = false
 
+    /** Whether [renameProject] is implemented here; the picker hides Rename where it is not. */
+    val projectRenameSupported: Boolean get() = false
+
+    /** Give the project rooted at [rootPath] the display name [name]. Its directory, id, modules and settings
+     *  stay as they are. False when the name is blank or the model could not be written. */
+    suspend fun renameProject(rootPath: String, name: String): Boolean = false
+
     /** Bumps whenever the active project changes (create/open). The UI keys per-project state on this. */
     val projectEpoch: StateFlow<Int> get() = MutableStateFlow(0)
 
@@ -827,6 +846,16 @@ interface ProjectService {
      */
     suspend fun importExternalProject(sourceRootPath: String): UiProjectResult =
         UiProjectResult(false, "Project import not supported by this backend")
+
+    /**
+     * Unpack the `.zip` at [archivePath] for import and list the projects in it, shallowest first (a download
+     * wraps its project in a folder; a samples repository holds several). Each one's path then goes to
+     * [importExternalProject] like a picked folder. Null when the file is not a zip.
+     */
+    suspend fun extractProjectArchive(archivePath: String): UiProjectArchive? = null
+
+    /** Drop what [extractProjectArchive] unpacked, when its import is abandoned. */
+    suspend fun discardProjectArchive() {}
 
     /**
      * Export the project at [rootPath] to a shareable `.caproj` package and return its path (under the app's
@@ -1800,6 +1829,15 @@ interface AgentService {
     /** Set the active model (persisted). */
     fun setModel(model: String)
 
+    /** The current provider's starred models, pinned to the top of the model picker. */
+    fun favoriteModels(): Set<String> = emptySet()
+
+    /** Star or unstar [model] for the current provider (persisted). */
+    fun setModelFavorite(model: String, favorite: Boolean) {}
+
+    /** The current provider's most recently chosen models, newest first (recorded by [setModel]). */
+    fun recentModels(): List<String> = emptyList()
+
     /** Choose the active provider (a built-in id, or "gateway" for the custom OpenAI-compatible entry). */
     fun selectProvider(id: String)
 
@@ -1812,6 +1850,28 @@ interface AgentService {
     /** Configure the custom OpenAI-compatible gateway (base URL + model name, and an optional extra CA
      *  certificate PEM to trust for an endpoint behind a private/regional CA — blank = system trust only). */
     fun setGateway(baseUrl: String, model: String, caCert: String)
+
+    /** Whether this backend can run "Sign in with OpenRouter" (a browser sign-in that returns a key). */
+    fun openRouterSignInSupported(): Boolean = false
+
+    /** Where the current OpenRouter sign-in stands. */
+    val openRouterSignIn: StateFlow<UiOpenRouterSignIn> get() = OPEN_ROUTER_SIGN_IN_IDLE
+
+    /**
+     * Start an OpenRouter sign-in and return the URL to open in the browser, or null when it could not start (the
+     * reason is in [openRouterSignIn]). On success the key is saved, OpenRouter is selected, and an account with
+     * no credits is moved onto a free model.
+     */
+    fun beginOpenRouterSignIn(): String? = null
+
+    /** Abandon a pending OpenRouter sign-in. */
+    fun cancelOpenRouterSignIn() {}
+
+    /** The selected provider's usage against its limits, or null before the first read (see [refreshUsageLimits]). */
+    val usageLimits: StateFlow<UiAgentUsageLimits?> get() = USAGE_LIMITS_NONE
+
+    /** Re-read [usageLimits] from the provider. Also done by the backend after every turn. */
+    fun refreshUsageLimits() {}
 
     /** Send a user message; streams the agent's response into [chatState]. Queued
      *  [UiAgentChatState.pendingAttachments] go with it. */
@@ -1895,3 +1955,50 @@ interface AgentService {
         override fun answerPermission(id: Int, decision: UiAgentPermissionDecision) {}
     }
 }
+
+/** The state of "Sign in with OpenRouter" (see [AgentService.beginOpenRouterSignIn]). */
+sealed interface UiOpenRouterSignIn {
+    data object Idle : UiOpenRouterSignIn
+
+    /** The browser is open; waiting for OpenRouter to send the user back. */
+    data object Waiting : UiOpenRouterSignIn
+
+    /** The key is saved. [freeModel] is the free model the account was moved onto, or null if it kept its own. */
+    data class Connected(val freeModel: String?) : UiOpenRouterSignIn
+
+    data class Failed(val message: String) : UiOpenRouterSignIn
+}
+
+private val OPEN_ROUTER_SIGN_IN_IDLE: StateFlow<UiOpenRouterSignIn> = MutableStateFlow(UiOpenRouterSignIn.Idle)
+
+/**
+ * The selected provider's usage against its limits, like Claude's usage meters. [reported] is false for a
+ * provider that gives apps no way to read them (only OpenRouter does today), in which case [meters] is empty.
+ */
+data class UiAgentUsageLimits(
+    val providerName: String,
+    val reported: Boolean,
+    val meters: List<UiUsageMeter> = emptyList(),
+    val spentTodayUsd: Double? = null,
+    val spentMonthUsd: Double? = null,
+    /** Whether the selected model is a free one, so the free-request meter is the one that matters now. */
+    val usingFreeModel: Boolean = false,
+    /** Why the last read failed, or null. [meters] then hold the previous read, if any. */
+    val error: String? = null,
+)
+
+/** One bar: [used] of [limit] (requests, or US dollars for [UiUsageMeterKind.SPEND]), resetting at [resetsAtMs]. */
+data class UiUsageMeter(val kind: UiUsageMeterKind, val used: Double, val limit: Double, val resetsAtMs: Long?) {
+    val fraction: Float get() = if (limit <= 0) 1f else (used / limit).toFloat().coerceIn(0f, 1f)
+    val remaining: Double get() = (limit - used).coerceAtLeast(0.0)
+}
+
+enum class UiUsageMeterKind {
+    /** Requests to free models today. */
+    FREE_REQUESTS,
+
+    /** Dollars spent against a spending cap. */
+    SPEND,
+}
+
+private val USAGE_LIMITS_NONE: StateFlow<UiAgentUsageLimits?> = MutableStateFlow(null)

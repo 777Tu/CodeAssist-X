@@ -11,7 +11,7 @@ Cadangkan proyek Anda ke file .zip sekarang, file sumber Anda tetap aman, dan An
     <string name="help_improve_codeassist">Bantu tingkatkan CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[Bagikan data performa anonim agar kami dapat melihat apa yang lambat dan gagal, serta memperbaiki hal yang benar.
 
-Kami mengumpulkan: versi aplikasi dan model perangkat Anda, berapa lama waktu build, pengindeksan, dan penyelesaian kode, keberhasilan/kegagalan build, serta laporan kerusakan yang dibersihkan.
+Kami mengumpulkan: versi aplikasi dan model perangkat Anda, berapa lama waktu build, pengindeksan, dan penyelesaian kode, keberhasilan/kegagalan build, laporan kerusakan yang dibersihkan, serta kapan iklan ditampilkan atau ditutup dan perubahan pengaturan iklan Anda.
 
 Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang Anda gunakan, atau apa pun yang mengidentifikasi Anda. Anda dapat mengubah ini kapan saja di bawah Lainnya saat proyek terbuka.]]></string>
     <string name="learn_more">Pelajari lebih lanjut</string>
@@ -61,7 +61,7 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="import_deps_bundled">Dependensi disertakan</string>
     <string name="import_failed">Tidak dapat mengimpor paket proyek.</string>
     <string name="import_unrecognized_title">Tidak dapat mengimpor file ini</string>
-    <string name="import_unrecognized">CodeAssist tidak mengenali file ini. Pilih paket proyek .caproj untuk diimpor.</string>
+    <string name="import_unrecognized">CodeAssist tidak mengenali file ini. Pilih paket proyek .caproj atau .zip berisi proyek untuk diimpor.</string>
 
     <string name="export_title">Ekspor proyek</string>
     <string name="export_intro">Kemas proyek ini sebagai file .caproj yang dapat Anda bagikan dengan siapa saja.</string>
@@ -505,6 +505,12 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="run_conflict_message">Sebuah build atau program masih berjalan. Hentikan dan mulai proses ini sebagai gantinya?</string>
     <string name="run_conflict_stop_and_run">Hentikan dan Jalankan</string>
     <string name="run_conflict_dont_ask">Jangan tanya lagi</string>
+    <string name="unsaved_close_title">Perubahan belum disimpan</string>
+    <string name="unsaved_close_message_one">Simpan perubahan pada %1$s sebelum menutupnya?</string>
+    <string name="unsaved_close_message_many">Simpan perubahan pada file-file ini sebelum menutupnya?</string>
+    <string name="unsaved_close_discard">Jangan Simpan</string>
+    <string name="unsaved_close_dont_ask">Jangan tanya lagi</string>
+    <string name="unsaved_close_dont_ask_hint">Anda dapat mengubahnya di Setelan ▸ Editor.</string>
     <string name="build_notif_title">Tampilkan notifikasi build?</string>
     <string name="build_notif_message">CodeAssist dapat menjalankan build dan program Anda dalam proses terisolasi yang terpisah dan menampilkan notifikasi progres saat berjalan. Ini mencegah Android menghentikan build ketika Anda beralih aplikasi, dan memungkinkan Anda mengikuti progresnya. Izinkan notifikasi untuk mengaktifkannya.</string>
     <string name="build_notif_not_now">Nanti saja</string>
@@ -877,6 +883,15 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="modcfg_created">Membuat %1$s</string>
     <string name="modcfg_couldnt_create">Tidak dapat membuat %1$s</string>
     <string name="modcfg_remove_module">Hapus modul</string>
+    <string name="modcfg_rename_app">Ganti nama paket dan aplikasi</string>
+    <string name="modcfg_rename_app_name">Nama aplikasi</string>
+    <string name="modcfg_rename_app_package">Paket</string>
+    <string name="modcfg_rename_app_change_id">Ubah juga ID aplikasi</string>
+    <string name="modcfg_rename_app_change_id_note">Jika dimatikan, %1$s tetap dipakai, jadi aplikasi yang terpasang dan terbit tetap diperbarui.</string>
+    <string name="modcfg_rename_app_review">Tinjau perubahan</string>
+    <string name="modcfg_rename_app_summary">Berkas yang berubah: %1$d. Dipindah ke paket baru: %2$d.</string>
+    <string name="modcfg_rename_app_apply">Ganti nama</string>
+    <string name="modcfg_rename_app_nothing">Modul ini tidak punya paket atau nama aplikasi untuk diganti.</string>
     <string name="modcfg_remove_module_content">Hapus '%1$s' dari proyek? File-nya tetap ada di disk; dependensi modul lain terhadapnya akan dihapus.</string>
     <string name="modcfg_remove">Hapus</string>
     <string name="modcfg_no_module_types">Tidak ada tipe modul tersedia.</string>
@@ -990,6 +1005,18 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="codestyle_wrap_never">Tidak pernah</string>
     <string name="codestyle_wrap_if_long">Jika panjang</string>
     <string name="codestyle_wrap_one_per_line">Satu per baris</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">Pemformatan XML mengatur ulang indentasi tag, membungkus atribut, dan merapikan spasi di dalam tag. Teks, nilai atribut, dan komentar tetap seperti yang ditulis.</string>
+    <string name="codestyle_markup">Markup</string>
+    <string name="codestyle_xml_android_conventions">Aturan Android per jenis file</string>
+    <string name="codestyle_xml_android_conventions_desc">Layout, manifes, values, dan resource lainnya ditata seperti di Android Studio</string>
+    <string name="codestyle_xml_wrap_attributes">Bungkus atribut</string>
+    <string name="codestyle_xml_wrap_attributes_desc">Untuk XML yang tidak tercakup aturan Android</string>
+    <string name="codestyle_xml_space_in_empty_tag">Spasi di tag kosong</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">`&lt;View /&gt;` alih-alih `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">Susun ulang atribut</string>
+    <string name="codestyle_xml_rearrange_desc">Urutkan atribut sesuai urutan Android Studio saat memformat ulang seluruh file</string>
     <string name="save">Simpan</string>
     <string name="close">Tutup</string>
     <string name="clear">Bersihkan</string>
@@ -1028,6 +1055,7 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="set_page_privacy">Privasi &amp; Data</string>
     <string name="set_grp_gestures">Gestur</string>
     <string name="set_grp_keyboard">Keyboard</string>
+    <string name="set_grp_tabs">Tab</string>
     <string name="set_grp_preview_sandbox">Sandbox pratinjau</string>
     <string name="set_grp_privacy">Privasi</string>
     <string name="set_grp_storage">Penyimpanan</string>
@@ -1068,6 +1096,11 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="set_editor_pinch_desc">Cubit dengan dua jari untuk mengubah ukuran font kode</string>
     <string name="set_editor_kbd_suggest">Saran keyboard</string>
     <string name="set_editor_kbd_suggest_desc">Biarkan keyboard lunak melakukan koreksi otomatis, memberi saran, dan spasi otomatis (keyboard normal). Matikan untuk input kode mentah, agar '.' yang diketik tidak mendapat spasi yang disisipkan otomatis, dengan konsekuensi kehilangan strip saran.</string>
+    <string name="set_editor_close_unsaved">Menutup tab dengan perubahan yang belum disimpan</string>
+    <string name="set_editor_close_unsaved_desc">Tanya dulu, atau selalu simpan atau buang perubahan tanpa bertanya</string>
+    <string name="set_editor_close_unsaved_ask">Tanya</string>
+    <string name="set_editor_close_unsaved_save">Simpan</string>
+    <string name="set_editor_close_unsaved_discard">Jangan simpan</string>
     <string name="set_completion_auto">Tampilkan saran otomatis</string>
     <string name="set_completion_auto_desc">Munculkan daftar saat mengetik (nonaktif = hanya Ctrl-Space)</string>
     <string name="set_completion_postfix">Template postfix</string>
@@ -1110,7 +1143,7 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek Anda, fitur apa yang 
     <string name="set_br_dexbatch_desc">Pada aplikasi yang sangat besar, langkah dexing terakhir menggabungkan kelas dalam batch agar tidak memerlukan semuanya di memori sekaligus. Batch lebih kecil menjaga memori itu tetap rendah (baik untuk perangkat memori rendah) tetapi membuat APK sedikit lebih besar (kompresi antar kelas lebih sedikit); batch lebih besar mengemas lebih rapat tetapi memerlukan lebih banyak memori per merge. Sebagian besar aplikasi tidak pernah mencapai ini, hanya berlaku setelah beberapa ribu kelas.</string>
     <string name="set_br_dexfork">Maksimum dex fork bersamaan</string>
     <string name="set_privacy_analytics">Bagikan analitik performa</string>
-    <string name="set_privacy_analytics_desc">Hanya metrik performa anonim, tidak pernah kode atau nama file Anda</string>
+    <string name="set_privacy_analytics_desc">Hanya metrik performa dan iklan anonim, tidak pernah kode atau nama file Anda</string>
     <string name="set_privacy_clear">Bersihkan cache</string>
     <string name="set_privacy_clear_desc">Bebaskan cache dependensi / bahasa / pratinjau yang dapat dibuat ulang (tidak pernah sumber)</string>
     <string name="set_privacy_clear_btn">Bersihkan</string>

@@ -1,5 +1,6 @@
 package dev.ide.core.project
 
+import dev.ide.platform.ProjectFiles
 import dev.ide.android.support.AndroidFacetCodec
 import dev.ide.android.support.resources.LauncherIcon
 import dev.ide.android.support.tools.KeystoreRegistry
@@ -38,6 +39,7 @@ import dev.ide.model.PlatformKind
 import dev.ide.model.ProjectTemplateRegistry
 import dev.ide.model.impl.ModelPersistence
 import dev.ide.model.impl.ProjectData
+import dev.ide.model.impl.ProjectModelStore
 import dev.ide.model.impl.SdkData
 import dev.ide.model.template.ProjectTemplate
 import dev.ide.model.template.TemplateArgs
@@ -52,13 +54,18 @@ import dev.ide.platform.settings.SettingsPage
 import dev.ide.platform.settings.SettingsScope
 import dev.ide.platform.settings.settingsKey
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.Properties
+import java.util.stream.Collectors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -169,6 +176,9 @@ class ProjectManager private constructor(
 
     init {
         Files.createDirectories(projectsRoot)
+        // What an earlier delete could not remove. Off the caller's thread: this runs at app start, and a
+        // large tree on shared storage takes seconds to remove.
+        if (Files.isDirectory(trashDir)) Thread(::purgeTrash, "project-trash").apply { isDaemon = true }.start()
     }
 
     /**
@@ -437,6 +447,43 @@ class ProjectManager private constructor(
         return open(dest.toString())
     }
 
+    /** Where a `.zip` offered for import is unpacked while its project is found and imported. One at a time. */
+    private val archiveStaging: Path get() = homeDir.resolve(".platform/caches/import-staging")
+
+    /**
+     * Unpack the `.zip` at [archivePath] for import and report the projects in it ([ProjectArchives]). Each
+     * call replaces the previous staging folder, so an import the user walked away from does not linger past the
+     * next one. Null when the file is not a zip. A project found here is imported with [importExternalProject],
+     * which copies it into the projects folder and then clears the staging folder.
+     */
+    fun extractProjectArchive(archivePath: String): ProjectArchives.Contents? {
+        val staging = archiveStaging
+        runCatching { deleteTree(staging) }
+        val name = Paths.get(archivePath).fileName?.toString()?.substringBeforeLast('.')?.let(::slug)?.ifEmpty { null } ?: "archive"
+        return try {
+            ProjectArchives.extract(Paths.get(archivePath), staging.resolve(name), ::inspectFolder)
+                ?.also { if (it.projects.isEmpty()) runCatching { deleteTree(staging) } }
+        } catch (e: Exception) {
+            runCatching { deleteTree(staging) }
+            throw e
+        }
+    }
+
+    /** Drop whatever [extractProjectArchive] left unpacked (an import that was cancelled or failed). */
+    fun discardProjectArchive() {
+        runCatching { deleteTree(archiveStaging) }
+    }
+
+    /** [importExternalProject], clearing the staging folder afterwards when [sourceDir] was unpacked there. */
+    fun importProjectFolder(sourceDir: Path): IdeServices? {
+        val staged = sourceDir.toAbsolutePath().normalize().startsWith(archiveStaging.toAbsolutePath().normalize())
+        return try {
+            importExternalProject(sourceDir)
+        } finally {
+            if (staged) discardProjectArchive()
+        }
+    }
+
     /**
      * Turn a directory that is **already** a direct child of [projectsRoot] into a listable project,
      * without opening it.
@@ -494,15 +541,83 @@ class ProjectManager private constructor(
     /**
      * Permanently delete the project rooted at [rootPath] from disk. Guarded to a direct child of
      * [projectsRoot] so a stray path can never wipe an unrelated directory; a missing project is a no-op.
+     * Returns whether the project is gone.
+     *
+     * The folder is first moved into [trashDir], in one rename on the same volume, and removed from there.
+     * Deleting in place could stop halfway (a file it could not remove, or one written into the folder while
+     * it ran), and the walk removes `.platform/workspace.json` before the caches beside it, so what was left
+     * was a folder the picker no longer lists but the store still took for the installed project. Whatever
+     * cannot be removed now stays in the trash, out of sight, and [purgeTrash] retries it at the next start.
      */
-    fun delete(rootPath: String) {
+    fun delete(rootPath: String): Boolean {
         val dir = Paths.get(rootPath).toAbsolutePath().normalize()
         val root = projectsRoot.toAbsolutePath().normalize()
         require(dir.parent == root && dir != root) { "Refusing to delete a path outside the projects directory: $dir" }
-        if (!Files.exists(dir)) return
-        Files.walk(dir).use { stream ->
-            stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        if (!Files.exists(dir)) return true
+        val trashed = runCatching {
+            Files.createDirectories(trashDir)
+            Files.move(dir, trashDir.resolve("${dir.fileName}-${System.currentTimeMillis()}"))
+        }.onFailure { log.warn("delete: couldn't move $dir to the trash, deleting it in place", it) }.getOrNull()
+        val cleared = deleteTreeLenient(trashed ?: dir)
+        if (!cleared) log.warn("delete: some of ${trashed ?: dir} could not be removed")
+        return !Files.exists(dir)
+    }
+
+    /** Where [delete] moves a project before removing it. Not a project itself, so [list] never shows it. */
+    private val trashDir: Path get() = projectsRoot.resolve(TRASH_DIR)
+
+    /** Remove what [delete] left in [trashDir]. */
+    fun purgeTrash() {
+        if (deleteTreeLenient(trashDir)) return
+        log.warn("trash: ${trashDir} could not be fully removed")
+    }
+
+    /**
+     * Folders in [projectsRoot] that are what is left of a deleted project: no project in them, nothing but
+     * hidden entries, one of them `.platform`. That is the shape an interrupted delete leaves (the walk
+     * removes the sources first), and the shape an engine's late cache write recreates. A folder with any
+     * visible file is left out, so a project someone copied in by hand is never offered for removal. The
+     * trash is included while it holds anything.
+     */
+    fun leftoverFolders(): List<Path> {
+        val dirs = runCatching { Files.newDirectoryStream(projectsRoot).use { it.toList() } }.getOrElse { return emptyList() }
+        return dirs.filter { dir ->
+            runCatching {
+                when {
+                    !Files.isDirectory(dir) -> false
+                    dir.fileName.toString() == TRASH_DIR -> Files.list(dir).use { it.findFirst().isPresent }
+                    ModelPersistence.exists(dir.toString()) -> false
+                    else -> {
+                        val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.collect(Collectors.toList()) }
+                        PLATFORM_DIR in names && names.all { it.startsWith(".") }
+                    }
+                }
+            }.getOrDefault(false)
         }
+    }
+
+    /** Delete every [leftoverFolders] folder; returns whether all of them are gone. */
+    fun deleteLeftoverFolders(): Boolean = leftoverFolders().map { deleteTreeLenient(it) }.all { it }
+
+    /**
+     * Give the project rooted at [rootPath] the display name [name]. Only the name changes: the directory, the
+     * project id, its modules and settings stay as they are. Guarded like [delete].
+     *
+     * [live] is the open engine's model store when this project is the one loaded. The engine stays loaded
+     * behind the picker and saves its whole snapshot on any later model edit, so writing the file alone would
+     * be undone by that save; the rename goes through the store instead.
+     */
+    fun rename(rootPath: String, name: String, live: ProjectModelStore? = null): Boolean {
+        val newName = name.trim()
+        if (newName.isEmpty()) return false
+        val dir = Paths.get(rootPath).toAbsolutePath().normalize()
+        val root = projectsRoot.toAbsolutePath().normalize()
+        require(dir.parent == root && dir != root) { "Refusing to rename a project outside the projects directory: $dir" }
+        if (live == null) return ProjectPackaging.renameProject(dir, newName)
+        val data = live.data
+        live.commit(data.copy(projects = data.projects.map { it.copy(name = newName) }), emptyList())
+        live.save()
+        return true
     }
 
     /**
@@ -655,7 +770,9 @@ class ProjectManager private constructor(
         if (name == "android.jar" || name == "debug.keystore") return true
         val rel = root.relativize(file).toString().replace(File.separatorChar, '/')
         if (rel.contains(".platform/caches/")) return true
-        return rel.split('/').any { it == "build" || it == "exports" || it == ".gradle" }
+        if (rel.split('/').any { it == ".gradle" || it == TRASH_DIR }) return true
+        // `build/` and `exports/` are output only outside a source tree; a package named `build` is source.
+        return ProjectFiles.isBuildOutput(rel, isDirectory = false, outputDirs = COPY_OUTPUT_DIRS, products = false)
     }
 
     // --- shareable project packages (.caproj) ---
@@ -774,7 +891,7 @@ class ProjectManager private constructor(
         return ProjectPackaging.ExportMeta(
             name = project?.name ?: projectDir.fileName?.toString() ?: "project",
             isAndroid = androidFacets.isNotEmpty(),
-            packageName = appFacet?.namespace,
+            packageName = appFacet?.let { it.applicationId ?: it.namespace },
             modules = project?.let { moduleSpecs(it) } ?: emptyList(),
             createdBy = CaprojFormat.APP_NAME,
             exportedAt = System.currentTimeMillis(),
@@ -864,7 +981,8 @@ class ProjectManager private constructor(
             stream.forEach { path ->
                 val rel = src.relativize(path).toString().replace(File.separatorChar, '/')
                 if (rel.contains(".platform/caches/") ||
-                    rel.split('/').any { it == "build" || it == ".gradle" }
+                    rel.split('/').any { it == ".gradle" } ||
+                    ProjectFiles.isBuildOutput(rel, isDirectory = Files.isDirectory(path), outputDirs = setOf("build"), products = false)
                 ) return@forEach
                 val target = dest.resolve(src.relativize(path).toString())
                 if (Files.isDirectory(path)) Files.createDirectories(target)
@@ -881,6 +999,33 @@ class ProjectManager private constructor(
         Files.walk(dir).use { stream ->
             stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
+    }
+
+    /**
+     * Delete [dir] and everything under it, carrying on past whatever cannot be removed, so one stuck file
+     * leaves only itself and its parents behind. Returns whether [dir] is gone.
+     */
+    private fun deleteTreeLenient(dir: Path): Boolean {
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) return true
+        runCatching {
+            Files.walkFileTree(dir, object : SimpleFileVisitor<Path>() {
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    runCatching { Files.deleteIfExists(file) }
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult {
+                    runCatching { Files.deleteIfExists(file) }
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun postVisitDirectory(d: Path, exc: IOException?): FileVisitResult {
+                    runCatching { Files.deleteIfExists(d) }
+                    return FileVisitResult.CONTINUE
+                }
+            })
+        }
+        return !Files.exists(dir, LinkOption.NOFOLLOW_LINKS)
     }
 
     /** Dispose application-scoped services + the app extension registry. Call on app exit, after the open
@@ -906,6 +1051,9 @@ class ProjectManager private constructor(
 
     companion object {
         private const val LEGACY_IMPORTED_PREF = "legacy.projects.imported"
+        /** [trashDir]'s name under the projects folder. */
+        private const val TRASH_DIR = ".trash"
+        private const val PLATFORM_DIR = ".platform"
         private const val DISABLED_PLUGINS_KEY = "plugins.disabled"
         private const val CONSENTED_PLUGINS_KEY = "plugins.consented"
 

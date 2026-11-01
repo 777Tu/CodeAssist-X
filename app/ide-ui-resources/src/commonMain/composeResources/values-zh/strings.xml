@@ -11,7 +11,7 @@
     <string name="help_improve_codeassist">帮助我们改进 CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[共享匿名性能运行数据，帮助我们定位卡顿、崩溃问题并针对性修复。
 
-我们会收集以下信息：您的应用版本和设备型号、构建、索引和代码补全所需时间、构建成功/失败情况以及已清理的崩溃报告。
+我们会收集以下信息：您的应用版本和设备型号、构建、索引和代码补全所需时间、构建成功/失败情况、已清理的崩溃报告，以及广告的展示与关闭情况和您的广告设置变更。
 
 我们不会收集代码、项目文件、项目名、使用记录以及任何个人身份信息。您可以在项目打开时随时在 “更多” 选项中更改此设置。]]></string>
     <string name="learn_more">了解更多</string>
@@ -62,7 +62,7 @@
     <string name="import_deps_bundled">已内置依赖库</string>
     <string name="import_failed">无法导入该项目工程包！</string>
     <string name="import_unrecognized_title">该文件导入失败!</string>
-    <string name="import_unrecognized">CodeAssist 无法识别此文件！请选择 .caproj 格式项目工程包进行导入。</string>
+    <string name="import_unrecognized">CodeAssist 无法识别此文件！请选择 .caproj 项目工程包或项目的 .zip 压缩包进行导入。</string>
     <string name="import_as_title">导入为</string>
     <string name="import_as_hint">项目名称</string>
     <string name="import_destination">导入到 %1$s</string>
@@ -80,8 +80,13 @@
     <string name="import_source_message">项目在哪里？</string>
     <string name="import_source_folder">项目文件夹</string>
     <string name="import_source_folder_desc">CodeAssist 项目或现有的 Gradle 构建</string>
-    <string name="import_source_package">项目包</string>
-    <string name="import_source_package_desc">从 CodeAssist 共享或导出的 .caproj 文件</string>
+    <string name="import_source_package">项目文件</string>
+    <string name="import_source_package_desc">项目或 Gradle 构建的 .zip 压缩包，或从 CodeAssist 共享的 .caproj 文件</string>
+    <string name="import_archive_codeassist">CodeAssist 项目</string>
+    <string name="import_archive_gradle">Gradle 构建</string>
+    <string name="import_archive_choose_message">此 zip 文件包含多个项目。要导入哪一个？</string>
+    <string name="import_archive_choose_title">选择项目</string>
+    <string name="import_archive_empty">该 zip 文件中未找到 CodeAssist 项目或 Gradle 构建。</string>
     <string name="import_gradle_mode_title">导入 Gradle 项目</string>
     <string name="import_gradle_mode_message">CodeAssist 应该如何打开此项目？</string>
     <string name="import_gradle_mode_compat">兼容模式</string>
@@ -604,6 +609,17 @@
     <string name="home_share">分享</string>
     <string name="home_delete">删除</string>
     <string name="home_dismiss">关闭</string>
+    <string name="halloween_title">万圣节快乐</string>
+    <string name="halloween_offer">为 IDE 换上节日装扮：南瓜主题、诡异的编辑器配色，还有蜡烛样式的光标。</string>
+    <string name="halloween_dress_up">换装</string>
+    <string name="halloween_not_now">以后再说</string>
+    <string name="halloween_applied">装扮完成。可以随时在设置中更改。</string>
+    <string name="halloween_undo">撤销</string>
+    <string name="halloween_over_title">万圣节结束了</string>
+    <string name="halloween_over_body">要把主题、编辑器配色和光标恢复原样吗？</string>
+    <string name="halloween_put_back">恢复原样</string>
+    <string name="halloween_keep">保留</string>
+    <string name="halloween_boo">嘘！</string>
     <string name="home_resume_title">从上次离开的地方继续</string>
     <string name="home_account_title">账号与工具</string>
     <string name="home_settings_tools">设置与工具</string>
@@ -842,6 +858,9 @@
     <string name="home_delete_confirm_body">这会从此设备上移除该项目及其全部内容。此操作无法撤销。</string>
     <string name="home_delete_confirm_action">删除项目</string>
     <string name="home_cancel">取消</string>
+    <string name="home_rename">重命名</string>
+    <string name="home_rename_title">重命名项目</string>
+    <string name="home_rename_label">项目名称</string>
     <string name="publish_from_share">发布到商店</string>
     <string name="publish_from_share_body">分享给所有人，而不只是一个人。发布前会先经审核。</string>
     <string name="guide_title">发布流程是怎样的</string>
@@ -1021,6 +1040,12 @@
     <string name="run_conflict_message">构建或程序仍在运行。要停止它并启动这次运行吗？</string>
     <string name="run_conflict_stop_and_run">停止并运行</string>
     <string name="run_conflict_dont_ask">不再询问</string>
+    <string name="unsaved_close_title">未保存的更改</string>
+    <string name="unsaved_close_message_one">关闭前保存对 %1$s 的更改？</string>
+    <string name="unsaved_close_message_many">关闭前保存对这些文件的更改？</string>
+    <string name="unsaved_close_discard">不保存</string>
+    <string name="unsaved_close_dont_ask">不再询问</string>
+    <string name="unsaved_close_dont_ask_hint">可在 设置 ▸ 编辑器 中更改。</string>
     <!-- Build notifications: the first-build permission prompt + its in-process fallback, and the Settings re-request -->
     <string name="build_notif_title">显示构建通知？</string>
     <string name="build_notif_message">CodeAssist 可以在独立的隔离进程中运行构建和程序，并在运行期间显示进度通知。这能避免你切换应用时 Android 中止构建，也方便你跟踪进度。允许通知即可启用此功能。</string>
@@ -1255,6 +1280,8 @@
     <string name="storage_freed">已释放 %1$s</string>
     <string name="storage_clear_sdk_title">清除 Android SDK？</string>
     <string name="storage_clear_sdk_body">这将删除已下载的 SDK 组件和下载内容（%1$s）。下次构建需要时会重新下载。</string>
+    <string name="storage_clear_leftovers_title">删除残留文件夹？</string>
+    <string name="storage_clear_leftovers_body">这将删除已删除项目在项目文件夹中留下的文件夹（%1$s）。它们都无法作为项目打开。</string>
     <string name="storage_cat_dependencies_title">依赖</string>
     <string name="storage_cat_dependencies_desc">已下载的库，需要时会重新下载</string>
     <string name="storage_cat_index_title">索引</string>
@@ -1269,6 +1296,8 @@
     <string name="storage_cat_sdk_desc">SDK 组件和下载，可重新下载</string>
     <string name="storage_cat_projects_title">项目文件</string>
     <string name="storage_cat_projects_desc">你的源代码和项目设置</string>
+    <string name="storage_cat_leftovers_title">残留的项目文件夹</string>
+    <string name="storage_cat_leftovers_desc">已删除项目留下的，可以安全删除</string>
     <string name="storage_cat_other_title">其他</string>
     <string name="storage_cat_other_desc">密钥库、备份和应用数据</string>
     <string name="plugins_restart_hint">重启后将应用插件更改。</string>
@@ -1503,6 +1532,15 @@
     <string name="modcfg_created">创建于 %1$s</string>
     <string name="modcfg_couldnt_create">无法创建 %1$s</string>
     <string name="modcfg_remove_module">移除模块</string>
+    <string name="modcfg_rename_app">重命名包名和应用名称</string>
+    <string name="modcfg_rename_app_name">应用名称</string>
+    <string name="modcfg_rename_app_package">包名</string>
+    <string name="modcfg_rename_app_change_id">同时更改应用 ID</string>
+    <string name="modcfg_rename_app_change_id_note">关闭时保留 %1$s，仍会更新已安装和已发布的应用。</string>
+    <string name="modcfg_rename_app_review">查看更改</string>
+    <string name="modcfg_rename_app_summary">将更改的文件：%1$d。移动到新包：%2$d。</string>
+    <string name="modcfg_rename_app_apply">重命名</string>
+    <string name="modcfg_rename_app_nothing">此模块没有可重命名的包名或应用名称。</string>
     <string name="modcfg_remove_module_content">要从项目中移除“%1$s”吗？其文件将保留，但其他模块对它的依赖将被移除。</string>
     <string name="modcfg_remove">移除</string>
     <string name="modcfg_no_module_types">没有可用的模块类型。</string>
@@ -1620,6 +1658,18 @@
     <string name="codestyle_wrap_never">从不</string>
     <string name="codestyle_wrap_if_long">过长时</string>
     <string name="codestyle_wrap_one_per_line">每行一个</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">XML 格式化会重新缩进标签、折行属性并整理标签内的空格。文本、属性值和注释保持原样。</string>
+    <string name="codestyle_markup">标记</string>
+    <string name="codestyle_xml_android_conventions">按文件类型应用 Android 规则</string>
+    <string name="codestyle_xml_android_conventions_desc">布局、清单、值资源和其他资源按 Android Studio 的方式排版</string>
+    <string name="codestyle_xml_wrap_attributes">属性折行</string>
+    <string name="codestyle_xml_wrap_attributes_desc">用于 Android 规则未涵盖的 XML</string>
+    <string name="codestyle_xml_space_in_empty_tag">空标签内加空格</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">使用 `&lt;View /&gt;` 而非 `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">重新排列属性</string>
+    <string name="codestyle_xml_rearrange_desc">重新格式化整个文件时，按 Android Studio 的顺序排列属性</string>
 
     <!-- shared common labels (reused across screens) -->
     <string name="save">保存</string>
@@ -1670,6 +1720,7 @@
     <!-- Group sub-headings -->
     <string name="set_grp_gestures">手势</string>
     <string name="set_grp_keyboard">键盘</string>
+    <string name="set_grp_tabs">标签页</string>
     <string name="set_grp_preview_sandbox">预览沙盒</string>
     <string name="set_grp_privacy">隐私</string>
     <string name="set_grp_storage">存储</string>
@@ -1716,6 +1767,11 @@
     <string name="set_editor_pinch_desc">用两指捏合以更改代码字号</string>
     <string name="set_editor_kbd_suggest">键盘建议</string>
     <string name="set_editor_kbd_suggest_desc">允许软键盘自动纠错、联想和自动加空格（普通键盘）。关闭以进行原始代码输入，这样键入的“.”不会被自动插入空格，但会失去联想候选栏。</string>
+    <string name="set_editor_close_unsaved">关闭有未保存更改的标签页</string>
+    <string name="set_editor_close_unsaved_desc">先询问，或始终直接保存或放弃更改</string>
+    <string name="set_editor_close_unsaved_ask">询问</string>
+    <string name="set_editor_close_unsaved_save">保存</string>
+    <string name="set_editor_close_unsaved_discard">不保存</string>
     <!-- Code Completion -->
     <string name="set_completion_auto">自动显示建议</string>
     <string name="set_completion_auto_desc">键入时自动弹出列表（关闭 = 仅 Ctrl-Space）</string>
@@ -1764,7 +1820,7 @@
     <string name="set_br_dexfork">最大并发 Dex 进程数</string>
     <!-- Privacy &amp; Data -->
     <string name="set_privacy_analytics">分享性能分析数据</string>
-    <string name="set_privacy_analytics_desc">仅共享匿名性能指标，绝不共享你的代码或文件名</string>
+    <string name="set_privacy_analytics_desc">仅共享匿名性能与广告指标，绝不共享你的代码或文件名</string>
     <string name="set_privacy_clear">清除缓存</string>
     <string name="set_privacy_clear_desc">释放可再生的依赖 / 语言 / 预览缓存（绝不清除源代码）</string>
     <string name="set_privacy_clear_btn">清除</string>
@@ -1887,6 +1943,43 @@
     <string name="icons_reference">引用</string>
     <string name="icons_app_icon_short">应用图标</string>
     <string name="icons_no_repositories">未注册图标库。</string>
+    <string name="icons_add_as">添加为</string>
+    <string name="icons_add_count">将 %1$d 个添加到项目</string>
+    <string name="icons_batch_added">已添加 %1$d 个</string>
+    <string name="icons_batch_existing">%1$d 个已在项目中</string>
+    <string name="icons_batch_failed">无法添加 %1$s</string>
+    <string name="icons_copy_to">复制到其他文件夹</string>
+    <string name="icons_delete">删除</string>
+    <string name="icons_delete_title">删除 %1$s？</string>
+    <string name="icons_delete_body">将从声明它的每个文件夹中删除其文件（共 %1$d 个）。</string>
+    <string name="icons_delete_body_used">将从声明它的每个文件夹中删除其文件（共 %1$d 个）。它仍在 %2$d 处被使用，这些地方将无法构建。</string>
+    <string name="icons_edit_settings">更改添加方式</string>
+    <string name="icons_finding_usages">正在查找用法…</string>
+    <string name="icons_long_press_hint">长按图标可一次添加多个。</string>
+    <string name="icons_matches_in">%2$s 中有 %1$d 个</string>
+    <string name="icons_more_actions">更多操作</string>
+    <string name="icons_open_file">打开文件</string>
+    <string name="icons_rename">重命名</string>
+    <string name="icons_rename_title">重命名 %1$s</string>
+    <string name="icons_rename_note">每个文件夹中的文件及其所有引用也会一并重命名。</string>
+    <string name="icons_selected_count">已选择 %1$d 个</string>
+    <string name="icons_unused">未在任何地方使用</string>
+    <string name="icons_usages_title">%1$s 的使用位置</string>
+    <string name="icons_used_in">在 %1$d 处使用</string>
+    <string name="icons_used_once">在 1 处使用</string>
+    <string name="appicon_advanced">文件和输出</string>
+    <string name="appicon_bg_colour">颜色</string>
+    <string name="appicon_bg_gradient">渐变</string>
+    <string name="appicon_bg_image">图片</string>
+    <string name="appicon_custom_colour">自定义颜色</string>
+    <string name="appicon_gradient_start">起始</string>
+    <string name="appicon_gradient_end">结束</string>
+    <string name="appicon_gradient_angle">方向</string>
+    <string name="appicon_more_images">以及 %1$d 张 PNG 图片</string>
+    <string name="appicon_pick_foreground">选择前景</string>
+    <string name="appicon_pick_background">选择背景</string>
+    <string name="appicon_run">运行应用</string>
+    <string name="appicon_written">已写入 %1$d 个文件</string>
 
     <!-- Built-in UI actions: More-menu rows and command-palette navigation commands -->
     <string name="action_close_project">关闭项目</string>

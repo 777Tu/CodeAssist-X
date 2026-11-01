@@ -44,6 +44,8 @@ import dev.ide.android.support.preview.DrawablePreview
 import dev.ide.android.support.preview.DrawablePreviewParser
 import dev.ide.android.support.preview.DrawableResolver
 import dev.ide.android.support.preview.ResolvedDrawable
+import dev.ide.android.support.permissions.AndroidPermissionTable
+import dev.ide.android.support.resources.AndroidManifestParser
 import dev.ide.android.support.resources.AndroidResources
 import dev.ide.android.support.resources.DrawableXmlCatalog
 import dev.ide.android.support.resources.ResourceReferences
@@ -105,6 +107,7 @@ import dev.ide.core.services.KotlinEditorService
 import dev.ide.core.services.LanguageFeatureService
 import dev.ide.core.services.ModuleService
 import dev.ide.core.services.RefactorService
+import dev.ide.core.services.AppRenameService
 import dev.ide.core.services.SearchService
 import dev.ide.core.services.SigningService
 import dev.ide.core.settings.BuiltInSettingsPages
@@ -179,10 +182,8 @@ import dev.ide.lang.kotlin.KotlinLanguageBackend
 import dev.ide.lang.kotlin.KotlinPackageRewrite
 import dev.ide.lang.kotlin.KotlinSourceAnalyzer
 import dev.ide.lang.kotlin.compile.BundledKotlinStdlib
-import dev.ide.lang.kotlin.compile.DefaultKotlinPluginLoader
 import dev.ide.lang.kotlin.compile.KotlinCompilerBackend
 import dev.ide.lang.kotlin.compile.KotlinJvmCompiler
-import dev.ide.lang.kotlin.compile.KotlinPluginLoader
 import dev.ide.lang.kotlin.completion.KotlinPostfixTemplates
 import dev.ide.lang.kotlin.index.BinaryAnnotationIndex
 import dev.ide.lang.kotlin.index.BinarySubtypeIndex
@@ -201,6 +202,7 @@ import dev.ide.lang.kotlin.interp.ResolvedFunction
 import dev.ide.lang.kotlin.synthetic.KotlinLightClasses
 import dev.ide.lang.kotlin.synthetic.KotlinSyntheticClassProvider
 import dev.ide.lang.resolve.ApiLevelContext
+import dev.ide.lang.resolve.PermissionContext
 import dev.ide.lang.resolve.SourceDocProvider
 import dev.ide.lang.resolve.orElse
 import dev.ide.lang.signature.SignatureHelp
@@ -214,6 +216,7 @@ import dev.ide.lang.xml.XmlNode
 import dev.ide.lang.dom.XmlNodeKinds
 import dev.ide.lang.xml.XmlParsedFile
 import dev.ide.lang.xml.XmlSourceAnalyzer
+import dev.ide.lang.xml.formatting.XmlFormatOptions
 import dev.ide.lang.xml.completion.XmlCompletion
 import dev.ide.lang.xml.completion.XmlContextScanner
 import dev.ide.lang.xml.edit.XmlAttributeInsert
@@ -396,7 +399,6 @@ class IdeServices private constructor(
     private val apkInstaller: ApkInstaller? = env.container.getServiceOrNull(APK_INSTALLER)
     private val appLogChannel: AppLogChannel? = env.container.getServiceOrNull(APP_LOG_CHANNEL)
     private val customViewRuntime: CustomViewRuntime? = env.container.getServiceOrNull(CUSTOM_VIEW_RUNTIME)
-    private val kotlinPluginLoader: KotlinPluginLoader? = env.container.getServiceOrNull(KOTLIN_PLUGIN_LOADER)
 
     /** The host's Kotlin compiler backend (on device: the persistent forked VM). Absent → in-process. */
     private val kotlinCompilerBackend: KotlinCompilerBackend? =
@@ -779,6 +781,10 @@ class IdeServices private constructor(
     internal val refactor: RefactorService
         get() = store.workspaceContainer.getService(REFACTOR_SERVICE)
 
+    /** WORKSPACE-scoped rename of an app's package and name across the workspace. */
+    internal val appRename: AppRenameService
+        get() = store.workspaceContainer.getService(APP_RENAME_SERVICE)
+
     /** WORKSPACE-scoped Kotlin editor queries (@Preview discovery, inheritor markers, go-to-implementation). */
     internal val kotlinEditor: KotlinEditorService
         get() = store.workspaceContainer.getService(KOTLIN_EDITOR_SERVICE)
@@ -989,7 +995,7 @@ class IdeServices private constructor(
         // plugin loader — on device the injected D8/dex one (so a runtime Kotlin compiler plugin loads on
         // ART), else the desktop URLClassLoader default.
         store.appContainer.registerServiceIfAbsent(KOTLIN_JVM_COMPILER) {
-            kotlinCompilerBackend ?: KotlinJvmCompiler(pluginLoader = kotlinPluginLoader ?: DefaultKotlinPluginLoader)
+            kotlinCompilerBackend ?: KotlinJvmCompiler()
         }
         // Publish this engine's [EngineContext] on its OWN workspace container, so the app-global service
         // factories (registered once on the app registry) resolve the per-project engine through the scope
@@ -2387,6 +2393,71 @@ class IdeServices private constructor(
         return ApiLevelContext.android(facet.minSdk, levels)
     }
 
+    /** The last [permissionContext] per module and when it was read, so a pass's many calls share one read. */
+    private val permissionContexts = ConcurrentHashMap<ModuleId, Pair<Long, PermissionContext?>>()
+
+    /** A manifest's declared permissions, kept until its size or modification time changes. */
+    private val manifestPermissions = ConcurrentHashMap<Path, Triple<Long, Long, Set<String>>>()
+
+    /**
+     * The missing-permission check's inputs for the Android module [id], or null for any other module (or when
+     * the table is not bundled). The declared permissions are what the merged manifest will hold: the module's
+     * own, its Android library modules', and every AAR's on its classpath (a library may declare the permission
+     * its API needs). Re-read at most every couple of seconds, since the check asks once per call it looks at.
+     */
+    private fun permissionContext(id: ModuleId): PermissionContext? {
+        val now = System.nanoTime()
+        permissionContexts[id]?.let { (at, ctx) -> if (now - at < PERMISSION_CONTEXT_TTL_NANOS) return ctx }
+        val ctx = runCatching { readPermissionContext(id) }.getOrNull()
+        permissionContexts[id] = now to ctx
+        return ctx
+    }
+
+    private fun readPermissionContext(id: ModuleId): PermissionContext? {
+        val modules = store.workspace.projects.flatMap { it.modules }
+        val module = modules.firstOrNull { it.id == id } ?: return null
+        val facet = module.facets.get(AndroidFacet.KEY) ?: return null
+        val table = AndroidPermissionTable.bundled() ?: return null
+        val declared = HashSet<String>()
+        if (facet.isApplication) {
+            val seen = HashSet<ModuleId>()
+            fun addModule(m: dev.ide.model.Module) {
+                if (!seen.add(m.id)) return
+                val f = m.facets.get(AndroidFacet.KEY)
+                if (f != null) moduleRoot(m)?.resolve(f.manifest)?.let { declared += permissionsIn(it) }
+                for (dep in m.dependencies) {
+                    val target = (dep as? ModuleDependency)?.target ?: continue
+                    modules.firstOrNull { it.id == target }?.let(::addModule)
+                }
+            }
+            addModule(module)
+            // An exploded AAR keeps its manifest beside its classes.jar.
+            for (entry in module.classpath(DependencyScope.IMPLEMENTATION).entries) {
+                if (entry.root.name != "classes.jar") continue
+                Paths.get(entry.root.path).resolveSibling("AndroidManifest.xml").let { declared += permissionsIn(it) }
+            }
+        }
+        val levels = apiLevelContext(id)?.levels
+        return PermissionContext(
+            table, declared, facet.minSdk, facet.targetSdk, checkManifest = facet.isApplication,
+            permissionLevel = { p ->
+                p.takeIf { it.startsWith(PLATFORM_PERMISSION) }
+                    ?.let { levels?.fieldLevel("android.Manifest\$permission", it.removePrefix(PLATFORM_PERMISSION))?.since }
+            },
+        )
+    }
+
+    private fun permissionsIn(manifest: Path): Set<String> {
+        val attrs = runCatching { Files.readAttributes(manifest, java.nio.file.attribute.BasicFileAttributes::class.java) }
+            .getOrNull() ?: return emptySet()
+        val size = attrs.size()
+        val modified = attrs.lastModifiedTime().toMillis()
+        manifestPermissions[manifest]?.let { (s, m, perms) -> if (s == size && m == modified) return perms }
+        val perms = AndroidManifestParser.parse(manifest)?.permissions?.toSet() ?: emptySet()
+        manifestPermissions[manifest] = Triple(size, modified, perms)
+        return perms
+    }
+
     /**
      * The Android platform's bundled parameter names and javadoc, for an Android module: what its editors
      * show for framework and `java.*` APIs until real platform sources are attached. Empty elsewhere.
@@ -2418,6 +2489,7 @@ class IdeServices private constructor(
                     it.subtypeIndexQuery = ::javaSubtypesOf
                     // The minSdk check and the "Added in API N" doc line, from the module's current facet.
                     it.apiContext = { apiLevelContext(module.id) }
+                    it.permissionContext = { permissionContext(module.id) }
                     sdkManager.jdkSourceOverride()?.let { zip -> it.addSourceJars(listOf(zip)) }
                     module.facets.get(AndroidFacet.KEY)?.let { facet ->
                         sdkManager.androidSourcesDir(facet.compileSdk)?.let { dir -> it.addSourceDirs(listOf(dir)) }
@@ -2466,6 +2538,7 @@ class IdeServices private constructor(
                         module.facets.get(AndroidFacet.KEY) != null || module.type.platform == PlatformKind.ANDROID
                     it.javaSourceLocator = { fqn, member -> javaSourceTarget(module, fqn, member) }
                     it.apiContext = { apiLevelContext(module.id) }
+                    it.permissionContext = { permissionContext(module.id) }
                     it.extensionCacheDir = store.rootPath.resolve(".platform/caches/kotlin-ext")
                     // Lowered Compose-preview declarations persist across launches, so the first preview after
                     // a reopen decodes instead of re-running overload resolution over the reachable closure.
@@ -2808,8 +2881,9 @@ class IdeServices private constructor(
     fun formatDocument(
         file: Path,
         text: String,
-        style: dev.ide.lang.formatting.FormatStyle
-    ): List<DocumentEdit> = languageFeatures.formatDocument(file, text, style)
+        style: dev.ide.lang.formatting.FormatStyle,
+        xmlOptions: XmlFormatOptions = XmlFormatOptions(),
+    ): List<DocumentEdit> = languageFeatures.formatDocument(file, text, style, xmlOptions)
 
     /** Reformat only the text overlapping `[start, end)` of [file]'s live buffer. */
     fun formatRange(
@@ -2817,8 +2891,9 @@ class IdeServices private constructor(
         text: String,
         start: Int,
         end: Int,
-        style: dev.ide.lang.formatting.FormatStyle
-    ): List<DocumentEdit> = languageFeatures.formatRange(file, text, start, end, style)
+        style: dev.ide.lang.formatting.FormatStyle,
+        xmlOptions: XmlFormatOptions = XmlFormatOptions(),
+    ): List<DocumentEdit> = languageFeatures.formatRange(file, text, start, end, style, xmlOptions)
 
     /** Reorder + de-duplicate + wildcard-collapse + drop-unused the imports of [file]'s live buffer; minimal
      *  edits, or empty when the language has no organizer / the imports are already optimal. */
@@ -2828,8 +2903,11 @@ class IdeServices private constructor(
     /** Format the built-in code sample for [languageId] with [style] and return the result — for the Code
      *  Style screen's live preview. Module-independent: it builds a standalone formatter, so it works with no
      *  file open. Returns the sample unchanged if formatting fails. */
-    fun formatStylePreview(languageId: String, style: dev.ide.lang.formatting.FormatStyle): String =
-        languageFeatures.formatStylePreview(languageId, style)
+    fun formatStylePreview(
+        languageId: String,
+        style: dev.ide.lang.formatting.FormatStyle,
+        xmlOptions: XmlFormatOptions = XmlFormatOptions(),
+    ): String = languageFeatures.formatStylePreview(languageId, style, xmlOptions)
 
     /** Enclosing declarations (type/method names, outer→inner) at [offset] in [file]'s buffer — for the
      *  cursor-tracking breadcrumb. Empty if the file is outside the project or not JDT-backed. */
@@ -3414,6 +3492,14 @@ class IdeServices private constructor(
     suspend fun rename(file: Path, text: String, offset: Int, newName: String): RenameOutcome =
         androidEditor.rename.rename(file, text, offset, newName) ?: refactor.rename(file, text, offset, newName)
 
+    /** Rename project resource [type]/[oldName] everywhere it is named, with no caret to start from. */
+    suspend fun renameResource(type: ResourceType, oldName: String, newName: String): RenameOutcome =
+        androidEditor.rename.renameResource(type, oldName, newName)
+
+    /** Every place resource [type]/[name] is named (XML and code), as (file, start offset) pairs. */
+    fun resourceUsages(type: ResourceType, name: String): List<Pair<Path, Int>> =
+        androidEditor.navigation.occurrences(type, name).map { (path, occ) -> path to occ.range.first }
+
     /** Every reference to the symbol under [offset] in [file]/[text], project-wide, as (file, range) pairs.
      *  Read-only (Java/JDT); empty when the position is not a resolvable symbol. */
     fun findReferences(file: Path, text: String, offset: Int): List<Pair<Path, dev.ide.lang.dom.TextRange>> =
@@ -3913,6 +3999,13 @@ class IdeServices private constructor(
         }
     }
 
+    /** [module]'s `AndroidManifest.xml` as the facet names it, or null for a non-Android module. */
+    internal fun manifestFileOf(module: Module): VirtualFile? {
+        val facet = module.facets.get(AndroidFacet.KEY) ?: return null
+        val path = moduleRoot(module)?.resolve(facet.manifest) ?: return null
+        return store.vfs.fileFor(path)
+    }
+
     /** True when [target]'s module library classpath includes AppCompat, so its `app:` compat attrs resolve. */
     internal fun moduleUsesAppCompat(target: AnalysisTarget): Boolean =
         runCatching {
@@ -3958,18 +4051,29 @@ class IdeServices private constructor(
      * device viewport, for the Preview view. Null if [file] isn't an Android `res/layout` file. Custom views
      * currently render as placeholders (the live bridge is the next phase); built-ins + chrome are rendered.
      */
+    /** How long the last [layoutPreview]'s resource-repository lookup took, for the real-view timing log. */
+    @Volatile
+    private var previewRepoNanos = 0L
+
     fun layoutPreview(
         file: Path, text: String, request: dev.ide.preview.PreviewRequest
     ): LayoutPreviewResult? {
         if (!file.toString().replace('\\', '/').contains("/res/layout")) return null
         val module = moduleForResourceFile(file) ?: return null
         if (module.facets.get(AndroidFacet.KEY) == null) return null
-        val cached = resourceRepository(module) ?: return null
+        val tRepo = System.nanoTime()
+        val realView = request.realViews && realViewRuntime != null
+        // The real-view render doesn't read the repository (it renders the aapt2-linked table), and an open
+        // layout's every keystroke changes the repository's fingerprint, so waiting for a rebuild here put a
+        // whole-repository parse in front of each render. Real view takes the last one built instead.
+        val cached = (if (realView) repoCache[module.id.value] else null)
+            ?: resourceRepository(module) ?: return null
         val repo = cached.repo
         val (themeName, title) = manifestThemeAndLabel(module, repo)
+        previewRepoNanos = System.nanoTime() - tRepo
         // Real-view ("layoutlib-on-device") path, when requested and a runtime is wired. On success it returns
         // the rendered PNG; on any failure it returns owned rendering annotated with the reason (never blank).
-        if (request.realViews && realViewRuntime != null) {
+        if (realView) {
             // realViewPreview publishes its pipeline stage to _realViewProgress (the status chip); clear it
             // here so every exit path (success or owned fallback) leaves the chip idle.
             return try {
@@ -4084,18 +4188,18 @@ class IdeServices private constructor(
         text: String,
         request: dev.ide.preview.PreviewRequest,
     ): LayoutPreviewResult? {
-        val runtime = realViewRuntime ?: return ownedPreview(
-            module,
-            repo,
-            fingerprint,
-            themeName,
-            title,
-            text,
-            request,
-            null
-        )
-        val facet = module.facets.get(AndroidFacet.KEY)
-            ?: return ownedPreview(module, repo, fingerprint, themeName, title, text, request, null)
+        // [repo] may be the last repository built rather than one matching this edit (see [layoutPreview]): the
+        // real-view render reads resources from the linked table, not from it. Owned rendering draws from the
+        // repository, so a fallback to it takes a current one.
+        fun owned(problem: String?): LayoutPreviewResult? {
+            val fresh = resourceRepository(module)
+            return ownedPreview(
+                module, fresh?.repo ?: repo, fresh?.fingerprint ?: fingerprint, themeName, title, text, request, problem
+            )
+        }
+        val runtime = realViewRuntime ?: return owned(null)
+        val facet = module.facets.get(AndroidFacet.KEY) ?: return owned(null)
+        val t0 = System.nanoTime()
 
         // Resolve against the user's ACTIVE variant (the persisted per-module choice the editor and build
         // target), not the default — the exploded AARs, resource link caches and dex caches
@@ -4120,20 +4224,12 @@ class IdeServices private constructor(
                 selectedVariant?.configurations
             )
         }.getOrNull()
-        // Extra R packages: every AAR package (androidx.coordinatorlayout, com.google.android.material, …) plus
-        // every OTHER android module's package. A library/framework view references its OWN `R` at inflate time
-        // (e.g. CoordinatorLayout → `androidx.coordinatorlayout.R$attr`), and AARs do NOT ship their `R` — the
-        // consuming app generates one per package via aapt2 `--extra-packages`. Without these the preview crashes
-        // with NoClassDefFoundError for a lib's R class. Mirrors the build's `extraPackages`.
-        val extraPackages = ((resolved?.aarPackages ?: emptyList()) +
-                modules().mapNotNull { it.facets.get(AndroidFacet.KEY)?.namespace }
-                    .filter { it != facet.namespace })
-            .distinct()
-
+        val tResolved = System.nanoTime()
         // Relink the live buffer over the project's resources so the preview reflects the edited (or newly
         // added) layout. The linker self-builds its base from the live res tree, so a prior successful build
-        // is NOT required and edits to other resources show. It also generates a preview `R.jar` (app + [extraPackages]) with ids matching the relinked arsc, so the
-        // preview no longer depends on a prior build's (id-mismatched, possibly absent) R.jar.
+        // is NOT required and edits to other resources show. It also generates a preview `R.jar` with ids matching
+        // the relinked arsc (every library's `R` resolves to the app's in the renderer), so the preview no longer
+        // depends on a prior build's (id-mismatched, possibly absent) R.jar.
         val linked = previewResourceLinker?.link(
             module,
             variant,
@@ -4143,9 +4239,9 @@ class IdeServices private constructor(
             facet.namespace,
             facet.minSdk,
             facet.targetSdk,
-            extraPackages = extraPackages,
             progress = { _realViewProgress.value = PreviewProgress(it) },
         )
+        val tLinked = System.nanoTime()
         // Broken project resources: report them. Rendering the build's last resources.ap_ (or owned rendering)
         // here would show the layout wrong with no hint why.
         if (linked != null && linked.resourceErrors.isNotEmpty()) {
@@ -4163,8 +4259,7 @@ class IdeServices private constructor(
         val resourcesAp = linked?.resourcesAp
             ?: AndroidBuildSystem.resourcesApPath(module, variant)
                 .takeIf { Files.exists(it) }
-            ?: return ownedPreview(
-                module, repo, fingerprint, themeName, title, text, request,
+            ?: return owned(
                 "Real-view resources unavailable (${linked?.error ?: "build the project once"}) — showing owned rendering"
             )
         // The R.jar: prefer the relink's (ids match the relinked arsc AND it covers every lib package); fall
@@ -4199,7 +4294,7 @@ class IdeServices private constructor(
 
         // The VM interprets the compiled project class DIRS (reads their bytes), the external library jars, and
         // the preview R.jar — no dexing, no DexClassLoader.
-        val classpath = externalJars + projectClassDirs + listOfNotNull(rJar)
+        val classpath = externalJars + projectClassDirs + listOfNotNull(rJar, linked?.toolsJar)
         Log.logger("ide.preview").info(
             "real-view (interpret) resolved=${resolved != null} runtimeLibs=${runtimeLibs.size} " +
                 "externalJars=${externalJars.size} projectDirs=${projectClassDirs.size} rJar=${rJar != null} " +
@@ -4236,15 +4331,16 @@ class IdeServices private constructor(
             stageListener = { _realViewProgress.value = PreviewProgress(it) }
         }
         _realViewProgress.value = PreviewProgress("Rendering")
+        val tRender = System.nanoTime()
         val result = runCatching { runtime.render(req) }.getOrElse { t ->
             RealViewResult(null, error = t.message ?: t.javaClass.simpleName)
         }
+        val tRendered = System.nanoTime()
         // The render is a live native Bitmap on device (no PNG round-trip) or PNG bytes as the portable form.
         val nativeImage = result?.nativeBitmap
         val png = result?.pngBytes
         if (nativeImage == null && png == null) {
-            return ownedPreview(
-                module, repo, fingerprint, themeName, title, text, request,
+            return owned(
                 "Real-view render unavailable (${result?.error ?: "no result"}). Showing Legacy Rendering"
             )
         }
@@ -4264,6 +4360,12 @@ class IdeServices private constructor(
                 )
             }.getOrDefault(vt)
         }
+        fun ms(a: Long, b: Long) = (b - a) / 1_000_000
+        Log.logger("ide.preview").info(
+            "real-view host '${req.layoutName}': repo=${previewRepoNanos / 1_000_000}ms resolve=${ms(t0, tResolved)}ms " +
+                "link=${ms(tResolved, tLinked)}ms classpath=${ms(tLinked, tRender)}ms render=${ms(tRender, tRendered)}ms " +
+                "stamp=${ms(tRendered, System.nanoTime())}ms"
+        )
         return LayoutPreviewResult(
             root,
             resources,
@@ -5153,6 +5255,8 @@ class IdeServices private constructor(
     }
 
     companion object {
+        private const val PERMISSION_CONTEXT_TTL_NANOS = 2_000_000_000L
+        private const val PLATFORM_PERMISSION = "android.permission."
         /** The name of the library [ensureKotlinStdlib] adds, and the prefix of a kotlin-stdlib jar. */
         private const val KOTLIN_STDLIB = "kotlin-stdlib"
         /** Cache subdirs under `.platform/caches` the "Clear caches" action removes — all regenerable, none

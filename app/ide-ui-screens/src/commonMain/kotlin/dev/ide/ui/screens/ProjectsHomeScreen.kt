@@ -1,5 +1,10 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.components.HalloweenBackdrop
+import dev.ide.ui.components.HauntedGhost
+import dev.ide.ui.components.SeasonalEmptyArt
+import dev.ide.ui.theme.LocalSeason
+import dev.ide.ui.theme.Season
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.text.BasicTextField
@@ -151,6 +156,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.pluralStringResource
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
+import dev.ide.ui.generated.resources.home_rename
+import dev.ide.ui.generated.resources.home_rename_label
+import dev.ide.ui.generated.resources.home_rename_title
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.TextButton
@@ -188,6 +204,8 @@ fun ProjectsHomeScreen(
     onNewProject: () -> Unit,
     modifier: Modifier = Modifier,
     onDeleteProject: ((ProjectInfo) -> Unit)? = null,
+    /** Give a project a new display name. Null hides Rename (a host that can't write the model). */
+    onRenameProject: ((ProjectInfo, String) -> Unit)? = null,
     onImportProject: (() -> Unit)? = null,
     onCloneRepository: (() -> Unit)? = null,
     onExportProject: ((ProjectInfo) -> Unit)? = null,
@@ -226,10 +244,16 @@ fun ProjectsHomeScreen(
      */
     accountRequested: Boolean = false,
     onAccountRequestHandled: () -> Unit = {},
+    /**
+     * A seasonal card (Halloween's), shown above the project list. A slot rather than data so this screen does
+     * not need to know which season it is or what dressing up changes; null shows nothing.
+     */
+    seasonalCard: (@Composable (Modifier) -> Unit)? = null,
 ) {
     var segment by remember { mutableStateOf(HomeSegment.Projects) }
     // Deleting wipes the project from disk and nothing else in this flow asks first.
     var pendingDelete by remember { mutableStateOf<ProjectInfo?>(null) }
+    var pendingRename by remember { mutableStateOf<ProjectInfo?>(null) }
     var sheet by remember { mutableStateOf<HomeSheet?>(null) }
     val now = remember(projects) { nowMillis() }
     val ordered = remember(projects) { projects.sortedByDescending { it.lastOpened } }
@@ -265,14 +289,18 @@ fun ProjectsHomeScreen(
             onCloneRepository = onCloneRepository,
             onExportProject = onExportProject,
             onRequestDelete = onDeleteProject?.let { { project: ProjectInfo -> pendingDelete = project } },
+            onRequestRename = onRenameProject?.let { { project: ProjectInfo -> pendingRename = project } },
             showLegacyRecovery = showLegacyRecovery,
             onDismissLegacyRecovery = onDismissLegacyRecovery,
+            seasonalCard = seasonalCard,
             bell = bell,
             onOpenAccount = { sheet = HomeSheet.Account },
             onJoinDiscord = onJoinDiscord,
         )
     } else
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.TopCenter) {
+      // Behind everything, so the list scrolls over it; draws nothing outside the Halloween season.
+      HalloweenBackdrop()
       PullToRefreshBox(
         isRefreshing = isRefreshing,
         onRefresh = {
@@ -332,6 +360,10 @@ fun ProjectsHomeScreen(
                 )
             }
 
+            if (seasonalCard != null) {
+                item("seasonal") { seasonalCard(Modifier.padding(horizontal = PhoneListInset).padding(top = 16.dp)) }
+            }
+
             if (showLegacyRecovery) {
                 item("legacy") { LegacyRecoveryNotice(onDismissLegacyRecovery) }
             }
@@ -353,6 +385,7 @@ fun ProjectsHomeScreen(
                         } else {
                             null
                         },
+                        onRename = onRenameProject?.let { { pendingRename = project } },
                     )
                 }
             } else {
@@ -414,6 +447,55 @@ fun ProjectsHomeScreen(
             },
         )
     }
+
+    pendingRename?.let { target ->
+        RenameProjectDialog(
+            project = target,
+            onDismiss = { pendingRename = null },
+            onRename = { name ->
+                pendingRename = null
+                onRenameProject?.invoke(target, name)
+            },
+        )
+    }
+}
+
+/**
+ * Asks for a project's new display name. The field starts on the current name, all of it selected, so typing
+ * replaces it and a small edit is one tap away. Rename stays off until the name is non-blank and different.
+ */
+@Composable
+private fun RenameProjectDialog(project: ProjectInfo, onDismiss: () -> Unit, onRename: (String) -> Unit) {
+    var value by remember(project.rootPath) {
+        mutableStateOf(TextFieldValue(project.name, selection = TextRange(0, project.name.length)))
+    }
+    val newName = value.text.trim()
+    val canRename = newName.isNotEmpty() && newName != project.name
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(Res.string.home_rename_title)) },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text(stringResource(Res.string.home_rename_label)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (canRename) onRename(newName) }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onRename(newName) }, enabled = canRename) {
+                Text(stringResource(Res.string.home_rename))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(Res.string.home_cancel)) }
+        },
+    )
 }
 
 private enum class HomeSheet { Account }
@@ -649,6 +731,7 @@ private fun LocalProjectCard(
      * the app at all.
      */
     onDelete: (() -> Unit)? = null,
+    onRename: (() -> Unit)? = null,
 ) {
     var menuOpen by remember(project.rootPath) { mutableStateOf(false) }
     val c = MaterialTheme.colorScheme
@@ -707,7 +790,7 @@ private fun LocalProjectCard(
                 )
             }
             // Everything that is not "open this project" lives behind one control. Tapping the row opens.
-            if (onDelete != null || onSecondary != null) {
+            if (onDelete != null || onSecondary != null || onRename != null) {
                 Box {
                     IconButtonCa(
                         CaIcons.ellipsis,
@@ -728,6 +811,12 @@ private fun LocalProjectCard(
                                     )
                                 },
                                 onClick = { menuOpen = false; onSecondary() },
+                            )
+                        }
+                        if (onRename != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(Res.string.home_rename)) },
+                                onClick = { menuOpen = false; onRename() },
                             )
                         }
                         if (onDelete != null) {
@@ -801,7 +890,9 @@ private fun EmptyList(inset: Dp = PhoneListInset, top: Dp = 24.dp) {
             .padding(horizontal = 24.dp, vertical = 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Symbol(CaSymbols.folderOpen, contentDescription = null, size = 40.dp, tint = c.outlineVariant)
+        SeasonalEmptyArt(size = 56.dp) {
+            Symbol(CaSymbols.folderOpen, contentDescription = null, size = 40.dp, tint = c.outlineVariant)
+        }
         Text(
             stringResource(Res.string.home_empty_list),
             style = MaterialTheme.typography.bodyLarge,
@@ -1149,8 +1240,10 @@ private fun WideProjectsHome(
     onCloneRepository: (() -> Unit)?,
     onExportProject: ((ProjectInfo) -> Unit)?,
     onRequestDelete: ((ProjectInfo) -> Unit)?,
+    onRequestRename: ((ProjectInfo) -> Unit)?,
     showLegacyRecovery: Boolean,
     onDismissLegacyRecovery: () -> Unit,
+    seasonalCard: (@Composable (Modifier) -> Unit)?,
     bell: (@Composable () -> Unit)?,
     onOpenAccount: () -> Unit,
     onJoinDiscord: (() -> Unit)?,
@@ -1166,6 +1259,7 @@ private fun WideProjectsHome(
     }
     val sidebarShown = LocalHomeSidebarShown.current
     BoxWithConstraints(Modifier.fillMaxSize().background(c.background)) {
+        HalloweenBackdrop()
         val showKind = maxWidth >= ProjectsKindColumnBreakpoint
         Column(Modifier.widthIn(max = ProjectsWideMaxWidth).fillMaxSize().padding(horizontal = 28.dp)) {
             Row(
@@ -1216,6 +1310,7 @@ private fun WideProjectsHome(
                 SortChooser(sort) { sort = it }
             }
             // Every gap down the wide column is 16dp: the search row already leaves 8 below itself.
+            seasonalCard?.invoke(Modifier.padding(top = 8.dp, bottom = 8.dp))
             if (showLegacyRecovery) LegacyRecoveryNotice(onDismissLegacyRecovery, inset = 0.dp, top = 8.dp)
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
@@ -1226,12 +1321,18 @@ private fun WideProjectsHome(
                         if (projects.isEmpty()) {
                             EmptyList(inset = 0.dp, top = if (showLegacyRecovery) 16.dp else 8.dp)
                         } else {
-                            Text(
-                                stringResource(Res.string.home_no_match, query.trim()),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = c.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp),
-                            )
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 24.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                if (LocalSeason.current == Season.Halloween) HauntedGhost(44.dp)
+                                Text(
+                                    stringResource(Res.string.home_no_match, query.trim()),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = c.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -1245,6 +1346,7 @@ private fun WideProjectsHome(
                         onOpen = { onOpen(project) },
                         onShare = onExportProject?.let { export -> { export(project) } },
                         onDelete = onRequestDelete?.let { request -> { request(project) } },
+                        onRename = onRequestRename?.let { request -> { request(project) } },
                     )
                 }
                 item("ad") { AdSlot(AdPlacement.PROJECTS, Modifier.padding(top = 16.dp)) }
@@ -1337,6 +1439,7 @@ private fun DenseProjectRow(
     onOpen: () -> Unit,
     onShare: (() -> Unit)?,
     onDelete: (() -> Unit)?,
+    onRename: (() -> Unit)?,
 ) {
     val c = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -1394,12 +1497,15 @@ private fun DenseProjectRow(
             textAlign = TextAlign.End,
             modifier = Modifier.width(110.dp),
         )
-        if (onShare != null || onDelete != null) {
+        if (onShare != null || onDelete != null || onRename != null) {
             Box(Modifier.alpha(if (hovered || menuOpen || touchInput) 1f else 0f)) {
                 IconButtonCa(CaIcons.ellipsis, stringResource(Res.string.home_more_actions), { menuOpen = true }, iconSize = 18, boxSize = 36)
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     if (onShare != null) {
                         DropdownMenuItem(text = { Text(stringResource(Res.string.home_share)) }, onClick = { menuOpen = false; onShare() })
+                    }
+                    if (onRename != null) {
+                        DropdownMenuItem(text = { Text(stringResource(Res.string.home_rename)) }, onClick = { menuOpen = false; onRename() })
                     }
                     if (onDelete != null) {
                         DropdownMenuItem(

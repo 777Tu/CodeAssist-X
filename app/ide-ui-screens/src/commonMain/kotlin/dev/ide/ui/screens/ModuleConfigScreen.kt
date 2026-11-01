@@ -180,6 +180,7 @@ import dev.ide.ui.generated.resources.modcfg_platform_sdk
 import dev.ide.ui.generated.resources.modcfg_platform_sdk_auto
 import dev.ide.ui.generated.resources.modcfg_remove
 import dev.ide.ui.generated.resources.modcfg_remove_named
+import dev.ide.ui.generated.resources.modcfg_rename_app
 import dev.ide.ui.generated.resources.modcfg_remove_module
 import dev.ide.ui.generated.resources.modcfg_remove_module_content
 import dev.ide.ui.generated.resources.modcfg_removed
@@ -275,6 +276,8 @@ fun ModuleConfigScreen(
     onOpenKeystoreManager: () -> Unit = {},
     codeFont: FontFamily = FontFamily.Monospace,
     fileActions: FileActions = FileActions.None,
+    /** A rename moved files ([Map] old → new path): open editor tabs follow them. */
+    onFilesRelocated: (Map<String, String>) -> Unit = {},
 ) {
     val list = rememberModulesListState(backend)
     var selected by remember { mutableStateOf(initialModule) }
@@ -292,10 +295,11 @@ fun ModuleConfigScreen(
         PlatformBackHandler(enabled = !twoPane && selected != null) { selected = null }
 
         val detail: @Composable (String, (() -> Unit)?) -> Unit = { name, back ->
-            key(name) {
+            key(name, list.renameEpoch) {
                 ModuleDetail(
                     backend, name, list.modules.firstOrNull { it.name == name }?.typeDisplay, tab, { tab = it },
                     codeFont, fileActions, onOpenKeystoreManager, onBack = back, onRemove = { list.askRemove(name) },
+                    onRename = { list.askRename(name) },
                 )
             }
         }
@@ -325,6 +329,18 @@ fun ModuleConfigScreen(
             onDismiss = list::cancelRemove,
             onConfirm = list::confirmRemove,
         )
+        list.renameTarget?.let { target ->
+            AppRenameDialog(
+                backend = backend,
+                moduleName = target,
+                codeFont = codeFont,
+                onDismiss = list::cancelRename,
+                onDone = { result ->
+                    onFilesRelocated(result.movedPaths)
+                    list.renamed(result)
+                },
+            )
+        }
         ConfigToastHost(list.toast, Modifier.align(Alignment.BottomCenter))
     }
 }
@@ -449,13 +465,20 @@ private fun moduleTypeIcon(typeDisplay: String): ImageVector = when {
  * confirm dialog, and it read as "close" rather than "remove".
  */
 @Composable
-private fun ModuleOverflowMenu(onRemove: () -> Unit) {
+private fun ModuleOverflowMenu(onRemove: () -> Unit, onRename: (() -> Unit)? = null) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }) {
             Symbol(CaSymbols.moreVert, stringResource(Res.string.more), size = 22.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (onRename != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(Res.string.modcfg_rename_app)) },
+                    leadingIcon = { Symbol(CaSymbols.edit, null, size = 20.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    onClick = { open = false; onRename() },
+                )
+            }
             DropdownMenuItem(
                 text = { Text(stringResource(Res.string.modcfg_remove_module)) },
                 leadingIcon = { Symbol(CaSymbols.delete, null, size = 20.dp, tint = MaterialTheme.colorScheme.error) },
@@ -505,6 +528,7 @@ private fun ModuleDetail(
     onOpenKeystoreManager: () -> Unit,
     onBack: (() -> Unit)?,
     onRemove: () -> Unit,
+    onRename: () -> Unit,
 ) {
     val settings = rememberModuleSettingsState(backend, moduleName)
     // Whether the module builds through the Android pipeline (the build-features pane loads only for one). Unknown
@@ -518,7 +542,7 @@ private fun ModuleDetail(
     BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val gutter = contentGutter(maxWidth)
         Column(Modifier.fillMaxSize()) {
-            ModuleDetailHeader(moduleName, settings.config?.typeDisplay ?: typeDisplay.orEmpty(), gutter, onBack, onRemove)
+            ModuleDetailHeader(moduleName, settings.config?.typeDisplay ?: typeDisplay.orEmpty(), gutter, onBack, onRemove, onRename)
             ModuleTabRow(tabs, current, gutter, onSelectTab)
             val pane = Modifier.weight(1f).fillMaxWidth()
             when (current) {
@@ -535,7 +559,14 @@ private fun ModuleDetail(
 
 /** The module's identity: type tile, name, type, and the module actions. Aligned with the page column below it. */
 @Composable
-private fun ModuleDetailHeader(name: String, typeDisplay: String, gutter: Dp, onBack: (() -> Unit)?, onRemove: () -> Unit) {
+private fun ModuleDetailHeader(
+    name: String,
+    typeDisplay: String,
+    gutter: Dp,
+    onBack: (() -> Unit)?,
+    onRemove: () -> Unit,
+    onRename: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
             .padding(start = if (onBack != null) 4.dp else gutter, end = (gutter - 12.dp).coerceAtLeast(4.dp), top = 12.dp, bottom = 8.dp),
@@ -549,7 +580,7 @@ private fun ModuleDetailHeader(name: String, typeDisplay: String, gutter: Dp, on
                 Text(typeDisplay, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        ModuleOverflowMenu(onRemove)
+        ModuleOverflowMenu(onRemove, onRename)
     }
 }
 
@@ -1194,9 +1225,10 @@ private fun JavaLevelPicker(levels: List<String>, selected: String, onSelect: (S
                 selected = lvl == selected,
                 onClick = { onSelect(lvl) },
                 shape = SegmentedButtonDefaults.itemShape(i, levels.size),
-                // No check mark: four "Java NN" segments with one have to fit a 360dp phone.
+                // No check mark, and only the number: the field is already labelled "Java version", and four
+                // "Java NN" segments ellipsized to "Java ..." on a phone, hiding the one thing that differs.
                 icon = {},
-                label = { Text(prettyLevel(lvl), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { Text(levelNumber(lvl), maxLines = 1, softWrap = false) },
             )
         }
     }
@@ -1842,3 +1874,6 @@ private fun rowTitle(row: SnapshotStateList<FieldState>, index: Int): String {
 }
 
 private fun prettyLevel(enumName: String): String = enumName.replace("JAVA_", "Java ")
+
+/** Just the release number of a level (`JAVA_17` is "17"), for places already labelled as the Java version. */
+private fun levelNumber(enumName: String): String = enumName.removePrefix("JAVA_").replace('_', '.')

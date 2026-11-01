@@ -233,6 +233,8 @@ interface Aapt2 {
         protoFormat: Boolean = false,   // aapt2 `--proto-format`: emit proto resources (R8 resource shrinking input)
         overlays: List<Path> = emptyList(), // aapt2 `-R` overlays applied on top of [compiled]
         rTxt: Path? = null,             // aapt2 `--output-text-symbols`: the R symbol table (`R.txt`) for an AAR
+        includes: List<Path> = emptyList(), // more `-I` tables after [androidJar], to resolve references against
+        packageId: Int? = null,         // aapt2 `--package-id`; null keeps the app id 0x7f
     ): ToolResult
 
     /**
@@ -242,6 +244,21 @@ interface Aapt2 {
      */
     fun convert(input: Path, output: Path, toProto: Boolean): ToolResult =
         ToolResult.fail("aapt2 convert not supported by this implementation")
+
+    /**
+     * Link [compiled] alone as its own package [packageId] against [includes] (`-I`, e.g. the framework jar and
+     * an already-linked `resources.ap_`), into [outApk]. References resolve to the included tables' ids, so a
+     * layout compiled this way can stand in for its copy in the included table without relinking it.
+     */
+    fun linkAgainst(
+        compiled: List<Path>,
+        manifest: Path,
+        includes: List<Path>,
+        packageId: Int,
+        minSdk: Int,
+        targetSdk: Int,
+        outApk: Path,
+    ): ToolResult = ToolResult.fail("aapt2 linkAgainst not supported by this implementation")
 }
 
 data class Aapt2CompileResult(val archives: List<Path>, val result: ToolResult)

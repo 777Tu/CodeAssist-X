@@ -205,6 +205,12 @@ data class UiProjectResult(val success: Boolean, val message: String, val rootPa
  */
 enum class UiProjectFolderKind { CODE_ASSIST, GRADLE, UNKNOWN }
 
+/** A `.zip` unpacked for import: the projects found in it, or why it could not be unpacked ([error]). */
+data class UiProjectArchive(val projects: List<UiArchiveProject>, val error: String? = null)
+
+/** One project inside a [UiProjectArchive]: its unpacked [path], where it sat in the zip, and what it is. */
+data class UiArchiveProject(val path: String, val relativePath: String, val kind: UiProjectFolderKind)
+
 // ---- Projects Store DTOs ----
 
 /**
@@ -1098,6 +1104,45 @@ data class UiModuleConfigEdit(
 data class UiConfigResult(val success: Boolean, val message: String)
 
 /**
+ * A module's current app identity, the starting values of the rename-package-and-app-name refactor.
+ * [packageName] is the Android namespace, or for another module the package its sources share; null when
+ * there is none to rename. [appName] is the launcher label's text, null when the module has none.
+ * [applicationId] is the app's id as built (null for a non-app module).
+ */
+data class UiAppIdentity(
+    val module: String,
+    val packageName: String?,
+    val appName: String?,
+    val applicationId: String?,
+)
+
+/** A rename of [module]'s package and/or app name. A null field leaves that part alone. [changeApplicationId]
+ *  moves the app's id with the package; off, the app keeps the id it has. */
+data class UiAppRenameRequest(
+    val module: String,
+    val newPackage: String?,
+    val newAppName: String?,
+    val changeApplicationId: Boolean = true,
+)
+
+/** What a rename would do: [files] (workspace-relative) that change, [moved] of them by changing directory,
+ *  and [notes] the user should read first. [error] set means the request can't run, and nothing else is. */
+data class UiAppRenamePreview(
+    val error: String? = null,
+    val files: List<String> = emptyList(),
+    val moved: Int = 0,
+    val notes: List<String> = emptyList(),
+)
+
+/** A finished rename. [movedPaths] maps each moved file's old absolute path to its new one, so open editor
+ *  tabs can follow. */
+data class UiAppRenameResult(
+    val success: Boolean,
+    val message: String,
+    val movedPaths: Map<String, String> = emptyMap(),
+)
+
+/**
  * The Android `buildFeatures` of one module — the toggles shown on the Build Features tab. Null when the
  * module is not an Android module (the tab then explains build features apply only to Android modules).
  */
@@ -1847,6 +1892,10 @@ data class UiInlayHint(
     val paddingRight: Boolean = false,
 ) {
     val text: String get() = parts.joinToString("") { it.text }
+
+    /** Whether the hint belongs to the text before it (a type after a name, a chain's type at its line end)
+     *  rather than the text after it (a parameter name before its argument); see `InlayPiece`. */
+    val relatesToPreceding: Boolean get() = kind == UiInlayKind.Type || kind == UiInlayKind.Chaining
 }
 
 // ---------------------------------------------------------------------------
@@ -2041,6 +2090,8 @@ data class UiSettings(
     val alwaysShowToolWindowActions: Boolean = false,
     /** Open a run's terminal full screen instead of docking it in the wide layout. */
     val runFullScreen: Boolean = false,
+    /** Date-windowed seasonal touches (Halloween's bats and Home card); off turns every season off. */
+    val seasonalTouches: Boolean = true,
     val editorFontScale: Float = 1f,
     /** "jetbrains" (bundled JetBrains Mono) | "monospace" (system monospace). */
     val codeFont: String = "jetbrains",
@@ -2062,6 +2113,8 @@ data class UiSettings(
     val wrapIndent: Boolean = true,
     /** Draggable bar along the editor's bottom edge while a line runs past the view; none when [wordWrap]. */
     val horizontalScrollbar: Boolean = true,
+    /** "line" | "block" | "underline" | "candle" (the editor's `CaretStyle` ids). */
+    val caretStyle: String = "line",
     /** Free (two-axis) touch scrolling: a single drag pans both axes (off = orientation-locked). */
     val twoAxisScroll: Boolean = true,
     /** Two-finger pinch zooms the code font. */
@@ -2088,12 +2141,13 @@ data class UiSettings(
  * [Dynamic] follows the device wallpaper (Material You, Android 12+; falls back to Violet elsewhere). A
  * preset / Custom always overrides wallpaper dynamic color.
  */
-enum class UiAccent { Dynamic, Lime, Violet, Teal, Orange, Custom }
+enum class UiAccent { Dynamic, Lime, Violet, Teal, Orange, Pumpkin, Custom }
 
 /**
  * A per-language code style profile the Code Style screen edits. Values are plain strings/ints/bools (preset,
  * brace style, and wrap modes are string ids) so the DTO stays transport-neutral; the host maps it to the
- * formatter's style. The Kotlin profile honors only indentation / tabs / blank-lines; the rest are Java-only.
+ * formatter's style. The Kotlin profile honors only indentation / tabs / blank-lines; the rest are Java-only,
+ * except the `xml*` fields, which only the XML profile reads (alongside indentation / tabs / width / blank-lines).
  */
 data class UiCodeStyle(
     val preset: String = "google",
@@ -2123,6 +2177,12 @@ data class UiCodeStyle(
     val spaceAfterTypeCast: Boolean = true,
     val formatComments: Boolean = true,
     val wrapComments: Boolean = false,
+    /** Android Studio's per-file-type layout for resource and manifest files. */
+    val xmlAndroidConventions: Boolean = true,
+    /** Attribute wrapping for XML the Android conventions don't cover: "never" / "ifLong" / "onePerLine". */
+    val xmlWrapAttributes: String = "ifLong",
+    val xmlSpaceInEmptyTag: Boolean = true,
+    val xmlRearrangeAttributes: Boolean = false,
 )
 
 /**

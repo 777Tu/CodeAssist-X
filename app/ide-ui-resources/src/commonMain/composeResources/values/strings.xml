@@ -11,7 +11,7 @@ Back up your projects to a .zip now, your source files stay safe, and you can re
     <string name="help_improve_codeassist">Help improve CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[Share anonymous performance data so we can see what's slow and what's failing, and fix the right things.
 
-We collect: your app version and device model, how long builds, indexing, and code completion take, build success/failure, and scrubbed crash reports.
+We collect: your app version and device model, how long builds, indexing, and code completion take, build success/failure, scrubbed crash reports, and when ads are shown or closed and changes to your ad settings.
 
 We never collect your code, file or project names, which features you use, or anything that identifies you. You can change this anytime under More while a project is open.]]></string>
     <string name="learn_more">Learn more</string>
@@ -62,7 +62,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="import_deps_bundled">Dependencies included</string>
     <string name="import_failed">Couldn't import the project package.</string>
     <string name="import_unrecognized_title">Can't import this file</string>
-    <string name="import_unrecognized">CodeAssist doesn't recognize this file. Choose a .caproj project package to import.</string>
+    <string name="import_unrecognized">CodeAssist doesn't recognize this file. Choose a .caproj project package or a .zip of a project to import.</string>
     <string name="import_as_title">Import as</string>
     <string name="import_as_hint">Project name</string>
     <string name="import_destination">Lands in %1$s</string>
@@ -80,8 +80,13 @@ We never collect your code, file or project names, which features you use, or an
     <string name="import_source_message">Where is the project?</string>
     <string name="import_source_folder">Project folder</string>
     <string name="import_source_folder_desc">A CodeAssist project, or an existing Gradle build</string>
-    <string name="import_source_package">Project package</string>
-    <string name="import_source_package_desc">A .caproj file shared or exported from CodeAssist</string>
+    <string name="import_source_package">Project file</string>
+    <string name="import_source_package_desc">A .zip of a project or Gradle build, or a .caproj shared from CodeAssist</string>
+    <string name="import_archive_codeassist">CodeAssist project</string>
+    <string name="import_archive_gradle">Gradle build</string>
+    <string name="import_archive_choose_message">This zip holds several projects. Which one do you want to import?</string>
+    <string name="import_archive_choose_title">Choose a project</string>
+    <string name="import_archive_empty">No CodeAssist project or Gradle build was found in that zip.</string>
     <string name="import_gradle_mode_title">Import Gradle project</string>
     <string name="import_gradle_mode_message">How should CodeAssist open this project?</string>
     <string name="import_gradle_mode_compat">Compatibility mode</string>
@@ -609,6 +614,17 @@ We never collect your code, file or project names, which features you use, or an
     <string name="home_share">Share</string>
     <string name="home_delete">Delete</string>
     <string name="home_dismiss">Dismiss</string>
+    <string name="halloween_title">Happy Halloween</string>
+    <string name="halloween_offer">Dress the IDE up for the season: a pumpkin theme, spooky editor colors and a candle for a caret.</string>
+    <string name="halloween_dress_up">Dress up</string>
+    <string name="halloween_not_now">Not now</string>
+    <string name="halloween_applied">All dressed up. You can change any of it in Settings.</string>
+    <string name="halloween_undo">Undo</string>
+    <string name="halloween_over_title">Halloween is over</string>
+    <string name="halloween_over_body">Put your theme, editor colors and caret back the way they were?</string>
+    <string name="halloween_put_back">Put it back</string>
+    <string name="halloween_keep">Keep it</string>
+    <string name="halloween_boo">Boo!</string>
     <string name="home_resume_title">Pick up where you left off</string>
     <string name="home_account_title">Account and tools</string>
     <string name="home_settings_tools">Settings and tools</string>
@@ -847,6 +863,9 @@ We never collect your code, file or project names, which features you use, or an
     <string name="home_delete_confirm_body">This removes the project and everything in it from this device. It cannot be undone.</string>
     <string name="home_delete_confirm_action">Delete project</string>
     <string name="home_cancel">Cancel</string>
+    <string name="home_rename">Rename</string>
+    <string name="home_rename_title">Rename project</string>
+    <string name="home_rename_label">Project name</string>
     <string name="publish_from_share">Publish to the store</string>
     <string name="publish_from_share_body">Share it with everyone, not just one person. A moderator reviews it first.</string>
     <string name="guide_title">How publishing works</string>
@@ -1026,6 +1045,12 @@ We never collect your code, file or project names, which features you use, or an
     <string name="run_conflict_message">A build or program is still running. Stop it and start this run instead?</string>
     <string name="run_conflict_stop_and_run">Stop and Run</string>
     <string name="run_conflict_dont_ask">Don't ask again</string>
+    <string name="unsaved_close_title">Unsaved changes</string>
+    <string name="unsaved_close_message_one">Save the changes to %1$s before closing it?</string>
+    <string name="unsaved_close_message_many">Save the changes to these files before closing them?</string>
+    <string name="unsaved_close_discard">Don't Save</string>
+    <string name="unsaved_close_dont_ask">Don't ask again</string>
+    <string name="unsaved_close_dont_ask_hint">You can change this in Settings ▸ Editor.</string>
     <!-- Build notifications: the first-build permission prompt + its in-process fallback, and the Settings re-request -->
     <string name="build_notif_title">Show build notifications?</string>
     <string name="build_notif_message">CodeAssist can run builds and your program in a separate, isolated process and show a progress notification while they run. It keeps Android from stopping the build when you switch away, and lets you follow progress. Allow notifications to turn this on.</string>
@@ -1267,6 +1292,8 @@ We never collect your code, file or project names, which features you use, or an
     <string name="storage_freed">Freed %1$s</string>
     <string name="storage_clear_sdk_title">Clear the Android SDK?</string>
     <string name="storage_clear_sdk_body">This removes the downloaded SDK components and downloads (%1$s). They'll be downloaded again the next time a build needs them.</string>
+    <string name="storage_clear_leftovers_title">Remove leftover folders?</string>
+    <string name="storage_clear_leftovers_body">This removes %1$s of folders that deleted projects left in your projects folder. None of them opens as a project.</string>
     <string name="storage_cat_dependencies_title">Dependencies</string>
     <string name="storage_cat_dependencies_desc">Downloaded libraries, re-downloaded when needed</string>
     <string name="storage_cat_index_title">Indexes</string>
@@ -1281,6 +1308,8 @@ We never collect your code, file or project names, which features you use, or an
     <string name="storage_cat_sdk_desc">SDK components and downloads, re-downloadable</string>
     <string name="storage_cat_projects_title">Project files</string>
     <string name="storage_cat_projects_desc">Your source code and project settings</string>
+    <string name="storage_cat_leftovers_title">Leftover project folders</string>
+    <string name="storage_cat_leftovers_desc">Left behind by deleted projects, safe to remove</string>
     <string name="storage_cat_other_title">Other</string>
     <string name="storage_cat_other_desc">Keystores, backups, and app data</string>
     <string name="plugins_restart_hint">Restart to apply your plugin changes.</string>
@@ -1523,6 +1552,15 @@ We never collect your code, file or project names, which features you use, or an
     <string name="modcfg_created">Created %1$s</string>
     <string name="modcfg_couldnt_create">Couldn't create %1$s</string>
     <string name="modcfg_remove_module">Remove module</string>
+    <string name="modcfg_rename_app">Rename package and app name</string>
+    <string name="modcfg_rename_app_name">App name</string>
+    <string name="modcfg_rename_app_package">Package</string>
+    <string name="modcfg_rename_app_change_id">Change the app's id too</string>
+    <string name="modcfg_rename_app_change_id_note">Off keeps %1$s, so it still updates the installed and published app.</string>
+    <string name="modcfg_rename_app_review">Review changes</string>
+    <string name="modcfg_rename_app_summary">Files that change: %1$d. Moved to the new package: %2$d.</string>
+    <string name="modcfg_rename_app_apply">Rename</string>
+    <string name="modcfg_rename_app_nothing">This module has no package or app name to rename.</string>
     <string name="modcfg_remove_module_content">Remove '%1$s' from the project? Its files are left on disk; other modules' dependencies on it are dropped.</string>
     <string name="modcfg_remove">Remove</string>
     <string name="modcfg_no_module_types">No module types available.</string>
@@ -1640,6 +1678,18 @@ We never collect your code, file or project names, which features you use, or an
     <string name="codestyle_wrap_never">Never</string>
     <string name="codestyle_wrap_if_long">If long</string>
     <string name="codestyle_wrap_one_per_line">One per line</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">XML formatting re-indents tags, wraps attributes and tidies the spacing inside tags. Text, attribute values and comments stay as written.</string>
+    <string name="codestyle_markup">Markup</string>
+    <string name="codestyle_xml_android_conventions">Android file-type rules</string>
+    <string name="codestyle_xml_android_conventions_desc">Layouts, the manifest, values and other resources are laid out the way Android Studio does</string>
+    <string name="codestyle_xml_wrap_attributes">Wrap attributes</string>
+    <string name="codestyle_xml_wrap_attributes_desc">For XML the Android rules don't cover</string>
+    <string name="codestyle_xml_space_in_empty_tag">Space in empty tag</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">`&lt;View /&gt;` instead of `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">Rearrange attributes</string>
+    <string name="codestyle_xml_rearrange_desc">Sort attributes into Android Studio's order when reformatting a whole file</string>
 
     <!-- shared common labels (reused across screens) -->
     <string name="save">Save</string>
@@ -1691,6 +1741,7 @@ We never collect your code, file or project names, which features you use, or an
     <!-- Group sub-headings -->
     <string name="set_grp_gestures">Gestures</string>
     <string name="set_grp_keyboard">Keyboard</string>
+    <string name="set_grp_tabs">Tabs</string>
     <string name="set_grp_preview_sandbox">Preview sandbox</string>
     <string name="set_grp_privacy">Privacy</string>
     <string name="set_grp_storage">Storage</string>
@@ -1737,6 +1788,11 @@ We never collect your code, file or project names, which features you use, or an
     <string name="set_editor_pinch_desc">Pinch with two fingers to change the code font size</string>
     <string name="set_editor_kbd_suggest">Keyboard suggestions</string>
     <string name="set_editor_kbd_suggest_desc">Let the soft keyboard autocorrect, suggest, and auto-space (a normal keyboard). Turn off for raw code input, so a typed '.' doesn't get an auto-inserted space, at the cost of the suggestion strip.</string>
+    <string name="set_editor_close_unsaved">Closing a tab with unsaved changes</string>
+    <string name="set_editor_close_unsaved_desc">Ask first, or always save or discard the changes without asking</string>
+    <string name="set_editor_close_unsaved_ask">Ask</string>
+    <string name="set_editor_close_unsaved_save">Save</string>
+    <string name="set_editor_close_unsaved_discard">Don't save</string>
     <!-- Code Completion -->
     <string name="set_completion_auto">Auto-show suggestions</string>
     <string name="set_completion_auto_desc">Pop the list up while typing (off = Ctrl-Space only)</string>
@@ -1785,7 +1841,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="set_br_dexfork">Max concurrent dex forks</string>
     <!-- Privacy &amp; Data -->
     <string name="set_privacy_analytics">Share performance analytics</string>
-    <string name="set_privacy_analytics_desc">Anonymous performance metrics only — never your code or file names</string>
+    <string name="set_privacy_analytics_desc">Anonymous performance and ad metrics only, never your code or file names</string>
     <string name="set_privacy_clear">Clear caches</string>
     <string name="set_privacy_clear_desc">Free regenerable dependency / language / preview caches (never source)</string>
     <string name="set_privacy_clear_btn">Clear</string>
@@ -1908,6 +1964,43 @@ We never collect your code, file or project names, which features you use, or an
     <string name="icons_reference">Reference</string>
     <string name="icons_app_icon_short">App icon</string>
     <string name="icons_no_repositories">No icon libraries are registered.</string>
+    <string name="icons_add_as">Add as</string>
+    <string name="icons_add_count">Add %1$d to project</string>
+    <string name="icons_batch_added">Added %1$d</string>
+    <string name="icons_batch_existing">%1$d already in the project</string>
+    <string name="icons_batch_failed">Couldn't add %1$s</string>
+    <string name="icons_copy_to">Copy to another folder</string>
+    <string name="icons_delete">Delete</string>
+    <string name="icons_delete_title">Delete %1$s?</string>
+    <string name="icons_delete_body">Its files are removed from every folder that declares it (%1$d in all).</string>
+    <string name="icons_delete_body_used">Its files are removed from every folder that declares it (%1$d in all). It is still used in %2$d places, and those will stop building.</string>
+    <string name="icons_edit_settings">Change how it is added</string>
+    <string name="icons_finding_usages">Looking for usages…</string>
+    <string name="icons_long_press_hint">Long-press icons to add several at once.</string>
+    <string name="icons_matches_in">%1$d in %2$s</string>
+    <string name="icons_more_actions">More actions</string>
+    <string name="icons_open_file">Open file</string>
+    <string name="icons_rename">Rename</string>
+    <string name="icons_rename_title">Rename %1$s</string>
+    <string name="icons_rename_note">Its files in every folder, and every reference to it, are renamed too.</string>
+    <string name="icons_selected_count">%1$d selected</string>
+    <string name="icons_unused">Not used anywhere</string>
+    <string name="icons_usages_title">Where %1$s is used</string>
+    <string name="icons_used_in">Used in %1$d places</string>
+    <string name="icons_used_once">Used in 1 place</string>
+    <string name="appicon_advanced">Files and outputs</string>
+    <string name="appicon_bg_colour">Colour</string>
+    <string name="appicon_bg_gradient">Gradient</string>
+    <string name="appicon_bg_image">Image</string>
+    <string name="appicon_custom_colour">Custom colour</string>
+    <string name="appicon_gradient_start">From</string>
+    <string name="appicon_gradient_end">To</string>
+    <string name="appicon_gradient_angle">Direction</string>
+    <string name="appicon_more_images">and %1$d PNG images</string>
+    <string name="appicon_pick_foreground">Choose the foreground</string>
+    <string name="appicon_pick_background">Choose the background</string>
+    <string name="appicon_run">Run the app</string>
+    <string name="appicon_written">%1$d files written</string>
 
     <!-- Built-in UI actions: More-menu rows and command-palette navigation commands -->
     <string name="action_close_project">Close project</string>

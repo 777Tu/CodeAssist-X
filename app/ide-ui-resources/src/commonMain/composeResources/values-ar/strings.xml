@@ -11,7 +11,7 @@
     <string name="help_improve_codeassist">المساعدة في تحسين CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[شارِك بيانات الأداء مجهولة الهوية حتى نتمكن من معرفة ما هو بطيء وما يفشل، وإصلاح الأشياء الصحيحة.
 
-نجمع: إصدار التطبيق ونموذج الجهاز، والوقت الذي تستغرقه عمليات البناء والفهرسة وإكمال الكود، ونجاح/فشل البناء، وتقارير العطل المنظفة.
+نجمع: إصدار التطبيق ونموذج الجهاز، والوقت الذي تستغرقه عمليات البناء والفهرسة وإكمال الكود، ونجاح/فشل البناء، وتقارير العطل المنظفة، ومتى تُعرض الإعلانات أو تُغلق والتغييرات على إعدادات الإعلانات لديك.
 
 لا نجمع مطلقًا الكود أو أسماء الملفات أو المشاريع الخاصة بك، أو الميزات التي تستخدمها، أو أي شيء يحدد هويتك. يمكنك تغيير هذا في أي وقت تحت "المزيد" أثناء فتح المشروع.]]></string>
     <string name="learn_more">معرفة المزيد</string>
@@ -62,7 +62,7 @@
     <string name="import_deps_bundled">المكتبات المضمنة</string>
     <string name="import_failed">تعذر استيراد حزمة المشروع.</string>
     <string name="import_unrecognized_title">تعذر استيراد هذا الملف</string>
-    <string name="import_unrecognized">لا يتعرف CodeAssist على هذا الملف. اختر حزمة مشروع .caproj للاستيراد.</string>
+    <string name="import_unrecognized">لا يتعرف CodeAssist على هذا الملف. اختر حزمة مشروع .caproj أو ملف .zip لمشروع للاستيراد.</string>
     <string name="import_as_title">استيراد باسم</string>
     <string name="import_as_hint">اسم المشروع</string>
     <string name="import_destination">سيوضع في %1$s</string>
@@ -80,8 +80,13 @@
     <string name="import_source_message">أين يوجد المشروع؟</string>
     <string name="import_source_folder">مجلد المشروع</string>
     <string name="import_source_folder_desc">مشروع CodeAssist، أو بناء Gradle موجود</string>
-    <string name="import_source_package">حزمة المشروع</string>
-    <string name="import_source_package_desc">ملف ‎.caproj تمت مشاركته أو تصديره من CodeAssist</string>
+    <string name="import_source_package">ملف المشروع</string>
+    <string name="import_source_package_desc">ملف ‎.zip لمشروع أو بناء Gradle، أو ملف ‎.caproj تمت مشاركته من CodeAssist</string>
+    <string name="import_archive_codeassist">مشروع CodeAssist</string>
+    <string name="import_archive_gradle">بناء Gradle</string>
+    <string name="import_archive_choose_message">يحتوي ملف zip هذا على عدة مشاريع. أيها تريد استيراده؟</string>
+    <string name="import_archive_choose_title">اختر مشروعًا</string>
+    <string name="import_archive_empty">لم يُعثر على مشروع CodeAssist أو بناء Gradle في ملف zip هذا.</string>
     <string name="import_gradle_mode_title">استيراد مشروع Gradle</string>
     <string name="import_gradle_mode_message">كيف ينبغي أن يفتح CodeAssist هذا المشروع؟</string>
     <string name="import_gradle_mode_compat">وضع التوافق</string>
@@ -655,6 +660,17 @@
     <string name="home_share">مشاركة</string>
     <string name="home_delete">حذف</string>
     <string name="home_dismiss">تجاهل</string>
+    <string name="halloween_title">هالوين سعيد</string>
+    <string name="halloween_offer">ألبِس بيئة التطوير زيّ الموسم: سمة اليقطين، وألوان محرر مخيفة، وشمعة بدلًا من المؤشر.</string>
+    <string name="halloween_dress_up">تزيين</string>
+    <string name="halloween_not_now">ليس الآن</string>
+    <string name="halloween_applied">اكتمل التزيين. يمكنك تغيير أي شيء من الإعدادات.</string>
+    <string name="halloween_undo">تراجع</string>
+    <string name="halloween_over_title">انتهى الهالوين</string>
+    <string name="halloween_over_body">هل تريد إعادة السمة وألوان المحرر والمؤشر كما كانت؟</string>
+    <string name="halloween_put_back">إعادتها</string>
+    <string name="halloween_keep">الإبقاء عليها</string>
+    <string name="halloween_boo">بوو!</string>
     <string name="home_resume_title">تابع من حيث توقفت</string>
     <string name="home_account_title">الحساب والأدوات</string>
     <string name="home_settings_tools">الإعدادات والأدوات</string>
@@ -890,6 +906,9 @@
     <string name="home_delete_confirm_body">يزيل هذا المشروع وكل ما فيه من هذا الجهاز. لا يمكن التراجع عن ذلك.</string>
     <string name="home_delete_confirm_action">حذف المشروع</string>
     <string name="home_cancel">إلغاء</string>
+    <string name="home_rename">إعادة التسمية</string>
+    <string name="home_rename_title">إعادة تسمية المشروع</string>
+    <string name="home_rename_label">اسم المشروع</string>
     <string name="publish_from_share">النشر في المتجر</string>
     <string name="publish_from_share_body">شاركه مع الجميع، لا مع شخص واحد فقط. يراجعه مشرف أولًا.</string>
     <string name="guide_title">كيف يعمل النشر</string>
@@ -1072,6 +1091,12 @@
     <string name="run_conflict_message">لا يزال هناك بناء أو برنامج قيد التشغيل. هل تريد إيقافه وبدء هذا التشغيل بدلاً منه؟</string>
     <string name="run_conflict_stop_and_run">إيقاف وتشغيل</string>
     <string name="run_conflict_dont_ask">عدم السؤال مرة أخرى</string>
+    <string name="unsaved_close_title">تغييرات غير محفوظة</string>
+    <string name="unsaved_close_message_one">هل تريد حفظ التغييرات في %1$s قبل إغلاقه؟</string>
+    <string name="unsaved_close_message_many">هل تريد حفظ التغييرات في هذه الملفات قبل إغلاقها؟</string>
+    <string name="unsaved_close_discard">عدم الحفظ</string>
+    <string name="unsaved_close_dont_ask">عدم السؤال مرة أخرى</string>
+    <string name="unsaved_close_dont_ask_hint">يمكنك تغيير ذلك من الإعدادات ◂ المحرر.</string>
     <!-- Build notifications: the first-build permission prompt + its in-process fallback, and the Settings re-request -->
     <string name="build_notif_title">عرض إشعارات البناء؟</string>
     <string name="build_notif_message">يمكن لـ CodeAssist تشغيل عمليات البناء وبرنامجك في عملية منفصلة ومعزولة وعرض إشعار تقدّم أثناء تشغيلها. يمنع هذا Android من إيقاف البناء عند التبديل إلى تطبيق آخر، ويتيح لك متابعة التقدّم. اسمح بالإشعارات لتفعيل هذا.</string>
@@ -1314,6 +1339,8 @@
     <string name="storage_freed">تم تحرير %1$s</string>
     <string name="storage_clear_sdk_title">مسح حزمة Android SDK؟</string>
     <string name="storage_clear_sdk_body">يزيل هذا مكوّنات SDK المنزّلة والتنزيلات (%1$s). وستُنزَّل مرة أخرى في المرة القادمة التي يحتاجها فيها بناء.</string>
+    <string name="storage_clear_leftovers_title">إزالة المجلدات المتبقية؟</string>
+    <string name="storage_clear_leftovers_body">يزيل هذا %1$s من المجلدات التي تركتها المشاريع المحذوفة في مجلد مشاريعك. لا يُفتح أي منها كمشروع.</string>
     <string name="storage_cat_dependencies_title">التبعيات</string>
     <string name="storage_cat_dependencies_desc">مكتبات منزّلة، يُعاد تنزيلها عند الحاجة</string>
     <string name="storage_cat_index_title">الفهارس</string>
@@ -1328,6 +1355,8 @@
     <string name="storage_cat_sdk_desc">مكوّنات SDK والتنزيلات، يمكن تنزيلها مجددًا</string>
     <string name="storage_cat_projects_title">ملفات المشاريع</string>
     <string name="storage_cat_projects_desc">شفرتك المصدرية وإعدادات مشاريعك</string>
+    <string name="storage_cat_leftovers_title">مجلدات مشاريع متبقية</string>
+    <string name="storage_cat_leftovers_desc">تركتها المشاريع المحذوفة، ويمكن إزالتها بأمان</string>
     <string name="storage_cat_other_title">أخرى</string>
     <string name="storage_cat_other_desc">ملفات المفاتيح والنسخ الاحتياطية وبيانات التطبيق</string>
     <string name="plugins_restart_hint">أعد التشغيل لتطبيق تغييرات الإضافات.</string>
@@ -1571,6 +1600,15 @@
     <string name="modcfg_created">تم إنشاء %1$s</string>
     <string name="modcfg_couldnt_create">تعذّر إنشاء %1$s</string>
     <string name="modcfg_remove_module">إزالة الوحدة</string>
+    <string name="modcfg_rename_app">إعادة تسمية الحزمة واسم التطبيق</string>
+    <string name="modcfg_rename_app_name">اسم التطبيق</string>
+    <string name="modcfg_rename_app_package">الحزمة</string>
+    <string name="modcfg_rename_app_change_id">تغيير معرّف التطبيق أيضًا</string>
+    <string name="modcfg_rename_app_change_id_note">عند الإيقاف يبقى %1$s، فيستمر تحديث التطبيق المثبّت والمنشور.</string>
+    <string name="modcfg_rename_app_review">مراجعة التغييرات</string>
+    <string name="modcfg_rename_app_summary">الملفات التي ستتغير: %1$d. المنقولة إلى الحزمة الجديدة: %2$d.</string>
+    <string name="modcfg_rename_app_apply">إعادة التسمية</string>
+    <string name="modcfg_rename_app_nothing">لا تحتوي هذه الوحدة على حزمة أو اسم تطبيق لإعادة تسميته.</string>
     <string name="modcfg_remove_module_content">إزالة "%1$s" من المشروع؟ تبقى ملفاتها على القرص؛ وتُسقَط تبعيات الوحدات الأخرى عليها.</string>
     <string name="modcfg_remove">إزالة</string>
     <string name="modcfg_no_module_types">لا توجد أنواع وحدات متاحة.</string>
@@ -1688,6 +1726,18 @@
     <string name="codestyle_wrap_never">أبدًا</string>
     <string name="codestyle_wrap_if_long">إذا كان طويلاً</string>
     <string name="codestyle_wrap_one_per_line">واحد لكل سطر</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">يعيد تنسيق XML ضبط المسافات البادئة للوسوم ويلفّ السمات ويرتّب التباعد داخل الوسوم. يبقى النص وقيم السمات والتعليقات كما كُتبت.</string>
+    <string name="codestyle_markup">الترميز</string>
+    <string name="codestyle_xml_android_conventions">قواعد Android حسب نوع الملف</string>
+    <string name="codestyle_xml_android_conventions_desc">تُنسَّق التخطيطات والبيان والقيم والموارد الأخرى بالطريقة التي يتبعها Android Studio</string>
+    <string name="codestyle_xml_wrap_attributes">لف السمات</string>
+    <string name="codestyle_xml_wrap_attributes_desc">لملفات XML التي لا تشملها قواعد Android</string>
+    <string name="codestyle_xml_space_in_empty_tag">مسافة في الوسم الفارغ</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">`&lt;View /&gt;` بدلاً من `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">إعادة ترتيب السمات</string>
+    <string name="codestyle_xml_rearrange_desc">رتّب السمات وفق ترتيب Android Studio عند إعادة تنسيق ملف كامل</string>
 
     <!-- shared common labels (reused across screens) -->
     <string name="save">حفظ</string>
@@ -1738,6 +1788,7 @@
     <!-- Group sub-headings -->
     <string name="set_grp_gestures">الإيماءات</string>
     <string name="set_grp_keyboard">لوحة المفاتيح</string>
+    <string name="set_grp_tabs">علامات التبويب</string>
     <string name="set_grp_preview_sandbox">صندوق حماية المعاينة</string>
     <string name="set_grp_privacy">الخصوصية</string>
     <string name="set_grp_storage">التخزين</string>
@@ -1784,6 +1835,11 @@
     <string name="set_editor_pinch_desc">اقرص بإصبعين لتغيير حجم خط الكود</string>
     <string name="set_editor_kbd_suggest">اقتراحات لوحة المفاتيح</string>
     <string name="set_editor_kbd_suggest_desc">اسمح للوحة المفاتيح الافتراضية بالتصحيح التلقائي والاقتراح وإضافة المسافات تلقائيًا (لوحة مفاتيح عادية). أوقفه لإدخال الكود الخام، بحيث لا تحصل النقطة "." المكتوبة على مسافة مُدرَجة تلقائيًا، مقابل فقدان شريط الاقتراحات.</string>
+    <string name="set_editor_close_unsaved">إغلاق علامة تبويب بها تغييرات غير محفوظة</string>
+    <string name="set_editor_close_unsaved_desc">السؤال أولاً، أو الحفظ أو تجاهل التغييرات دائمًا دون سؤال</string>
+    <string name="set_editor_close_unsaved_ask">السؤال</string>
+    <string name="set_editor_close_unsaved_save">الحفظ</string>
+    <string name="set_editor_close_unsaved_discard">عدم الحفظ</string>
     <!-- Code Completion -->
     <string name="set_completion_auto">إظهار الاقتراحات تلقائيًا</string>
     <string name="set_completion_auto_desc">إظهار القائمة أثناء الكتابة (إيقاف = Ctrl-Space فقط)</string>
@@ -1832,7 +1888,7 @@
     <string name="set_br_dexfork">الحد الأقصى لعمليات dex المتزامنة المنفصلة</string>
     <!-- Privacy &amp; Data -->
     <string name="set_privacy_analytics">مشاركة تحليلات الأداء</string>
-    <string name="set_privacy_analytics_desc">مقاييس أداء مجهولة الهوية فقط، ولا يشمل ذلك كودك أو أسماء ملفاتك أبدًا</string>
+    <string name="set_privacy_analytics_desc">مقاييس أداء وإعلانات مجهولة الهوية فقط، ولا يشمل ذلك كودك أو أسماء ملفاتك أبدًا</string>
     <string name="set_privacy_clear">مسح الذاكرة المؤقتة</string>
     <string name="set_privacy_clear_desc">تحرير ذواكر التبعيات / اللغة / المعاينة القابلة لإعادة التوليد (لا يشمل المصدر أبدًا)</string>
     <string name="set_privacy_clear_btn">مسح</string>
@@ -1955,6 +2011,43 @@
     <string name="icons_reference">الإشارة</string>
     <string name="icons_app_icon_short">أيقونة التطبيق</string>
     <string name="icons_no_repositories">لا توجد مكتبات أيقونات مسجّلة.</string>
+    <string name="icons_add_as">الإضافة باسم</string>
+    <string name="icons_add_count">إضافة %1$d إلى المشروع</string>
+    <string name="icons_batch_added">أُضيفت %1$d</string>
+    <string name="icons_batch_existing">%1$d موجودة في المشروع مسبقًا</string>
+    <string name="icons_batch_failed">تعذّرت إضافة %1$s</string>
+    <string name="icons_copy_to">نسخ إلى مجلد آخر</string>
+    <string name="icons_delete">حذف</string>
+    <string name="icons_delete_title">حذف %1$s؟</string>
+    <string name="icons_delete_body">تُحذف ملفاته من كل مجلد يعرّفه (%1$d إجمالًا).</string>
+    <string name="icons_delete_body_used">تُحذف ملفاته من كل مجلد يعرّفه (%1$d إجمالًا). ما زال مستخدمًا في %2$d مواضع، وستتوقف عن البناء.</string>
+    <string name="icons_edit_settings">تغيير طريقة الإضافة</string>
+    <string name="icons_finding_usages">جارٍ البحث عن الاستخدامات…</string>
+    <string name="icons_long_press_hint">اضغط مطولًا على الأيقونات لإضافة عدة أيقونات معًا.</string>
+    <string name="icons_matches_in">%1$d في %2$s</string>
+    <string name="icons_more_actions">إجراءات أخرى</string>
+    <string name="icons_open_file">فتح الملف</string>
+    <string name="icons_rename">إعادة تسمية</string>
+    <string name="icons_rename_title">إعادة تسمية %1$s</string>
+    <string name="icons_rename_note">تُعاد تسمية ملفاته في كل مجلد وكل مرجع إليه أيضًا.</string>
+    <string name="icons_selected_count">تم تحديد %1$d</string>
+    <string name="icons_unused">غير مستخدم في أي مكان</string>
+    <string name="icons_usages_title">مواضع استخدام %1$s</string>
+    <string name="icons_used_in">مستخدم في %1$d مواضع</string>
+    <string name="icons_used_once">مستخدم في موضع واحد</string>
+    <string name="appicon_advanced">الملفات والمخرجات</string>
+    <string name="appicon_bg_colour">لون</string>
+    <string name="appicon_bg_gradient">تدرّج</string>
+    <string name="appicon_bg_image">صورة</string>
+    <string name="appicon_custom_colour">لون مخصّص</string>
+    <string name="appicon_gradient_start">من</string>
+    <string name="appicon_gradient_end">إلى</string>
+    <string name="appicon_gradient_angle">الاتجاه</string>
+    <string name="appicon_more_images">و%1$d صور PNG</string>
+    <string name="appicon_pick_foreground">اختيار المقدمة</string>
+    <string name="appicon_pick_background">اختيار الخلفية</string>
+    <string name="appicon_run">تشغيل التطبيق</string>
+    <string name="appicon_written">كُتبت %1$d ملفات</string>
 
     <!-- Built-in UI actions: More-menu rows and command-palette navigation commands -->
     <string name="action_close_project">إغلاق المشروع</string>

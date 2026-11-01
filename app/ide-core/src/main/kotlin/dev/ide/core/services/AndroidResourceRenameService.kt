@@ -63,6 +63,19 @@ internal class AndroidResourceRenameService(
     /** Rename the resource under the caret to [newName]; null when the caret isn't on a project resource. */
     suspend fun rename(file: Path, text: String, offset: Int, newName: String): RenameOutcome? {
         val (type, oldName) = subjectAt(file, text, offset) ?: return null
+        ctx.updateDocument(file, text)
+        return renameResource(type, oldName, newName, file)
+    }
+
+    /**
+     * Rename project resource [type]/[oldName] to [newName] everywhere it is named, from outside any editor (the
+     * Icon Manager's Rename). [anchor] is the file the rename started from, when there is one, so the outcome
+     * can report where it went.
+     */
+    suspend fun renameResource(type: ResourceType, oldName: String, newName: String, anchor: Path? = null): RenameOutcome {
+        if (!isProjectResource(type, oldName) && !onDisk(type, oldName)) {
+            return RenameOutcome(false, "'$oldName' isn't a resource of this project.")
+        }
         val name = newName.trim()
         val isFileResource = ResourceType.fromFolder(type.rClass) != null && type != ResourceType.COLOR ||
             (type == ResourceType.COLOR && files.declarations(type, sanitizeResourceName(oldName)).all { !isValuesPath(it.filePath) })
@@ -72,9 +85,10 @@ internal class AndroidResourceRenameService(
                 else "'$newName' isn't a valid resource name.")
         }
         if (name == oldName) return RenameOutcome(false, "The new name is the same as the current one.")
-        if (isProjectResource(type, name)) return RenameOutcome(false, "A ${type.rClass} resource named '$name' already exists.")
+        if (isProjectResource(type, name) || onDisk(type, name)) {
+            return RenameOutcome(false, "A ${type.rClass} resource named '$name' already exists.")
+        }
 
-        ctx.updateDocument(file, text)
         // Moves first (checked before anything is written), so a clash leaves the project untouched.
         val moves = if (isFileResource) fileMoves(type, oldName, name) else emptyList()
         moves.firstOrNull { Files.exists(it.second) }?.let { return RenameOutcome(false, "${it.second.fileName} already exists.") }
@@ -109,7 +123,7 @@ internal class AndroidResourceRenameService(
         }
 
         var newPath: Path? = null
-        val fileAbs = file.toAbsolutePath().normalize()
+        val fileAbs = anchor?.toAbsolutePath()?.normalize()
         for ((from, to) in moves) {
             runCatching {
                 Files.move(from, to)
@@ -143,6 +157,14 @@ internal class AndroidResourceRenameService(
         }
         return out
     }
+
+    /**
+     * True when a file resource [type]/[name] has a file in a project resource folder. The index is updated
+     * asynchronously, so an icon written a moment ago (the Icon Manager's import) is on disk before it is
+     * indexed; renaming it must not wait for that.
+     */
+    private fun onDisk(type: ResourceType, name: String): Boolean =
+        ResourceType.fromFolder(type.rClass) != null && fileMoves(type, name, name).isNotEmpty()
 
     private fun isValuesPath(filePath: String): Boolean =
         Paths.get(filePath).parent?.fileName?.toString()?.substringBefore('-') == "values"

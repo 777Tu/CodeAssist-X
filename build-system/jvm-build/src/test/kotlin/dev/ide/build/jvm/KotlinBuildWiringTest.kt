@@ -2,15 +2,22 @@ package dev.ide.build.jvm
 
 import dev.ide.build.BuildGoal
 import dev.ide.build.BuildRequest
+import dev.ide.build.KotlinCompilerPlugin
+import dev.ide.build.KotlinPluginLoading
+import dev.ide.build.TaskName
+import dev.ide.build.resolveFor
 import dev.ide.build.VariantSelector
 import dev.ide.build.engine.classOutputs
 import dev.ide.build.engine.kotlinOutputDir
+import dev.ide.build.engine.testKotlinOutputDir
+import dev.ide.build.jvm.test.TestJavaCompileTask
 import dev.ide.lang.kotlin.compile.IncrementalKotlinCompiler
 import dev.ide.model.BuildSystemId
 import dev.ide.model.ContentRole
 import dev.ide.model.DependencyScope
 import dev.ide.model.FacetCodecRegistry
 import dev.ide.model.FacetTemplate
+import dev.ide.model.Module
 import dev.ide.model.ModuleId
 import dev.ide.model.ModuleType
 import dev.ide.model.ModuleTypeRegistry
@@ -22,8 +29,10 @@ import dev.ide.platform.PluginId
 import dev.ide.platform.impl.PlatformCore
 import dev.ide.testkit.testEnv
 import dev.ide.testkit.writeSource
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import dev.ide.model.impl.open
 
@@ -63,6 +72,30 @@ class KotlinBuildWiringTest {
         return store to store.workspace.projects.single()
     }
 
+    /** A plugin whose jars would be loaded at runtime is never applied: only bundled compiler plugins run. */
+    @Test
+    @Suppress("DEPRECATION")
+    fun aRuntimeLoadedCompilerPluginIsNeverApplied() {
+        testEnv("kt-runtime-plugin") { env ->
+            val (_, project) = buildWorkspace(env.dir, env.platform)
+            val module = project.modules.single()
+            fun plugin(id: String, how: KotlinPluginLoading) = object : KotlinCompilerPlugin {
+                override val pluginId = id
+                override val loading = how
+                override fun appliesTo(module: Module, classpath: List<Path>) = true
+                override fun classpath(module: Module) = listOf(env.dir.resolve("$id.jar"))
+                override fun options(module: Module) = listOf("$id:k=v")
+            }
+            val resolved = listOf(
+                plugin("bundled", KotlinPluginLoading.COMPILE_CLASSPATH),
+                plugin("downloaded", KotlinPluginLoading.RUNTIME_REGISTRAR),
+            ).resolveFor(module, emptyList())
+            assertEquals(listOf(env.dir.resolve("bundled.jar")), resolved.classpaths)
+            assertEquals(listOf("bundled:k=v"), resolved.options)
+            assertEquals(emptyList(), resolved.runtimeClasspaths)
+        }
+    }
+
     @Test
     fun compileKotlinIsWiredBeforeCompileJavaAndItsOutputIsPackaged() {
         testEnv("kt-wiring") { env ->
@@ -89,6 +122,23 @@ class KotlinBuildWiringTest {
                 "the module's kotlin-classes output must be part of its class outputs (so it is packaged into " +
                     "the jar and joins the run/dex runtime classpath)",
             )
+        }
+    }
+
+    /**
+     * `compileTestJava` compiles against the Kotlin test output as one classpath entry. Appended with a bare `+`, a
+     * Path binds `plus(Iterable)` and joins as its name segments instead: dropped here, and on device (working dir
+     * `/`) the first segment resolved to `/storage`, which the incremental compiler then failed to walk.
+     */
+    @Test
+    fun compileTestJavaSeesTheKotlinTestOutput() {
+        testEnv("kt-test-classpath") { env ->
+            val (_, project) = buildWorkspace(env.dir, env.platform)
+            val app = project.modules.single()
+            val kotlinTestOut = Files.createDirectories(testKotlinOutputDir(app))
+            val task = TestJavaCompileTask(app, TaskName(":app:compileTestJava"), bootClasspath = emptyList())
+            val declared = task.inputs.declaredPaths()
+            assertTrue(kotlinTestOut.toAbsolutePath().normalize().toString() in declared, "declared: $declared")
         }
     }
 

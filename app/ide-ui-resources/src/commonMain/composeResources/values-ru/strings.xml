@@ -11,7 +11,7 @@
     <string name="help_improve_codeassist">Помочь улучшить CodeAssist</string>
     <string name="help_improve_codeassist_content"><![CDATA[Делитесь анонимными данными о производительности, чтобы мы могли видеть задержки и сбои и исправлять нужные вещи.
 
-Мы собираем: версию приложения и модель устройства, время сборки, индексации и автодополнения кода, статус сборки и очищенные отчеты о сбоях.
+Мы собираем: версию приложения и модель устройства, время сборки, индексации и автодополнения кода, статус сборки, очищенные отчеты о сбоях, а также когда реклама показывается или закрывается и изменения ваших настроек рекламы.
 
 Мы никогда не собираем ваш код, имена файлов или проектов, используемые функции или что-либо, что идентифицирует вас. Вы можете изменить это в любое время в разделе «Еще» при открытом проекте.]]></string>
     <string name="learn_more">Подробнее</string>
@@ -61,7 +61,7 @@
     <string name="import_deps_bundled">Зависимости включены</string>
     <string name="import_failed">Не удалось импортировать пакет проекта.</string>
     <string name="import_unrecognized_title">Не удалось импортировать файл</string>
-    <string name="import_unrecognized">CodeAssist не распознает этот файл. Выберите пакет проекта .caproj для импорта.</string>
+    <string name="import_unrecognized">CodeAssist не распознает этот файл. Выберите пакет проекта .caproj или .zip-архив проекта для импорта.</string>
 
     <string name="export_title">Экспорт проекта</string>
     <string name="export_intro">Упакуйте проект в файл .caproj, которым можно поделиться с кем угодно.</string>
@@ -472,6 +472,12 @@
     <string name="run_conflict_message">Сборка или программа всё ещё выполняется. Остановить её и запустить вместо неё?</string>
     <string name="run_conflict_stop_and_run">Остановить и запустить</string>
     <string name="run_conflict_dont_ask">Больше не спрашивать</string>
+    <string name="unsaved_close_title">Несохранённые изменения</string>
+    <string name="unsaved_close_message_one">Сохранить изменения в %1$s перед закрытием?</string>
+    <string name="unsaved_close_message_many">Сохранить изменения в этих файлах перед закрытием?</string>
+    <string name="unsaved_close_discard">Не сохранять</string>
+    <string name="unsaved_close_dont_ask">Больше не спрашивать</string>
+    <string name="unsaved_close_dont_ask_hint">Это можно изменить в Настройки ▸ Редактор.</string>
     <string name="build_notif_title">Показывать уведомления о сборке?</string>
     <string name="build_notif_message">CodeAssist может выполнять сборки и вашу программу в отдельном изолированном процессе и показывать уведомление о ходе выполнения. Это не даёт Android останавливать сборку, когда вы переключаетесь на другое приложение, и позволяет следить за прогрессом. Разрешите уведомления, чтобы включить эту функцию.</string>
     <string name="build_notif_not_now">Не сейчас</string>
@@ -835,6 +841,15 @@
     <string name="modcfg_created">Создано: %1$s</string>
     <string name="modcfg_couldnt_create">Не удалось создать %1$s</string>
     <string name="modcfg_remove_module">Удалить модуль</string>
+    <string name="modcfg_rename_app">Переименовать пакет и приложение</string>
+    <string name="modcfg_rename_app_name">Название приложения</string>
+    <string name="modcfg_rename_app_package">Пакет</string>
+    <string name="modcfg_rename_app_change_id">Изменить и идентификатор приложения</string>
+    <string name="modcfg_rename_app_change_id_note">Если выключено, остаётся %1$s, и обновляется установленное и опубликованное приложение.</string>
+    <string name="modcfg_rename_app_review">Просмотреть изменения</string>
+    <string name="modcfg_rename_app_summary">Изменится файлов: %1$d. Перемещено в новый пакет: %2$d.</string>
+    <string name="modcfg_rename_app_apply">Переименовать</string>
+    <string name="modcfg_rename_app_nothing">У этого модуля нет пакета или названия приложения для переименования.</string>
     <string name="modcfg_remove_module_content">Удалить «%1$s» из проекта? Его файлы останутся на диске; зависимости других модулей от него будут удалены.</string>
     <string name="modcfg_remove">Удалить</string>
     <string name="modcfg_no_module_types">Нет доступных типов модулей.</string>
@@ -948,6 +963,18 @@
     <string name="codestyle_wrap_never">Никогда</string>
     <string name="codestyle_wrap_if_long">Если длинная</string>
     <string name="codestyle_wrap_one_per_line">По одному на строку</string>
+    <string name="codestyle_lang_xml">XML</string>
+    <string name="codestyle_preset_android_studio">Android Studio</string>
+    <string name="codestyle_xml_note">Форматирование XML выравнивает отступы тегов, переносит атрибуты и упорядочивает пробелы внутри тегов. Текст, значения атрибутов и комментарии остаются в исходном виде.</string>
+    <string name="codestyle_markup">Разметка</string>
+    <string name="codestyle_xml_android_conventions">Правила Android по типу файла</string>
+    <string name="codestyle_xml_android_conventions_desc">Макеты, манифест, значения и другие ресурсы оформляются так же, как в Android Studio</string>
+    <string name="codestyle_xml_wrap_attributes">Перенос атрибутов</string>
+    <string name="codestyle_xml_wrap_attributes_desc">Для XML, на который не распространяются правила Android</string>
+    <string name="codestyle_xml_space_in_empty_tag">Пробел в пустом теге</string>
+    <string name="codestyle_xml_space_in_empty_tag_desc">`&lt;View /&gt;` вместо `&lt;View/&gt;`</string>
+    <string name="codestyle_xml_rearrange">Упорядочивать атрибуты</string>
+    <string name="codestyle_xml_rearrange_desc">Сортировать атрибуты в порядке Android Studio при форматировании всего файла</string>
     <string name="save">Сохранить</string>
     <string name="close">Закрыть</string>
     <string name="clear">Очистить</string>
@@ -986,6 +1013,7 @@
     <string name="set_page_privacy">Конфиденциальность и данные</string>
     <string name="set_grp_gestures">Жесты</string>
     <string name="set_grp_keyboard">Клавиатура</string>
+    <string name="set_grp_tabs">Вкладки</string>
     <string name="set_grp_preview_sandbox">Песочница предпросмотра</string>
     <string name="set_grp_privacy">Конфиденциальность</string>
     <string name="set_grp_storage">Хранилище</string>
@@ -1026,6 +1054,11 @@
     <string name="set_editor_pinch_desc">Сведите или разведите два пальца, чтобы изменить размер шрифта кода</string>
     <string name="set_editor_kbd_suggest">Подсказки клавиатуры</string>
     <string name="set_editor_kbd_suggest_desc">Разрешить экранной клавиатуре автоисправление, подсказки и автопробелы (обычная клавиатура). Выключите для ввода чистого кода, чтобы после набранной «.» не вставлялся автоматический пробел, ценой полосы подсказок.</string>
+    <string name="set_editor_close_unsaved">Закрытие вкладки с несохранёнными изменениями</string>
+    <string name="set_editor_close_unsaved_desc">Сначала спрашивать или всегда сохранять либо отбрасывать изменения без вопроса</string>
+    <string name="set_editor_close_unsaved_ask">Спрашивать</string>
+    <string name="set_editor_close_unsaved_save">Сохранять</string>
+    <string name="set_editor_close_unsaved_discard">Не сохранять</string>
     <string name="set_completion_auto">Автопоказ подсказок</string>
     <string name="set_completion_auto_desc">Всплывающий список при вводе (выкл = только Ctrl-Space)</string>
     <string name="set_completion_postfix">Постфиксные шаблоны</string>
@@ -1068,7 +1101,7 @@
     <string name="set_br_dexbatch_desc">В очень большом приложении финальный этап dex-преобразования объединяет классы пакетами, чтобы не держать их все в памяти одновременно. Меньшие пакеты снижают расход памяти (хорошо для устройств с малым объёмом памяти), но немного увеличивают размер APK (меньше общего сжатия между классами); большие пакеты упаковывают плотнее, но требуют больше памяти на каждое слияние. Большинство приложений никогда до этого не доходят: настройка срабатывает лишь при нескольких тысячах классов.</string>
     <string name="set_br_dexfork">Максимум параллельных dex-процессов</string>
     <string name="set_privacy_analytics">Делиться аналитикой производительности</string>
-    <string name="set_privacy_analytics_desc">Только анонимные метрики производительности, никогда ваш код или имена файлов</string>
+    <string name="set_privacy_analytics_desc">Только анонимные метрики производительности и рекламы, никогда ваш код или имена файлов</string>
     <string name="set_privacy_clear">Очистить кеши</string>
     <string name="set_privacy_clear_desc">Освободить восстановимые кеши зависимостей / языка / предпросмотра (никогда исходники)</string>
     <string name="set_privacy_clear_btn">Очистить</string>

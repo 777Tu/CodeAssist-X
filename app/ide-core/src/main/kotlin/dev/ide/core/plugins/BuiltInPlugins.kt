@@ -4,6 +4,7 @@ import dev.ide.agent.ui.AgentUiPlugin
 import dev.ide.analysis.ACTION_PROVIDER_EP
 import dev.ide.analysis.ANALYZER_EP
 import dev.ide.analysis.MODULE_ANALYSIS
+import dev.ide.analysis.QUICK_FIX_PROVIDER_EP
 import dev.ide.android.support.ANDROID_RESOURCE_REPOSITORY
 import dev.ide.android.support.AndroidAidlProvider
 import dev.ide.android.support.AndroidBuildConfigProvider
@@ -41,6 +42,7 @@ import dev.ide.core.MODULE_ANALYZERS
 import dev.ide.core.MODULE_SERVICE
 import dev.ide.core.PROJECT_SYNC_SERVICE
 import dev.ide.core.REFACTOR_SERVICE
+import dev.ide.core.APP_RENAME_SERVICE
 import dev.ide.core.SEARCH_SERVICE
 import dev.ide.core.SIGNING_SERVICE
 import dev.ide.core.actions.BuiltInActions
@@ -72,6 +74,7 @@ import dev.ide.core.services.KotlinEditorService
 import dev.ide.core.services.LanguageFeatureService
 import dev.ide.core.services.ModuleService
 import dev.ide.core.services.RefactorService
+import dev.ide.core.services.AppRenameService
 import dev.ide.core.services.SearchService
 import dev.ide.core.services.SigningService
 import dev.ide.core.sync.ProjectSyncService
@@ -226,6 +229,7 @@ object BuiltInPlugins {
         BuiltInPlugin(JavaPsiAnalysisPlugin()),
         BuiltInPlugin(KotlinAnalysisPlugin()),
         BuiltInPlugin(PackageMismatchPlugin()),
+        BuiltInPlugin(ManifestPermissionPlugin(env)),
         BuiltInPlugin(XmlAnalysisPlugin(env)),
         BuiltInPlugin(AndroidXmlPlugin(env)),
         BuiltInPlugin(IdeCoreServicesPlugin()),
@@ -766,6 +770,25 @@ private class PackageMismatchPlugin : Plugin {
 }
 
 /**
+ * The missing-permission check's manifest fix (Java + Kotlin): add the `<uses-permission>` a call needs to the
+ * module's `AndroidManifest.xml`, which the active engine locates.
+ */
+private class ManifestPermissionPlugin(private val env: ApplicationEnvironment) : Plugin {
+    override val manifest = PluginManifest(
+        id = "manifest-permission-fix",
+        name = "Missing Permission Fix",
+        description = "Adds the permission an Android API call needs to the module's AndroidManifest.xml.",
+    )
+
+    override fun register(reg: PluginRegistration) {
+        reg.register(
+            QUICK_FIX_PROVIDER_EP,
+            dev.ide.core.analysis.ManifestPermissionFixProvider { module -> env.activeEngine?.manifestFileOf(module) },
+        )
+    }
+}
+
+/**
  * The XML editor diagnostics, wired to the active engine's per-project resource host + Android attribute
  * schema + element catalog (all three resolve `env.activeEngine` lazily). Attributed to
  * `PluginId("xml-analysis")` by the facade.
@@ -909,6 +932,9 @@ private class IdeCoreServicesPlugin : Plugin {
         reg.service(MODULE_RESOURCES, ServiceScopeLevel.WORKSPACE) { getService(ANDROID_RESOURCE_SERVICE) }
         reg.service(REFACTOR_SERVICE, ServiceScopeLevel.WORKSPACE) {
             RefactorService(getService(ENGINE_CONTEXT))
+        }
+        reg.service(APP_RENAME_SERVICE, ServiceScopeLevel.WORKSPACE) {
+            AppRenameService(getService(ENGINE_CONTEXT))
         }
         reg.service(KOTLIN_EDITOR_SERVICE, ServiceScopeLevel.WORKSPACE) {
             KotlinEditorService(getService(ENGINE_CONTEXT))

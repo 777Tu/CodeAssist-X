@@ -1,6 +1,8 @@
 package dev.ide.core.project
 
+import dev.ide.platform.ProjectFiles
 import dev.ide.model.impl.format.Json
+import dev.ide.platform.writeFileAtomically
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -163,20 +165,21 @@ object ProjectPackaging {
         return total
     }
 
-    /** Rename the project inside an unpacked workspace's `workspace.json` — the display name the picker and
-     *  the editor show. Best-effort: a workspace file it can't parse is left alone. */
-    fun renameProject(projectDir: Path, name: String) {
-        if (name.isBlank()) return
+    /** Rename the project inside a workspace's `workspace.json` — the display name the picker and the editor
+     *  show. Only `name` changes: ids, root paths, modules and settings are carried over as read. Returns false
+     *  when the file can't be read, parsed or written, which leaves it as it was. */
+    fun renameProject(projectDir: Path, name: String): Boolean {
+        if (name.isBlank()) return false
         val workspace = projectDir.resolve(WORKSPACE_REL)
         val renamed = runCatching {
-            val root = Json.parse(Files.readAllBytes(workspace).toString(Charsets.UTF_8)) as? Map<*, *> ?: return
+            val root = Json.parse(Files.readAllBytes(workspace).toString(Charsets.UTF_8)) as? Map<*, *> ?: return false
             val projects = (root["projects"] as? List<*>)?.map { project ->
                 val map = project as? Map<*, *> ?: return@map project
                 LinkedHashMap(map).apply { this["name"] = name }
-            } ?: return
+            } ?: return false
             Json.write(LinkedHashMap(root).apply { this["projects"] = projects })
-        }.getOrNull() ?: return
-        runCatching { Files.write(workspace, renamed.toByteArray(Charsets.UTF_8)) }
+        }.getOrNull() ?: return false
+        return writeFileAtomically(workspace.toString(), renamed.toByteArray(Charsets.UTF_8))
     }
 
     /** The regular files under [projectDir] that belong in a package (source-of-truth only), minus anything
@@ -242,7 +245,9 @@ object ProjectPackaging {
         if (rel == ".platform/.deps-reconciled" || rel == ".platform/.deps-unresolved") return true
         if (rel.startsWith(".platform/kotlin-stdlib-") && rel.endsWith(".jar")) return true
         if (rel.contains(".platform/caches/")) return true
-        return rel.split('/').any { it == "build" || it == "exports" || it == ".gradle" }
+        if (rel.split('/').any { it == ".gradle" }) return true
+        // Output only outside a source tree: a package named `build` or `exports` is source.
+        return ProjectFiles.isBuildOutput(rel, isDirectory = false, outputDirs = COPY_OUTPUT_DIRS, products = false)
     }
 
     /** Copy the resolved dependency cache + `libraries.json` under `deps/` so the import builds offline. */
@@ -342,3 +347,9 @@ object ProjectPackaging {
         zip.closeEntry()
     }
 }
+
+/**
+ * Output folders a copy of the user's own project leaves out (backups, `.caproj` packages): `build/`, and the
+ * IDE's `exports/`. Only outside a source tree ([ProjectFiles]), so a package with either name survives.
+ */
+internal val COPY_OUTPUT_DIRS: Set<String> = setOf("build", "exports")
