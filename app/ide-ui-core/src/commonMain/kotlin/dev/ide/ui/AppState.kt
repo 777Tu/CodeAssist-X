@@ -1,5 +1,6 @@
 package dev.ide.ui
 
+import dev.ide.ui.backend.UiFeatures
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -54,13 +55,15 @@ import kotlin.time.Duration.Companion.milliseconds
  * Top-level screens, ordered by depth so the transition helper can infer direction: a move to a
  * higher-ordinal screen animates "forward" (deeper), a lower one "back".
  */
-enum class Screen { Projects, CreateProject, ImportProject, ExportProject, Editor, Hub, Run, ModuleConfig, SdkManager, KeystoreManager, KeystoreCreate, KeystoreImport, IconManager, AppIconStudio, Settings, CodeStyle, ColorScheme, EditorSymbols, Plugins, Storage, LessonTrack, LessonPlayer, ChallengePlayer, ChallengeBoard, StoreItem, SubmitProject, PublishingGuide, PublisherProfile, You, Moderation, PluginScreen }
+enum class Screen { Projects, CreateProject, ImportProject, ExportProject, Editor, Hub, Run, ModuleConfig, SdkManager, KeystoreManager, KeystoreCreate, KeystoreImport, IconManager, AppIconStudio, Settings, CodeStyle, ColorScheme, EditorSymbols, Plugins, Storage, LearnPath, LessonTrack, LessonPlayer, LearnDiscussion, LearnThread, LearnAsk, LearnSolutions, ChallengePlayer, ChallengeBoard, StoreItem, SubmitProject, PublishingGuide, PublisherProfile, You, Moderation, PluginScreen }
 
 /**
  * The home screen's bottom-navigation destinations (the landing surface shown on [Screen.Projects]): the
- * project picker, the Projects Store (browse/install templates + samples), and Learn (docs + tutorials).
+ * project picker, the Projects Store (browse/install templates + samples), the AI agent (create an app or chat
+ * about a project; shown only when the agent plugin contributes it), Learn (docs + tutorials), and the daily
+ * challenge. Declared in display order.
  */
-enum class HomeTab { Projects, Store, Learn, Challenges }
+enum class HomeTab { Projects, Store, Ai, Learn, Challenges }
 
 /**
  * The phone bottom-nav slots (the compact counterpart to the desktop activity rail). Each maps to opening a
@@ -77,6 +80,7 @@ object LeftPanelId {
     const val SEARCH = "search"
     const val STRUCTURE = "structure"
     const val SOURCE = "source"
+    const val BOOKMARKS = "bookmarks"
 }
 
 /**
@@ -314,6 +318,69 @@ class IdeUiState(
         launch { persistTreeExpansion() }
         launch { syncExternalWrites() }
         launch { reanalyzeWhenInspectionsReturn() }
+        launch { syncBookmarks() }
+    }
+
+    // ---- bookmarks ----
+
+    /** Bookmarked lines per file path, closed files included, newest state of each open tab's [EditorSession]. */
+    val bookmarks: SnapshotStateMap<String, Set<Int>> = mutableStateMapOf()
+
+    /** The app preference this project's bookmarks are kept under (one per project root); null while no project
+     *  is open. The session effects start on the home screen, before any project, where asking the backend for
+     *  the project throws. */
+    private fun bookmarksKey(): String? =
+        runCatching { backend.project.rootPath }.getOrNull()?.takeIf { it.isNotEmpty() }
+            ?.let { "bookmarks." + it.hashCode().toUInt().toString(16) }
+
+    private fun persistBookmarks(key: String) {
+        runCatching {
+            backend.settings.setPreference(key, bookmarks.entries.joinToString("\n") { (p, l) -> p + "\t" + l.sorted().joinToString(",") })
+        }
+    }
+
+    /**
+     * Keep bookmarks and the open tabs in step: a tab that opens gets its file's stored bookmarks, and a change in a
+     * tab (a toggle, or an edit that moved one) is stored and persisted. A tab's bookmarks are read from it only
+     * once they have been given to it, so a just-opened tab's empty set never wipes the stored one. The stored set
+     * is loaded once a project is open (tabs only open after one is), and again if the project changes.
+     */
+    private suspend fun syncBookmarks() {
+        val attached = HashSet<EditorSession>()
+        var loadedKey: String? = null
+        snapshotFlow { openFiles.map { Triple(it.path, it.session, it.session.bookmarks) } }.collect { tabs ->
+            val key = bookmarksKey() ?: return@collect
+            if (key != loadedKey) {
+                loadedKey = key
+                bookmarks.clear()
+                attached.clear()
+                runCatching { backend.settings.preference(key) }.getOrNull()?.lineSequence()?.forEach { row ->
+                    val path = row.substringBefore('\t')
+                    val lines = row.substringAfter('\t', "").split(',').mapNotNull { it.trim().toIntOrNull() }.toSet()
+                    if (path.isNotEmpty() && lines.isNotEmpty()) bookmarks[path] = lines
+                }
+            }
+            var changed = false
+            for ((path, session, lines) in tabs) {
+                if (attached.add(session)) {
+                    session.bookmarks = bookmarks[path].orEmpty()
+                } else if (lines != bookmarks[path].orEmpty()) {
+                    if (lines.isEmpty()) bookmarks.remove(path) else bookmarks[path] = lines
+                    changed = true
+                }
+            }
+            attached.retainAll(tabs.mapTo(HashSet()) { it.second })
+            if (changed) persistBookmarks(key)
+        }
+    }
+
+    /** Remove [path]'s bookmark on [line], whether or not the file is open. */
+    fun removeBookmark(path: String, line: Int) {
+        val open = openFiles.firstOrNull { it.path == path }
+        if (open != null) { open.session.bookmarks = open.session.bookmarks - line; return }
+        val left = bookmarks[path].orEmpty() - line
+        if (left.isEmpty()) bookmarks.remove(path) else bookmarks[path] = left
+        bookmarksKey()?.let(::persistBookmarks)
     }
 
     /**
@@ -428,6 +495,7 @@ class IdeUiState(
 
     /** Show [id] on its side, in place of whichever window was showing there. */
     fun showToolWindow(id: String) {
+        if (shownAt[sideOf(id)] != id) backend.diagnostics.countFeature(UiFeatures.toolWindow(id))
         shownAt[sideOf(id)] = id
         if (naturalSide(id) == ToolWindowSide.Left && id !in ToolWindowIds.BOTTOM) rememberLeft(id)
     }
@@ -520,6 +588,31 @@ class IdeUiState(
 
     /** RIGHT rail: tap an icon to open/switch; tap the selected one to collapse (the phone swipe routes here too). */
     fun toggleRightPanel(id: String) { selectedRightPanel = if (selectedRightPanel == id) null else id }
+
+    /**
+     * Count the user switching [path]'s tab to [mode], as the feature that view is: the Compose, layout or resource
+     * preview, the block editor, or split. Called where the user picks a view (the view switch, a preview gutter
+     * icon), not where a tab is restored into one, so a reopened session doesn't count as a use.
+     */
+    fun countViewMode(path: String, mode: EditorViewMode) {
+        val feature = when (mode) {
+            EditorViewMode.Preview -> previewFeatureOf(path)
+            EditorViewMode.Blocks -> UiFeatures.VIEW_BLOCKS
+            EditorViewMode.Split -> UiFeatures.VIEW_SPLIT
+            else -> null
+        } ?: return
+        backend.diagnostics.countFeature(feature)
+    }
+
+    private fun previewFeatureOf(path: String): String {
+        val p = path.replace('\\', '/').lowercase()
+        return when {
+            p.endsWith(".kt") -> UiFeatures.PREVIEW_COMPOSE
+            p.endsWith(".xml") && p.substringBeforeLast('/').substringAfterLast('/').substringBefore('-') == "layout" ->
+                UiFeatures.PREVIEW_LAYOUT
+            else -> UiFeatures.PREVIEW_RESOURCE
+        }
+    }
     /** Open (and switch to) a RIGHT panel — the mobile right-overlay switcher uses this. */
     fun selectRightPanel(id: String) { selectedRightPanel = id }
 
@@ -565,6 +658,12 @@ class IdeUiState(
      * and on a phone the system bars and the bottom nav too. The tool windows open when it starts are hidden
      * and come back when it ends. Not remembered across launches.
      */
+    /**
+     * True while a coding lesson runs in this editor: its banner hides the bottom bar (Search, Source, AI) so
+     * the exercise has the screen. A lesson that teaches the IDE itself turns it off, since those panels are
+     * what it is about.
+     */
+    var learnFocus by mutableStateOf(true)
     var zenMode by mutableStateOf(false)
         private set
     private var beforeZen: Map<ToolWindowSide, String> = emptyMap()
@@ -603,7 +702,13 @@ class IdeUiState(
         get() = isToolWindowShown(ToolWindowIds.BUILD)
         set(value) { if (value) showToolWindow(ToolWindowIds.BUILD) else hideToolWindow(ToolWindowIds.BUILD) }
 
-    var paletteOpen by mutableStateOf(false)
+    private var paletteOpenState by mutableStateOf(false)
+    var paletteOpen: Boolean
+        get() = paletteOpenState
+        set(value) {
+            if (value && !paletteOpenState) backend.diagnostics.countFeature(UiFeatures.COMMAND_PALETTE)
+            paletteOpenState = value
+        }
 
     /** The scope tab the palette opens on (a `PaletteFilter` name: Files, Symbols, ...); null = All. Set by the
      *  go-to shortcuts just before they open it. */
@@ -645,7 +750,7 @@ class IdeUiState(
     fun cycleTab(delta: Int) {
         if (openFiles.isEmpty()) return
         val n = openFiles.size
-        activeIndex = ((activeIndex.coerceAtLeast(0) + delta) % n + n) % n
+        selectTab(((activeIndex.coerceAtLeast(0) + delta) % n + n) % n)
     }
 
     /** Reopen the most recently closed tab that is not open again already. False when there is none. */
@@ -809,6 +914,11 @@ class IdeUiState(
     var twoAxisScrollEnabled by mutableStateOf(true)
     /** Two-finger pinch zooms the code font (Ctrl-+/-/0 always works regardless). */
     var pinchZoomEnabled by mutableStateOf(true)
+    /** Volume up / down move the caret while typing on a phone (see [dev.ide.ui.platform.VolumeKeyCaret]). */
+    var volumeKeysMoveCaret by mutableStateOf(false)
+    var inlineBlameEnabled by mutableStateOf(true)
+    /** The local-history sheet for the active file is showing. */
+    var localHistoryOpen by mutableStateOf(false)
     /** Allow the soft keyboard's autocorrect / suggestions / auto-space (off = raw code input). */
     var softKeyboardSuggestions by mutableStateOf(true)
 
@@ -891,6 +1001,8 @@ class IdeUiState(
         caretStyle = s.caretStyle
         twoAxisScrollEnabled = s.twoAxisScroll
         pinchZoomEnabled = s.pinchZoom
+        volumeKeysMoveCaret = s.volumeKeysMoveCaret
+        inlineBlameEnabled = s.inlineBlame
         softKeyboardSuggestions = s.softKeyboardSuggestions
     }
 
@@ -938,7 +1050,50 @@ class IdeUiState(
 
     /** Fire-and-forget open for UI callbacks — the file is read off the main thread ([openSuspend]). */
     fun open(path: String, name: String) {
+        recordPlace()
         scope.launch { openSuspend(path, name) }
+    }
+
+    // ---- Navigate Back / Forward ----
+
+    /** Where the user was before each jump; see [NavigationHistory]. */
+    val navHistory = NavigationHistory()
+
+    /** The place the caret is at in the active tab, or null with no tab open. */
+    private fun currentPlace(): NavPlace? = active?.let { tab ->
+        val offset = tab.session.selection.start
+        NavPlace(tab.path, offset, tab.session.doc.lineForOffset(offset.coerceIn(0, tab.session.doc.length)))
+    }
+
+    /** A jump is about to leave the current place: remember it for Navigate Back. */
+    private fun recordPlace() = navHistory.record(currentPlace())
+
+    /** Activate tab [index] as the user's choice (a tab click, the switcher, Go to tab N), which Back returns from. */
+    fun selectTab(index: Int) {
+        if (index !in openFiles.indices || index == activeIndex) return
+        recordPlace()
+        activeIndex = index
+    }
+
+    /** Return to where the user was before the last jump. False when there is nowhere to go back to. */
+    fun navigateBack(): Boolean = goTo(navHistory.back(currentPlace()))
+
+    /** Undo a [navigateBack]. False when there is nowhere to go forward to. */
+    fun navigateForward(): Boolean = goTo(navHistory.forward(currentPlace()))
+
+    /** Show [place] without recording it: the history itself is moving. A closed file is opened again. */
+    private fun goTo(place: NavPlace?): Boolean {
+        if (place == null) return false
+        if (place.path.startsWith(LIBRARY_SCHEME) && openFiles.none { it.path == place.path }) {
+            openLibrary(place.path)
+            return true
+        }
+        val name = place.path.substringAfterLast('/').substringAfterLast('\\')
+        scope.launch {
+            openSuspend(place.path, name)
+            active?.takeIf { it.path == place.path }?.session?.setCaret(place.offset) // setCaret coerces into the buffer
+        }
+        return true
     }
 
     /**
@@ -974,6 +1129,7 @@ class IdeUiState(
      *  [openLibrary] (fetch decompiled/attached-source content, open read-only) instead of a disk read. */
     fun openAt(path: String, offset: Int) {
         if (path.startsWith(LIBRARY_SCHEME)) { openLibrary(path); return }
+        recordPlace()
         val name = path.substringAfterLast('/').substringAfterLast('\\')
         scope.launch {
             openSuspend(path, name)
@@ -993,6 +1149,7 @@ class IdeUiState(
         val fqn = raw.substringBefore('#')
         val member = raw.substringAfter('#', "").ifEmpty { null }
         val contextPath = active?.path?.takeUnless { it.startsWith(LIBRARY_SCHEME) }
+        recordPlace()
         scope.launch {
             val content = withContext(ioDispatcher) {
                 runCatching { backend.editor.libraryContent(contextPath ?: fqn, fqn, forceJava) }.getOrNull()
@@ -1053,6 +1210,7 @@ class IdeUiState(
     }
 
     fun openAtLine(path: String, line: Int, column: Int) {
+        recordPlace()
         val name = path.substringAfterLast('/').substringAfterLast('\\')
         scope.launch {
             openSuspend(path, name)
@@ -1320,17 +1478,21 @@ class IdeUiState(
      * Reflect a completed project-wide rename in the open tabs. The rename wrote every reference site to
      * disk, so each clean tab is re-read (a no-op for files it didn't touch — those keep their session, undo
      * and caret). The active tab follows the backing-file rename to [newPath] when the file itself was
-     * renamed. Tabs with unsaved edits are left untouched so a rename never clobbers in-progress work.
+     * renamed. A tab with unsaved edits is reloaded only when its file is exactly its buffer with one name
+     * renamed (see [isIdentifierRenameOf]), so a rename never clobbers in-progress work.
      */
     fun reloadAfterRename(activePath: String?, newPath: String?) {
         scope.launch {
             for (f in openFiles.toList()) {
                 if (f.readOnly) continue
                 val followsFileRename = newPath != null && f.path == activePath
-                if (!followsFileRename && f.modified) continue
                 val diskPath = if (followsFileRename) newPath!! else f.path
                 val text = readTabText(diskPath) ?: continue
                 if (!followsFileRename && text == f.savedText) continue // untouched → preserve session/undo/caret
+                // A tab with unsaved edits is taken from disk only when the file is exactly its buffer with one
+                // name renamed: the rename computed its edits over that buffer and wrote the result, so nothing of
+                // the user's is lost. Anything else is a divergence that stays theirs to resolve.
+                if (!followsFileRename && f.modified && !isIdentifierRenameOf(f.text, text)) continue
                 // The read suspends, and a tab closed meanwhile shifts every index after it.
                 val i = openFiles.indexOfFirst { it.tabId == f.tabId }.takeIf { it >= 0 } ?: continue
                 val name = diskPath.substringAfterLast('/').substringAfterLast('\\')
@@ -1506,10 +1668,18 @@ class IdeUiState(
     /** Close every open tab at [path] or under it (after a delete). The file is gone, so nothing to save. */
     private fun closeTabsUnder(path: String) {
         openFiles.filter { underPath(it.path, path) }.forEach(::closeNow)
+        navHistory.forget { underPath(it, path) }
     }
 
     /** Re-point open tabs at [oldPath] (or under it, for a directory) to [newPath], re-reading from disk. */
     private suspend fun rebaseTabs(oldPath: String, newPath: String) {
+        navHistory.repath { p ->
+            when {
+                p == oldPath -> newPath
+                underPath(p, oldPath) -> newPath + p.substring(oldPath.length)
+                else -> null
+            }
+        }
         for (f in openFiles.toList()) {
             val p = f.path
             val rebased = when {
@@ -1680,3 +1850,26 @@ class PendingRun(val action: () -> Unit)
 
 /** Tabs the user is closing while they hold unsaved edits (see [IdeUiState.unsavedClose]). */
 class PendingClose(val files: List<OpenFile>)
+
+/**
+ * Whether [after] is [before] with one identifier replaced by another at some of its occurrences, and nothing
+ * else changed: what a rename applied over a tab's unsaved edits leaves on disk.
+ */
+internal fun isIdentifierRenameOf(before: String, after: String): Boolean {
+    if (before == after) return false
+    val a = IDENTIFIER_RUNS.findAll(before).map { it.value }.toList()
+    val b = IDENTIFIER_RUNS.findAll(after).map { it.value }.toList()
+    if (a.size != b.size) return false
+    var pair: Pair<String, String>? = null
+    for (i in a.indices) {
+        if (a[i] == b[i]) continue
+        val p = a[i] to b[i]
+        if (!IDENTIFIER.matches(p.first) || !IDENTIFIER.matches(p.second)) return false
+        if (pair == null) pair = p else if (pair != p) return false
+    }
+    return pair != null
+}
+
+/** Identifier runs and single other characters: the tokens [isIdentifierRenameOf] compares. */
+private val IDENTIFIER_RUNS = Regex("""[\p{L}_][\p{L}\p{N}_]*|[\s\S]""")
+private val IDENTIFIER = Regex("""[\p{L}_][\p{L}\p{N}_]*""")

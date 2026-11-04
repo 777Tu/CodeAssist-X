@@ -22,6 +22,8 @@ import dev.ide.ui.backend.AnalysisPreempted
 import dev.ide.ui.backend.EditorService
 import dev.ide.ui.backend.UiProjectIcon
 import dev.ide.ui.backend.UiResourceSwatch
+import dev.ide.ui.backend.UiUsageHighlight
+import dev.ide.ui.backend.UiHistoryVersion
 import dev.ide.ui.backend.UiAction
 import dev.ide.ui.backend.UiActionContext
 import dev.ide.ui.backend.UiActionPlaces
@@ -82,8 +84,9 @@ import dev.ide.ui.backend.UiActionEdits
 /**
  * [EditorService]: the editor-time language features for the active buffer. Runs on the shared serialized
  * engine dispatcher via the priority lanes ([BackendContext.interactive] for completion,
- * [BackendContext.background] for analysis/hints/etc.); a preemption surfaces as [AnalysisPreempted] for the
- * host to retry. Maps the framework results onto the neutral UI DTOs.
+ * [BackendContext.background] for analysis/hints/etc.). The production background lane waits out a preemption
+ * and re-runs the call, so the `EngineCanceledException` -> [AnalysisPreempted] mappings below only fire for a
+ * host whose lane surfaces preemption (tests' fakes). Maps the framework results onto the neutral UI DTOs.
  */
 /** Quiet period after a per-file pass before the project-wide sweep runs, and its preemption retry policy. */
 private const val PROJECT_ANALYSIS_DELAY_MS = 800L
@@ -164,6 +167,18 @@ internal class EditorBackend(private val ctx: BackendContext) : EditorService {
     } catch (_: EngineCanceledException) {
         emptyList()
     } // re-runs on the next caret move
+
+    // Per caret move, so the background lane: it must never preempt analysis. Preempted or failed, it answers
+    // null and the editor keeps its textual highlight; the next caret move asks again.
+    override suspend fun usageHighlights(path: String, text: String, offset: Int): List<UiUsageHighlight>? = try {
+        ctx.background(op = op("usageHighlights", path)) {
+            ctx.services.usageHighlights(Paths.get(path), text, offset)
+        }?.map {
+            UiUsageHighlight(it.range.start, it.range.end, write = it.access != dev.ide.lang.highlight.UsageAccess.READ)
+        }
+    } catch (_: EngineCanceledException) {
+        null
+    }
 
     override suspend fun fileStructure(path: String, text: String): List<UiFileSymbol> = try {
         // XML elements reuse the class/field kinds for container/leaf; the outline badges them as elements.
@@ -314,6 +329,15 @@ internal class EditorBackend(private val ctx: BackendContext) : EditorService {
      * must NOT happen is the throw escaping a UI coroutine and taking the process down, which is how this
      * surfaced in the field — one install, an unwritable project, and a crash on every save attempt.
      */
+    override suspend fun localHistory(path: String): List<UiHistoryVersion> = withContext(Dispatchers.IO) {
+        runCatching { ctx.services.localHistory.snapshots(Paths.get(path)) }.getOrDefault(emptyList())
+            .map { UiHistoryVersion(it.id, it.id, it.sizeChars) }
+    }
+
+    override suspend fun localHistoryText(path: String, id: Long): String? = withContext(Dispatchers.IO) {
+        runCatching { ctx.services.localHistory.text(Paths.get(path), id) }.getOrNull()
+    }
+
     override fun saveFile(path: String, text: String) {
         try {
             ctx.services.save(Paths.get(path), text)
@@ -404,22 +428,28 @@ internal class EditorBackend(private val ctx: BackendContext) : EditorService {
             throw AnalysisPreempted() // preempted: don't record a (misleadingly short) latency sample
         }
         scheduleProjectAnalysis(path)
-        return diagnostics.map { d ->
-            val (line, col) = lineColOf(text, d.range.start)
-            UiDiagnostic(
-                severity = when (d.severity) {
-                    Severity.ERROR -> UiSeverity.Error
-                    Severity.WARNING -> UiSeverity.Warning
-                    Severity.INFO -> UiSeverity.Info
-                    Severity.HINT -> UiSeverity.Hint
-                },
-                line = line,
-                col = col,
-                message = d.message,
-                startOffset = d.range.start,
-                endOffset = d.range.end,
-                unused = DiagnosticTag.UNUSED in d.tags,
-            )
+        if (diagnostics.isEmpty()) return emptyList()
+        // Off the caller's thread (the daemon calls from the UI thread): one line index, then a lookup per item.
+        return withContext(Dispatchers.Default) {
+            val lines = LineStarts(text)
+            diagnostics.map { d ->
+                val line = lines.line(d.range.start) + 1
+                val col = lines.column(d.range.start) + 1
+                UiDiagnostic(
+                    severity = when (d.severity) {
+                        Severity.ERROR -> UiSeverity.Error
+                        Severity.WARNING -> UiSeverity.Warning
+                        Severity.INFO -> UiSeverity.Info
+                        Severity.HINT -> UiSeverity.Hint
+                    },
+                    line = line,
+                    col = col,
+                    message = d.message,
+                    startOffset = d.range.start,
+                    endOffset = d.range.end,
+                    unused = DiagnosticTag.UNUSED in d.tags,
+                )
+            }
         }
     }
 
@@ -588,10 +618,18 @@ internal class EditorBackend(private val ctx: BackendContext) : EditorService {
 
     // ---- code actions (quick-fixes + intentions) ----
 
-    override suspend fun decorations(path: String, text: String): UiEditorDecorations {
-        // Not wrapped in `ctx.background`, unlike the analyzer-backed passes: a provider is plugin code that
-        // suspends on its own terms, so pinning it to the serialized engine worker would let one slow plugin
-        // block analysis for every open file. It is timed like a pass so it shows up in the perf timeline.
+    override suspend fun decorations(path: String, text: String): UiEditorDecorations = withContext(Dispatchers.Default) {
+        decorationsOffMain(path, text)
+    }
+
+    /**
+     * The decorations pass, on a background thread. Not on the serialized engine worker (`ctx.background`): a
+     * provider is plugin code that suspends on its own terms, so pinning it there would let one slow plugin block
+     * analysis for every open file. And not on the caller's thread either: the daemon calls from the UI thread,
+     * the run/test gutter marks parse the file (Java under the process-wide PSI parse lock the engine also holds),
+     * and the plugin contract promises providers a background thread. Timed like a pass for the perf timeline.
+     */
+    private suspend fun decorationsOffMain(path: String, text: String): UiEditorDecorations {
         val collected = try {
             timedPass("decorations", path, { it.ranges.size + it.gutter.size + it.inlays.size }) {
                 ctx.services.editorDecorations(Paths.get(path), text)
@@ -788,18 +826,6 @@ internal class EditorBackend(private val ctx: BackendContext) : EditorService {
         CodeActionKind.QUICK_FIX -> UiActionKind.QUICK_FIX
         CodeActionKind.INTENTION -> UiActionKind.INTENTION
         CodeActionKind.REFACTOR -> UiActionKind.REFACTOR
-    }
-
-    private fun lineColOf(text: String, offset: Int): Pair<Int, Int> {
-        var line = 1
-        var lineStart = 0
-        val end = offset.coerceIn(0, text.length)
-        for (i in 0 until end) {
-            if (text[i] == '\n') {
-                line++; lineStart = i + 1
-            }
-        }
-        return line to (end - lineStart + 1)
     }
 
     /** Flatten the framework's [CaretAction] to the UI's neutral [UiCaret] (null = caret at end of insert). */

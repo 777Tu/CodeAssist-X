@@ -95,6 +95,9 @@ import kotlinx.coroutines.withContext
  * layouts. The wide layout frames everything below the bar with its stripes and panes (see [frame]). When no file is open it shows a placeholder; otherwise it runs the per-file analysis + breadcrumb
  * effects and renders the active [EditorViewMode] (code / blocks / preview / split).
  */
+/** The Learn task banner while a lesson runs in this project, provided by [EditorScreen]; null otherwise. */
+internal val LocalLessonBanner = androidx.compose.runtime.staticCompositionLocalOf<(@Composable () -> Unit)?> { null }
+
 @Composable
 internal fun EditorCenter(
     state: IdeUiState,
@@ -111,6 +114,12 @@ internal fun EditorCenter(
     frame: (@Composable (editorBody: @Composable () -> Unit) -> Unit)? = null,
 ) {
     val project = state.backend.project
+    // Local history for the active tab, opened from the top bar's ⋯ menu.
+    if (state.localHistoryOpen) {
+        val file = state.active
+        if (file == null) state.localHistoryOpen = false
+        else LocalHistorySheet(state, file, onDismiss = { state.localHistoryOpen = false })
+    }
     val depsState by state.backend.deps.depsState.collectAsState()
     val depsScope = rememberCoroutineScope()
     val pluginNavigator = LocalPluginNavigator.current
@@ -224,10 +233,12 @@ internal fun EditorCenter(
                 onFind = { if (active != null) findEpoch++ },
                 onReformat = { if (active != null) formatEpoch++ },
                 onOptimizeImports = { if (active != null) optimizeImportsEpoch++ },
+                onLocalHistory = if (active != null && !active.readOnly) ({ state.localHistoryOpen = true }) else null,
                 onToggleConsole = { state.consoleOpen = !state.consoleOpen },
                 consoleOpen = state.consoleOpen,
                 rightToolIconId = rightPrimary?.iconId,
                 rightToolTitle = rightPrimary?.title ?: "",
+                rightToolBusy = rightPrimary?.busy?.invoke(state.backend) == true,
                 rightToolOpen = state.selectedRightPanel != null,
                 onToggleRightTool = { rightPrimary?.let { state.toggleRightPanel(it.id) } },
                 rightToolInBar = !state.rightStripeVisible,
@@ -259,6 +270,8 @@ internal fun EditorCenter(
             // stripes and panes (via [frame]) so the bar spans the whole window above them, IntelliJ-style.
             val editorBody: @Composable () -> Unit = {
                 Column(Modifier.fillMaxSize().background(Ide.colors.editorBg)) {
+                    // A running lesson's task banner: under the top bar, above the notices and the file tabs.
+                    LocalLessonBanner.current?.invoke()
                     DepsProgressBar(depsState) { depsScope.launch { state.backend.deps.retryDependencyResolution() } }
                     // Hoisted so the notice strip can report the count and the banner can render the cards from the
                     // same state; two holders would disagree about which warnings had been dismissed.
@@ -311,6 +324,7 @@ internal fun EditorCenter(
                         active?.let { file ->
                             staleOnDiskNotice(state, file)?.let(::add)
                             kotlinNotConfiguredNotice(state, file)?.let(::add)
+                            missingLibrariesNotice(state, file)?.let(::add)
                             readOnlyNotice(state, file)?.let(::add)
                             largeFileNotice(file)?.let(::add)
                         }
@@ -355,7 +369,7 @@ internal fun EditorCenter(
                     TabsStrip(
                         openFiles = state.openFiles,
                         activeIndex = state.activeIndex,
-                        onSelect = { state.activeIndex = it },
+                        onSelect = { state.selectTab(it) },
                         onClose = { state.close(it) },
                         onCloseOthers = { state.closeOthers(it) },
                         onCloseToRight = { state.closeToRight(it) },
@@ -400,6 +414,7 @@ internal fun EditorCenter(
                                 wordWrap = state.wordWrapEnabled,
                                 wrapIndent = state.wrapIndentEnabled,
                                 horizontalScrollbar = state.horizontalScrollbarEnabled,
+                                inlineBlame = state.inlineBlameEnabled,
                                 fontLigatures = state.fontLigaturesEnabled,
                                 caretStyle = CaretStyle.fromId(state.caretStyle),
                                 // Tapping a @Preview gutter icon switches this tab to the Preview surface, rendering that
@@ -407,6 +422,7 @@ internal fun EditorCenter(
                                 // to the breadcrumb row, so they're already visible — making the view change easy to undo.
                                 onPreview = { fn ->
                                     active.previewTarget = fn
+                                    if (active.viewMode != EditorViewMode.Preview) state.countViewMode(active.path, EditorViewMode.Preview)
                                     active.viewMode = EditorViewMode.Preview
                                 },
                                 // A plugin editor action goes through the same dispatcher as the toolbar's, so its
@@ -662,9 +678,13 @@ private fun EditorDaemonEffect(
     daemon.onDecorations = { active.session.applyDecorations(it.ranges, it.gutter, it.inlays) }
     daemon.appliesTo = { pass ->
         when (pass) {
-            // Semantic coloring + folding are Java/Kotlin; @Preview markers are Kotlin-only; diagnostics + inlay
-            // apply to every backend (they no-op for languages that don't provide them).
-            DaemonPass.SEMANTIC, DaemonPass.FOLDS ->
+            // Semantic coloring is asked of every file's backend: Java and Kotlin have highlighters, and so do XML
+            // and a plugin's language (the NDK plugin's C/C++), which this gate used to shut out by extension. A
+            // backend with no highlighter answers empty at once, so the pass costs nothing for plain text.
+            DaemonPass.SEMANTIC -> true
+            // Folding stays Java/Kotlin; @Preview markers are Kotlin-only; diagnostics + inlay apply to every
+            // backend (they no-op for languages that don't provide them).
+            DaemonPass.FOLDS ->
                 active.path.endsWith(".java") || active.path.endsWith(".kt") || active.path.endsWith(
                     ".kts"
                 )
@@ -692,7 +712,7 @@ private fun EditorDaemonEffect(
         daemon.autoReparseDelayMs = state.reparseDelayMs
         // The document is an immutable snapshot; its text is materialized only if this run survives the delay.
         val doc = active.session.doc
-        daemon.restart { doc.text }
+        daemon.restart { doc.awaitText() }
     }
     // Re-run the daemon when the workspace index finishes building. A file opened (e.g. a restored tab) while
     // the index is still building is analyzed against an incomplete classpath/symbol index and can show stale
@@ -706,7 +726,7 @@ private fun EditorDaemonEffect(
         state.backend.editor.diagnosticsInvalidated.collect { paths ->
             if (active.path in paths) {
                 val doc = active.session.doc
-                daemon.restart { doc.text }
+                daemon.restart { doc.awaitText() }
             }
         }
     }
@@ -716,7 +736,7 @@ private fun EditorDaemonEffect(
         wasIndexing = indexStatus.building
         if (prev == true && !indexStatus.building) {
             val doc = active.session.doc
-            daemon.restart { doc.text }
+            daemon.restart { doc.awaitText() }
         }
     }
 }

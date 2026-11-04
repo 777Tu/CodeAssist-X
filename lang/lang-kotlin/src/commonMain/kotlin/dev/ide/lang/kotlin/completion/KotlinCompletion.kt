@@ -1,5 +1,6 @@
 package dev.ide.lang.kotlin.completion
 
+import dev.ide.lang.kotlin.KotlinQuickFixes
 import dev.ide.kotlin.syntax.psi.KtAnnotationEntry
 import dev.ide.kotlin.syntax.psi.KtBinaryExpression
 import dev.ide.kotlin.syntax.psi.KtBlockExpression
@@ -188,6 +189,12 @@ class KotlinCompletion(
         kdocCompletion(kt, markerLeaf, original, offset, prefix, matcher)?.let { kdocItems ->
             return CompletionResult(kdocItems, isIncomplete = false, replacementRange = replaceRange)
         }
+        // Inside a `//` or `/* */` comment: prose, nothing to complete. Without this the caret's word was classified
+        // as a name reference and the popup offered classes (`// changed` -> ChangedPackages, OnSizeChangedNode),
+        // and the Enter that ends the comment line accepted the first one (seen on the emulator).
+        if (insideComment(kt, offset)) {
+            return CompletionResult(emptyList(), isIncomplete = false, replacementRange = replaceRange)
+        }
         // A label reference (`return@<caret>`, `break@`/`continue@<caret>`, `this@`/`super@<caret>`): offer the
         // enclosing labels, NOT scope locals + type names — which is what a plain name-ref classification would
         // wrongly surface here (a jump target is never a local or a type).
@@ -311,6 +318,15 @@ class KotlinCompletion(
         // the `()`.
         val valuePosition = pos.nameReference && nameRef != null && !isStatement(nameRef)
 
+        // Types get their docs from the attached sources / platform docs pack here; members already have theirs
+        // (see KotlinSymbolService.enrich). Every candidate the page can hold is covered, not a guessed top few:
+        // the engine re-ranks after this, so a guess left the first row (`ScrollView`) without its doc. A miss is
+        // a directory lookup, and a hit decodes its package once into the provider's cache.
+        val typeDocs = HashMap<KotlinSymbol, String>()
+        candidates.asSequence()
+            .filter { it.symbol.documentation().isNullOrBlank() && !it.symbol.origin.fromSource }
+            .take(MAX_ITEMS)
+            .forEach { c -> service.typeDocForCompletion(c.symbol)?.let { typeDocs[c.symbol] = it } }
         val symbolItems = candidates.flatMap { c ->
             val (typeParamCount, ctorRequiredArgs) =
                 typeInsertFacts(c.symbol, superTypeEntry, valuePosition, typePosition, followingChar)
@@ -325,6 +341,8 @@ class KotlinCompletion(
                 typeParamCount = typeParamCount,
                 ctorRequiredArgs = ctorRequiredArgs,
             ).let { item ->
+                typeDocs[c.symbol]?.let { item.copy(documentation = it) } ?: item
+            }.let { item ->
                 // A platform API's doc opens with the level that added it ("Added in API 26", "Since Java 11").
                 service.apiLevelOf(c.symbol)?.let { item.copy(documentation = service.withApiLevel(c.symbol, item.documentation)) } ?: item
             }.let { item ->
@@ -813,19 +831,7 @@ class KotlinCompletion(
         val whenExpr = climbTo<KtWhenExpression>(leaf) ?: return null
         val subject = whenExpr.subjectExpression ?: return null
         val fqn = (resolver.inferType(subject) ?: return null).qualifiedName
-        val covered = HashSet<String>()
-        for (entry in whenExpr.entries) for (cond in entry.conditions) when (cond) {
-            is KtWhenConditionIsPattern ->
-                cond.typeReference?.text?.substringBefore('<')?.substringAfterLast('.')?.trim()?.let { covered += it }
-            is KtWhenConditionWithExpression ->
-                cond.expression?.text?.substringAfterLast('.')?.trim()?.let { if (MARKER !in it) covered += it }
-        }
-        val branches = service.sealedSubclassesOf(fqn)?.let { subs ->
-            subs.map { it.substringAfterLast('.') }.filter { it !in covered }.map { "is $it -> TODO()" }
-        } ?: service.enumConstantsOf(fqn).map { it.name }.filter { it !in covered }.let { missing ->
-            val simple = fqn.substringAfterLast('.')
-            missing.map { "$simple.$it -> TODO()" }
-        }
+        val branches = KotlinQuickFixes.missingWhenBranches(whenExpr, fqn, service, ignore = MARKER)
         if (branches.isEmpty()) return null
         val indent = lineIndentAt(leaf?.containingFile?.text ?: "", offset)
         return CompletionItem(
@@ -849,6 +855,14 @@ class KotlinCompletion(
     /** Completion inside a KDoc comment, or null when [leaf] isn't in one. `@param <caret>` → the documented
      *  declaration's parameter names; `@<caret>` → the standard doc tags; anywhere else in the doc → an EMPTY
      *  list (suppresses the scope/keyword completion that would otherwise leak into prose). */
+    /** Whether [offset] sits in a line or block comment. A comment is trivia to this parser, hence the
+     *  trivia-aware lookup ([kdocCompletion] explains why the plain one cannot see it). */
+    private fun insideComment(kt: KtFile, offset: Int): Boolean {
+        val type = kt.findElementAtIncludingTrivia(offset)?.elementType
+            ?: kt.findElementAtIncludingTrivia(offset - 1)?.elementType
+        return type == KtTokens.EOL_COMMENT || type == KtTokens.BLOCK_COMMENT
+    }
+
     private fun kdocCompletion(
         kt: KtFile, leaf: KtElement?, original: String, offset: Int, prefix: String, matcher: PrefixMatcher
     ): List<CompletionItem>? {

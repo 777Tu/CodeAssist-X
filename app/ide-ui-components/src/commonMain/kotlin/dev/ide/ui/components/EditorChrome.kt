@@ -126,6 +126,7 @@ import dev.ide.ui.generated.resources.edchrome_no_matching_tasks
 import dev.ide.ui.generated.resources.edchrome_no_variants
 import dev.ide.ui.generated.resources.edchrome_nothing_to_run
 import dev.ide.ui.generated.resources.edchrome_optimize_imports
+import dev.ide.ui.generated.resources.edchrome_local_history
 import dev.ide.ui.generated.resources.edchrome_reformat_code
 import dev.ide.ui.generated.resources.edchrome_resolving_dependencies
 import dev.ide.ui.generated.resources.edchrome_search_tasks
@@ -199,6 +200,8 @@ fun EditorTopBar(
     onFind: () -> Unit = {},
     onReformat: () -> Unit = {},
     onOptimizeImports: () -> Unit = {},
+    /** Opens the active file's local history; null leaves the item out. */
+    onLocalHistory: (() -> Unit)? = null,
     onToggleConsole: () -> Unit = {},
     consoleOpen: Boolean = false,
     /** Compact (phone) top bar only: a single button opening the RIGHT tool-window drawer — the phone has no
@@ -210,6 +213,8 @@ fun EditorTopBar(
     onToggleRightTool: () -> Unit = {},
     /** Wide layout only: show the right tool window toggle in the bar, because the user hid the right stripe. */
     rightToolInBar: Boolean = false,
+    /** The right tool window's work is running (the agent mid-reply): its bar button animates. */
+    rightToolBusy: Boolean = false,
     inlayHintsOn: Boolean = true,
     onToggleInlayHints: () -> Unit = {},
     showPreview: Boolean = false,
@@ -300,6 +305,7 @@ fun EditorTopBar(
                     onFind = onFind,
                     onReformat = onReformat,
                     onOptimizeImports = onOptimizeImports,
+                    onLocalHistory = onLocalHistory,
                     inlayHintsOn = inlayHintsOn,
                     onToggleInlayHints = onToggleInlayHints,
                     consoleOpen = consoleOpen,
@@ -327,7 +333,7 @@ fun EditorTopBar(
                 PluginToolbarActions(pluginActions, dim, onPluginAction)
                 RunCluster(activeVariant, variants, onPickVariant, runTasks, onPickTask, selectedRunTask)
                 if (rightToolInBar && rightToolIconId != null) {
-                    IconButtonCa(actionIcon(rightToolIconId), rightToolTitle, onToggleRightTool, active = rightToolOpen)
+                    IconButtonCa(actionIcon(rightToolIconId), rightToolTitle, onToggleRightTool, Modifier.busyRing(rightToolBusy), active = rightToolOpen)
                 }
                 if (hasActiveFile) {
                     EditorOverflowMenu(
@@ -336,6 +342,7 @@ fun EditorTopBar(
                         onFind = onFind,
                         onReformat = onReformat,
                         onOptimizeImports = onOptimizeImports,
+                    onLocalHistory = onLocalHistory,
                         inlayHintsOn = inlayHintsOn,
                         onToggleInlayHints = onToggleInlayHints,
                         consoleOpen = consoleOpen,
@@ -457,6 +464,7 @@ private fun EditorOverflowMenu(
     onFind: () -> Unit,
     onReformat: () -> Unit,
     onOptimizeImports: () -> Unit,
+    onLocalHistory: (() -> Unit)?,
     inlayHintsOn: Boolean,
     onToggleInlayHints: () -> Unit,
     consoleOpen: Boolean,
@@ -489,6 +497,9 @@ private fun EditorOverflowMenu(
                 OverflowItem(CaIcons.search, stringResource(Res.string.edchrome_find_replace)) { open = false; onFind() }
                 OverflowItem(CaIcons.braces, stringResource(Res.string.edchrome_reformat_code)) { open = false; onReformat() }
                 OverflowItem(CaIcons.layers, stringResource(Res.string.edchrome_optimize_imports)) { open = false; onOptimizeImports() }
+                if (onLocalHistory != null) {
+                    OverflowItem(CaIcons.clock, stringResource(Res.string.edchrome_local_history)) { open = false; onLocalHistory() }
+                }
             }
             if (!editOnly) OverflowItem(CaIcons.command, stringResource(Res.string.edchrome_command_palette)) { open = false; onOpenPalette() }
             // The AI assistant panel — a toggle, its on-state accented like the other tool windows.
@@ -1562,12 +1573,17 @@ fun TabsStripPreview() {
  *  moves the segments change — the row crossfades (and resizes) between states rather than snapping. */
 @Composable
 fun Breadcrumb(segments: List<String>) {
+    // Rest at the END: the deepest segment (the file, the symbol at the caret) is the one worth reading, and in a
+    // narrow bar beside the view-mode buttons it was the one cut off ("activity_main.xm"). The leading folders
+    // scroll off instead, a swipe away.
+    val scroll = rememberScrollState()
+    LaunchedEffect(segments, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
     Row(
         Modifier
             .fillMaxWidth()
             .height(32.dp)
             .background(Ide.colors.editorBg)
-            .horizontalScroll(rememberScrollState())
+            .horizontalScroll(scroll)
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

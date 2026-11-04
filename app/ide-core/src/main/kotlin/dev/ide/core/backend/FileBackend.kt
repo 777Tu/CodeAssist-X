@@ -38,12 +38,21 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         // Picker-safe: with no project open (the lazy-start path), the engine-backed tree builders would hit
         // the non-null `services` accessor. Hand back an empty root so the shared UI state can be constructed
         // before a project is opened; it is rebuilt for real once `openProject` bumps the epoch.
-        if (ctx.servicesOrNull == null) return TreeNode(id = "empty", name = "", kind = NodeKind.Workspace, filePath = null, iconId = "module")
-        return when (mode) {
-            TreeViewMode.Project -> projectTree()
-            TreeViewMode.AllFiles -> allFilesTree()
+        if (ctx.servicesOrNull == null) return emptyTree()
+        return try {
+            when (mode) {
+                TreeViewMode.Project -> projectTree()
+                TreeViewMode.AllFiles -> allFilesTree()
+            }
+        } catch (e: IllegalStateException) {
+            // The tree is built off the main thread, and closing the project mid-walk makes the next
+            // `ctx.services` read throw "No project is open" (seen in the field from IdeUiState.loadTree). There
+            // is no tree to show then; anything else is a real failure and still propagates.
+            if (ctx.servicesOrNull == null) emptyTree() else throw e
         }
     }
+
+    private fun emptyTree() = TreeNode(id = "empty", name = "", kind = NodeKind.Workspace, filePath = null, iconId = "module")
 
     // File-tree expansion is remembered per project + view mode in the project's generic settings store
     // (`.platform/settings.properties`), keyed by the stable path-based TreeNode ids. Empty stored value =
@@ -210,29 +219,71 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         dirIcons: Map<Path, String> = emptyMap(),
         excluded: Boolean = false,
     ): List<TreeNode> {
-        val entries = runCatching { Files.list(dir).use { it.collect(Collectors.toList()) } }.getOrDefault(emptyList())
-        val dirs = entries.filter { Files.isDirectory(it) && !isDerivedDir(it) }.sortedBy { it.fileName.toString().lowercase() }
-        val files = entries.filter { Files.isRegularFile(it) }.sortedBy { it.fileName.toString().lowercase() }
-        return dirs.map { d ->
-            val derived = excluded || d.fileName?.toString() == "build"
-            TreeNode(
-                id = "dir:$d",
-                name = d.fileName.toString(),
-                kind = NodeKind.Folder,
-                filePath = null,
-                iconId = when {
-                    derived -> "build-output"
-                    else -> dirIcons[d.normalize()]
-                        ?: ctx.services.iconFor(IconTarget.Directory(d.fileName.toString(), emptySet())) ?: "folder"
-                },
-                children = rawChildren(d, moduleRoots, dirIcons, derived),
-                dirPath = d.toString(),
-                styleHint = if (derived) "excluded" else null,
-            )
-        } + files.map { f ->
+        val (dirs, files) = rawPartition(dir)
+        return dirs.map { d -> rawDirNode(d, moduleRoots, dirIcons, excluded) } + files.map { f ->
             val node = fileNode(f, ctx.services.moduleForFile(f), moduleRoots)
             if (excluded) node.copy(styleHint = "excluded") else node
         }
+    }
+
+    /**
+     * A raw directory row that **compacts single-child chains**, like VS Code's compact folders: from [start] it
+     * follows the chain while a level holds exactly one directory and no files, so `src/ → main/ → java/` is one
+     * `src/main/java` row instead of three indent levels. On a phone each level costs width the file names need.
+     *
+     * The chain only extends into plain directories. A directory with its own meaning (a module, a source or
+     * res root, `build/`) starts a row of its own so its icon stays visible: `src/main` then `java/com/acme`
+     * with the source-root icon. Each level is kept as a [PackageSegment] so the UI can still target any of
+     * them for New, and the row's id and [TreeNode.dirPath] are the deepest directory's (what Rename edits).
+     */
+    private fun rawDirNode(
+        start: Path,
+        moduleRoots: Map<Path, String>,
+        dirIcons: Map<Path, String>,
+        excluded: Boolean,
+    ): TreeNode {
+        val derived = excluded || start.fileName?.toString() == "build"
+        val chain = arrayListOf(start)
+        var listing = rawPartition(start)
+        while (true) {
+            val (dirs, files) = listing
+            val next = dirs.singleOrNull() ?: break
+            if (files.isNotEmpty() || dirIcons.containsKey(next.normalize()) || next.fileName?.toString() == "build") break
+            chain.add(next)
+            listing = rawPartition(next)
+        }
+        val end = chain.last()
+        val labels = chain.map { it.fileName.toString() }
+        val (dirs, files) = listing
+        val children = dirs.map { d -> rawDirNode(d, moduleRoots, dirIcons, derived) } + files.map { f ->
+            val node = fileNode(f, ctx.services.moduleForFile(f), moduleRoots)
+            if (derived) node.copy(styleHint = "excluded") else node
+        }
+        return TreeNode(
+            id = "dir:$end",
+            name = labels.joinToString("/"),
+            kind = NodeKind.Folder,
+            filePath = null,
+            iconId = when {
+                derived -> "build-output"
+                else -> dirIcons[start.normalize()]
+                    ?: ctx.services.iconFor(IconTarget.Directory(start.fileName.toString(), emptySet())) ?: "folder"
+            },
+            children = children,
+            packageSegments = if (chain.size > 1) {
+                chain.indices.map { k -> PackageSegment(labels.subList(0, k + 1).joinToString("/"), chain[k].toString()) }
+            } else emptyList(),
+            dirPath = end.toString(),
+            styleHint = if (derived) "excluded" else null,
+        )
+    }
+
+    /** What the All-Files view lists in [dir]: (subdirectories minus [isDerivedDir], files), each sorted by name. */
+    private fun rawPartition(dir: Path): Pair<List<Path>, List<Path>> {
+        val entries = runCatching { Files.list(dir).use { it.collect(Collectors.toList()) } }.getOrDefault(emptyList())
+        val dirs = entries.filter { Files.isDirectory(it) && !isDerivedDir(it) }.sortedBy { it.fileName.toString().lowercase() }
+        val files = entries.filter { Files.isRegularFile(it) }.sortedBy { it.fileName.toString().lowercase() }
+        return dirs to files
     }
 
     /** Bulky/derived directories not worth showing even in the All-Files view. (`build/` IS shown — dimmed.) */
@@ -240,7 +291,7 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         val name = dir.fileName?.toString() ?: return false
         if (name == ".gradle" || name == ".idea") return true
         // The platform caches can be large + transient; keep `.platform/workspace.json` etc. visible though.
-        return dir.parent?.fileName?.toString() == ".platform" && name == "caches"
+        return dir.parent?.fileName?.toString() == ".platform" && (name == "caches" || name == "local-history")
     }
 
     /** A surfaced content root. `SOURCE`/`GENERATED`/`AIDL` roots are package contexts (compactable,

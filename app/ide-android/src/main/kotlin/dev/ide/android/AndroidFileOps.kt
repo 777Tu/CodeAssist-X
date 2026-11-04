@@ -9,6 +9,10 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import dev.ide.core.project.CaprojFormat
 import dev.ide.platform.ProjectFiles
 import dev.ide.ui.backend.IdeBackend
@@ -52,7 +56,8 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
         }, "apk-install-check").start()
     }
 
-    /** Copy [uri]'s bytes into a new file under [targetDir]; returns the new path or null. */
+    /** Copy [uri]'s bytes into a new file under [targetDir]; returns the new path or null. Blocking provider I/O
+     *  (a cloud document can take seconds), so call it off the main thread. */
     fun importUri(uri: Uri, targetDir: String, backend: IdeBackend): String? = runCatching {
         val name = queryDisplayName(uri) ?: "imported-${System.currentTimeMillis()}"
         val bytes = activity.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
@@ -168,23 +173,36 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
         clipboard.primaryClipDescription?.hasMimeType("image/*") == true
     }.getOrDefault(false)
 
-    /** Share [path] to another app via a FileProvider content:// URI (no FileUriExposedException). */
-    fun shareFile(path: String) = runCatching {
-        val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(path))
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = mimeFor(path)
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    /**
+     * Share [path] to another app via a FileProvider content:// URI (no FileUriExposedException).
+     *
+     * The URI is made off the main thread: `getUriForFile` parses the provider's path config on first use and
+     * canonicalizes [path], a disk walk that on shared storage (FUSE) blocked the main thread long enough for an
+     * ANR in the field. Only the chooser starts back on the main thread.
+     */
+    fun shareFile(path: String) {
+        activity.lifecycleScope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching { FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(path)) }.getOrNull()
+            }
+            runCatching {
+                checkNotNull(uri)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = mimeFor(path)
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                activity.startActivity(Intent.createChooser(send, "Share ${File(path).name}"))
+            }.onFailure { Toast.makeText(activity, "Can't share this file", Toast.LENGTH_SHORT).show() }
         }
-        activity.startActivity(Intent.createChooser(send, "Share ${File(path).name}"))
-    }.getOrElse { Toast.makeText(activity, "Can't share this file", Toast.LENGTH_SHORT).show() }
+    }
 
     /** Copy [src]'s bytes into the user-chosen document [uri] (the "Save As"/export destination). */
-    fun exportTo(uri: Uri, src: String) = runCatching {
+    /** Copy [src] into the user-picked [uri]. Blocking I/O: call off the main thread; the caller reports the result. */
+    fun exportTo(uri: Uri, src: String): Boolean = runCatching {
         activity.contentResolver.openOutputStream(uri)
-            ?.use { out -> File(src).inputStream().use { it.copyTo(out) } }
-        Toast.makeText(activity, "Exported ${File(src).name}", Toast.LENGTH_SHORT).show()
-    }.getOrElse { Toast.makeText(activity, "Couldn't export file", Toast.LENGTH_SHORT).show() }
+            ?.use { out -> File(src).inputStream().use { it.copyTo(out) } } != null
+    }.getOrDefault(false)
 
     /**
      * Open the system Files app on CodeAssist's storage (served by `ProjectsDocumentsProvider`) so the user

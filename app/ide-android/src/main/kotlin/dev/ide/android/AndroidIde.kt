@@ -135,6 +135,21 @@ object AndroidIde {
         manager.applicationContainer.registerServiceIfAbsent(DAILY_CHALLENGE_SERVICE) {
             buildDailyChallenges(supabaseAccounts)
         }
+        // Learn: the lesson catalog (and later progress + discussions). Reads work signed out, so this needs
+        // only the project config; the session is used when there is one.
+        if (BuildConfig.SUPABASE_URL.isNotBlank() && BuildConfig.SUPABASE_KEY.isNotBlank()) {
+            manager.applicationContainer.registerServiceIfAbsent(dev.ide.core.LEARN_REMOTE_SERVICE) {
+                dev.ide.store.impl.SupabaseLearnService(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_KEY, supabaseAccounts)
+            }
+        }
+        // CodeAssist Free AI rides on the same session: the proxy takes the user's access token as its key.
+        if (supabaseAccounts != null) {
+            manager.applicationContainer.registerServiceIfAbsent(dev.ide.core.AI_CREDITS_SERVICE) {
+                dev.ide.store.impl.SupabaseAiCreditsService(
+                    BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_KEY, supabaseAccounts, proxyUrl = BuildConfig.AI_PROXY_URL,
+                )
+            }
+        }
         val backend = IdeServicesBackend(
             initial = null, manager = manager,
             buildRunnerFactory = { svc ->

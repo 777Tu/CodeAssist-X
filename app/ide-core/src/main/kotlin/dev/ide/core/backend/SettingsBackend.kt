@@ -535,6 +535,8 @@ internal class SettingsBackend(private val ctx: BackendContext) : SettingsServic
         caretStyle = caretStyle,
         twoAxisScroll = twoAxisScroll,
         pinchZoom = pinchZoom,
+        volumeKeysMoveCaret = volumeKeysMoveCaret,
+        inlineBlame = inlineBlame,
         softKeyboardSuggestions = softKeyboardSuggestions,
         formatOnSave = formatOnSave,
     )

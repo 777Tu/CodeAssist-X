@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import dev.ide.ui.backend.IdeBackend
 import dev.ide.ui.backend.RunStatus
+import dev.ide.ui.backend.RunPhase
+import dev.ide.ui.backend.RunConsoleUi
 import dev.ide.ui.generated.resources.Res
 import dev.ide.ui.generated.resources.buildc_build_failed
 import dev.ide.ui.generated.resources.buildc_build_succeeded
@@ -42,7 +44,7 @@ import org.jetbrains.compose.resources.stringResource
  * How long a build must keep running before it counts as "long" and becomes eligible for a full-screen ad.
  * Short / incremental builds finish before this and never trigger one.
  */
-private const val LONG_BUILD_THRESHOLD_MS = 5_000L
+internal const val LONG_BUILD_THRESHOLD_MS = 5_000L
 
 /** Minimum gap between two build interstitials, so an edit-and-run loop doesn't pop an ad on every build. */
 private const val BUILD_INTERSTITIAL_MIN_INTERVAL_MS = 4 * 60_000L
@@ -54,10 +56,37 @@ internal const val FREE_LONG_BUILDS = 3
 private const val IDLE_PRELOAD_DELAY_MS = 15_000L
 
 /**
- * Further load attempts while the IDE stays idle, as gaps after the previous one. A repeat while an ad is loaded
- * or loading is a no-op in the host, so these only re-request after a failed (often no-fill) or expired load.
+ * Further load attempts while the IDE stays idle, as gaps after the previous one: a short backoff, then every
+ * four minutes for about half an hour. A repeat while an ad is loaded or loading is a no-op in the host, so these
+ * only re-request after a failed (often no-fill or internal-error) or expired load. Three retries over seven
+ * minutes left a session that went on editing longer than that holding the failure at its next long build.
  */
-private val IDLE_PRELOAD_RETRY_MS = listOf(60_000L, 2 * 60_000L, 4 * 60_000L)
+private val IDLE_PRELOAD_RETRY_MS = listOf(60_000L, 2 * 60_000L) + List(7) { 4 * 60_000L }
+
+/**
+ * Longest a long build waits, past [LONG_BUILD_THRESHOLD_MS], for an interstitial whose load is still in flight.
+ * Most long builds outlast it (the median one runs about 25 s), and a load that was "loading" at the threshold
+ * used to be a skipped ad even when it landed a second later.
+ */
+internal const val IN_FLIGHT_LOAD_WAIT_MS = 10_000L
+
+private const val IN_FLIGHT_LOAD_POLL_MS = 250L
+
+/**
+ * The host's interstitial state once a load in flight has finished, polling [state] while it reads "loading" for
+ * at most [maxWaitMs]. Returns the final state and how long it waited. The caller runs it under [collectLatest],
+ * so a build that finishes meanwhile cancels the wait and no ad shows.
+ */
+internal suspend fun awaitInFlightLoad(maxWaitMs: Long = IN_FLIGHT_LOAD_WAIT_MS, state: () -> String): Pair<String, Long> {
+    var waited = 0L
+    while (waited < maxWaitMs) {
+        val now = state()
+        if (now != "loading") return now to waited
+        delay(IN_FLIGHT_LOAD_POLL_MS)
+        waited += IN_FLIGHT_LOAD_POLL_MS
+    }
+    return state() to waited
+}
 
 /**
  * Loads the next interstitial while the IDE sits idle: after [firstDelayMs], then again after each of
@@ -72,6 +101,21 @@ internal suspend fun preloadWhileIdle(firstDelayMs: Long, active: () -> Boolean,
         preload()
     }
 }
+
+/**
+ * How long a build that just started runs before the console footer's banner appears: [quickMs] normally, but
+ * when the full-screen ad is set to show at [LONG_BUILD_THRESHOLD_MS], until just after that, so the banner
+ * doesn't load and draw only to be covered a second later. If the ad does show, the banner waits for it to close.
+ */
+fun buildBannerDelayMs(ads: AdController, quickMs: Long): Long {
+    val interstitialDue = ads.interstitialsActive &&
+        ads.host.interstitialState == "ready" &&
+        ads.buildPacing.wouldShow(ads.host.lowMemoryDevice)
+    return if (interstitialDue) maxOf(quickMs, LONG_BUILD_THRESHOLD_MS + INTERSTITIAL_DECISION_GRACE_MS) else quickMs
+}
+
+/** How long after the threshold the banner gives the full-screen ad to come up. */
+private const val INTERSTITIAL_DECISION_GRACE_MS = 1_500L
 
 /** How long the "build finished while the ad was open" notice stays up. */
 private const val RESULT_NOTICE_MS = 4_000L
@@ -103,6 +147,17 @@ class BuildAdPacing(
      *  loading one is worth it. */
     fun mayShowLater(lowMemory: Boolean): Boolean = !lowMemory && !firstSession && seen >= FREE_LONG_BUILDS
 
+    /**
+     * Whether a build starting now would get the full-screen ad if it runs past the threshold, given the ad is
+     * loaded: [skipReason]'s checks without counting the build. The build console's banner waits for that
+     * decision rather than appearing just before the ad covers it.
+     */
+    fun wouldShow(lowMemory: Boolean): Boolean {
+        val last = lastShownMs
+        return !lowMemory && !firstSession && seen >= FREE_LONG_BUILDS && !lastBuildFailed &&
+            (last == null || nowMs() - last >= BUILD_INTERSTITIAL_MIN_INTERVAL_MS)
+    }
+
     /** Count a build that is still running at the threshold, and say why it gets no ad (null: show one). */
     fun skipReason(lowMemory: Boolean): String? {
         val grace = seen < FREE_LONG_BUILDS
@@ -131,8 +186,9 @@ class BuildAdPacing(
  * Drives the occasional full-screen interstitial shown over a LONG build (Android only; inert on desktop and
  * whenever ads or full-screen ads are turned off). The ad is loaded at launch and while the IDE sits idle between
  * builds (retrying a failed load while it stays idle), never while one runs. When a build is still running
- * [LONG_BUILD_THRESHOLD_MS] after it started and [BuildAdPacing] allows it, the ad shows; a build that finishes
- * first cancels the timer (via [collectLatest]), so quick compiles never see one.
+ * [LONG_BUILD_THRESHOLD_MS] after it started and [BuildAdPacing] allows it, the ad shows, waiting up to
+ * [IN_FLIGHT_LOAD_WAIT_MS] more for a load still in flight; a build that finishes first cancels the timer (via
+ * [collectLatest]), so quick compiles never see one.
  *
  * It also watches every interstitial close (lesson ones too) to record it, and when a build finished behind the
  * ad, briefly shows that build's result so it isn't missed.
@@ -173,15 +229,30 @@ fun BuildAdInterstitial(backend: IdeBackend, ads: AdController?) {
                 // Reached only if the build is STILL running: collectLatest cancels this block the moment the
                 // status leaves Running (finished / failed / stopped), so a short build never gets here.
                 if (!ads.interstitialsActive) return@collectLatest
+                // Checked before the pacing, so it neither counts as a long build nor starts a cooldown.
+                if (programIsRunning(backend.build.runConsole.value)) {
+                    ads.interstitialSkipped("program_running")
+                    return@collectLatest
+                }
                 val reason = pacing.skipReason(ads.host.lowMemoryDevice)
                 if (reason != null) {
                     ads.interstitialSkipped(reason)
                     return@collectLatest
                 }
-                // Read before the show, which clears a ready ad: on a miss, it says whether one was loading,
-                // failed to fill, or was never asked for.
-                val state = ads.host.interstitialState
-                if (ads.showInterstitial("build")) pacing.shown() else ads.interstitialSkipped("not_ready", state)
+                // A load started while idle may still be in flight: give it a few seconds while the build runs on.
+                // The state is read before the show, which clears a ready ad: on a miss, it says whether one was
+                // still loading, failed to fill, or was never asked for.
+                val (state, waitedMs) = awaitInFlightLoad { ads.host.interstitialState }
+                if (waitedMs > 0) {
+                    // The wait can outlast the user's toggles, or reach the point where the program itself runs.
+                    if (!ads.interstitialsActive) return@collectLatest
+                    if (programIsRunning(backend.build.runConsole.value)) {
+                        ads.interstitialSkipped("program_running")
+                        return@collectLatest
+                    }
+                }
+                val shownProps = if (waitedMs > 0) mapOf("waited_ms" to waitedMs.toString()) else emptyMap()
+                if (ads.showInterstitial("build", shownProps)) pacing.shown() else ads.interstitialSkipped("not_ready", state)
             }
     }
 
@@ -208,6 +279,14 @@ fun BuildAdInterstitial(backend: IdeBackend, ads: AdController?) {
         BuildResultNotice(result) { finishedBehindAd = null }
     }
 }
+
+/**
+ * Whether the user's own program is executing in the Run console. A console run keeps the build Running for as
+ * long as the program does, so a program waiting at a prompt crossed the long-build threshold and the ad came up
+ * over it, swallowing the line being typed into it (seen on the emulator). Past the compile, the screen is the
+ * program's.
+ */
+internal fun programIsRunning(console: RunConsoleUi?): Boolean = console?.phase == RunPhase.Running
 
 /** A small pill near the bottom of the screen with a build's outcome. Tap to dismiss. */
 @Composable

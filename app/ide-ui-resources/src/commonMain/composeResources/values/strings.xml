@@ -9,11 +9,11 @@ Back up your projects to a .zip now, your source files stay safe, and you can re
     <string name="backup_projects">Back up projects</string>
     <string name="got_it">Got it</string>
     <string name="help_improve_codeassist">Help improve CodeAssist</string>
-    <string name="help_improve_codeassist_content"><![CDATA[Share anonymous performance data so we can see what's slow and what's failing, and fix the right things.
+    <string name="help_improve_codeassist_content"><![CDATA[Share anonymous usage and performance data so we can see what's slow, what's failing, and which features people rely on, and fix the right things.
 
-We collect: your app version and device model, how long builds, indexing, and code completion take, build success/failure, scrubbed crash reports, and when ads are shown or closed and changes to your ad settings.
+We collect: your app version and device model, how long builds, indexing, code completion, and previews take, build success/failure, scrubbed crash reports, how often each feature is used (for example, how many times the layout preview or Find Usages was opened), and when ads are shown or closed and changes to your ad settings.
 
-We never collect your code, file or project names, which features you use, or anything that identifies you. You can change this anytime under More while a project is open.]]></string>
+We never collect your code, file or project names, what you type, or anything that identifies you. You can change this anytime under More while a project is open.]]></string>
     <string name="learn_more">Learn more</string>
     <string name="allow">Allow</string>
     <string name="no_thanks">No thanks</string>
@@ -156,6 +156,10 @@ We never collect your code, file or project names, which features you use, or an
     <string name="support_show_ads_desc">Show ads in the app. You can turn them off at any time.</string>
     <string name="support_show_interstitials">Full-screen ads</string>
     <string name="support_show_interstitials_desc">Occasional full-screen ads during long builds and after finished lessons.</string>
+    <plurals name="ads_off_locked">
+        <item quantity="one">Ads stay on for a day after an install or update. You can turn them off in %1$d hour.</item>
+        <item quantity="other">Ads stay on for a day after an install or update. You can turn them off in %1$d hours.</item>
+    </plurals>
     <string name="ads_off_title">Turn off ads?</string>
     <string name="ads_off_body">You can turn off only the full-screen ads and keep the smaller ads in lists and panels.</string>
     <string name="ads_off_all">All ads</string>
@@ -163,6 +167,9 @@ We never collect your code, file or project names, which features you use, or an
     <string name="support_ad_privacy">Manage ad consent</string>
     <string name="support_ad_privacy_desc">Review or change your ad privacy choices.</string>
     <string name="support_ad_privacy_button">Manage</string>
+    <string name="ad_inspector">Ad Inspector</string>
+    <string name="ad_inspector_desc">Check which ad networks load and why one fails. Developer builds on test devices only.</string>
+    <string name="ad_inspector_open">Open</string>
     <string name="ad_label">Ad</string>
     <string name="no_project_yet">No projects yet. Create one to get started.</string>
     <string name="your_projects">Your projects</string>
@@ -417,6 +424,8 @@ We never collect your code, file or project names, which features you use, or an
     <string name="symbolbar_next_problem">Next problem</string>
     <string name="symbolbar_customize">Customize symbols</string>
     <string name="symbolbar_hide_keyboard">Hide keyboard</string>
+    <string name="symbolbar_more">More keys</string>
+    <string name="symbolbar_trackpad">Drag to move the cursor</string>
     <string name="symbolbar_comment">Line comment</string>
     <string name="symed_pin">Pin to the fixed row</string>
     <string name="symed_unpin">Unpin</string>
@@ -472,6 +481,40 @@ We never collect your code, file or project names, which features you use, or an
     <string name="breadcrumb_blocks">Blocks</string>
     <string name="breadcrumb_preview">Preview</string>
     <string name="breadcrumb_split">Split</string>
+    <string name="breadcrumb_nav_back">Back</string>
+    <string name="breadcrumb_nav_forward">Forward</string>
+    <string name="conflict_current">Current</string>
+    <string name="conflict_incoming">Incoming</string>
+    <string name="conflict_both">Both</string>
+    <string name="conflict_current_desc">Keep the current side</string>
+    <string name="conflict_incoming_desc">Keep the incoming side</string>
+    <string name="conflict_both_desc">Keep both sides</string>
+    <string name="gesture_nothing_to_undo">Nothing to undo</string>
+    <string name="gesture_nothing_to_redo">Nothing to redo</string>
+    <string name="paste_history_title">Paste from history</string>
+    <string name="change_revert">Revert</string>
+    <string name="change_before">In the last commit</string>
+    <string name="change_added">Added since the last commit</string>
+    <string name="history_title">Local history</string>
+    <string name="symbolbar_bookmark">Bookmark</string>
+    <string name="bookmarks_title">Bookmarks</string>
+    <string name="bookmarks_empty">No bookmarks yet. Bookmark the caret line with F11, or the Bookmark key behind the symbol bar\'s ⋯.</string>
+    <string name="todo_title">TODO</string>
+    <string name="todo_refresh">Refresh</string>
+    <string name="todo_empty">No TODO or FIXME comments in the project.</string>
+    <string name="bookmarks_panel_title">Bookmarks &amp; TODO</string>
+    <string name="history_back">Back</string>
+    <string name="history_restore">Restore</string>
+    <string name="history_empty">Nothing saved yet. Each save of this file keeps a version here.</string>
+    <string name="history_same">Same as the file now</string>
+    <string name="edchrome_local_history">Local history</string>
+    <string name="paste_history_clear">Clear</string>
+    <string name="paste_history_empty">Text you copy or cut in the editor shows up here.</string>
+    <string name="symbolbar_clipboard">Clipboard</string>
+    <plurals name="paste_history_lines">
+        <item quantity="one">%1$d line</item>
+        <item quantity="other">%1$d lines</item>
+    </plurals>
 
     <!-- edchrome (EditorChrome/SideRail) -->
     <string name="edchrome_files">Files</string>
@@ -565,6 +608,10 @@ We never collect your code, file or project names, which features you use, or an
     <string name="kotlin_configure">Configure Kotlin</string>
     <string name="kotlin_configuring">Configuring…</string>
     <string name="kotlin_configure_failed">Couldn't configure Kotlin: %1$s</string>
+    <string name="missing_libraries_notice">This file uses libraries that aren't added yet: %1$s</string>
+    <string name="missing_libraries_add_all">Add all</string>
+    <string name="missing_libraries_adding">Adding…</string>
+    <string name="missing_library_failed">Couldn't add the library: %1$s</string>
     <string name="sources_download">Download</string>
     <string name="sources_downloading">Downloading…</string>
     <string name="sources_download_failed">Download failed: %1$s</string>
@@ -640,6 +687,27 @@ We never collect your code, file or project names, which features you use, or an
     <string name="store_search_hint">Search templates and samples</string>
     <!-- Explore tab, Material 3 Expressive redesign -->
     <string name="store_search_placeholder">Templates, sample apps, plugins</string>
+    <string name="store_trending">Trending</string>
+    <string name="store_trending_search">Search for %1$s</string>
+    <string name="store_translate">Translate</string>
+    <string name="store_translating">Translating…</string>
+    <string name="store_translated">Translated automatically</string>
+    <string name="store_show_original">Show original</string>
+    <string name="store_update_to">Update to v%1$s</string>
+    <string name="store_update_versions">v%1$s installed · v%2$s available</string>
+    <string name="store_update_conflict_title">You've changed this project</string>
+    <string name="store_update_conflict_body">Updating it in place would overwrite your changes to:</string>
+    <string name="store_update_conflict_more">and %1$d more</string>
+    <string name="store_update_conflict_unknown">This project was installed before CodeAssist kept track of changes, so it can't tell your edits apart from the original.</string>
+    <string name="store_update_conflict_keep">Installing the new version as a separate project leaves your copy exactly as it is.</string>
+    <string name="store_update_as_copy">Install as a new copy</string>
+    <string name="home_update_review">Review</string>
+    <string name="store_update_merge">Update and keep my changes</string>
+    <string name="store_update_changed_files">Files you changed since installing it:</string>
+    <string name="store_update_merge_note">Your changes and the new version are combined file by file. Where you both changed the same lines, both are kept for you to choose between.</string>
+    <string name="store_merge_done_title">Updated, with your changes kept</string>
+    <string name="store_merge_conflicts_body">You and the publisher changed the same lines in these files. Both versions are in the file, between &lt;&lt;&lt;&lt;&lt;&lt;&lt; and &gt;&gt;&gt;&gt;&gt;&gt;&gt; markers, for you to choose between:</string>
+    <string name="store_merge_open">Open project</string>
     <string name="store_browse_by_kind">Browse by kind</string>
     <string name="store_see_all">See all</string>
     <string name="store_install">Install</string>
@@ -722,6 +790,19 @@ We never collect your code, file or project names, which features you use, or an
     <string name="submit_send">Submit for review</string>
     <string name="submit_sending">Submitting…</string>
     <string name="submit_review_note">A moderator reviews every submission before it appears. Nothing is public until it is approved.</string>
+    <string name="submit_checks_title">What reviewers check</string>
+    <string name="submit_checks_english">The title, summary and description are in English.</string>
+    <string name="submit_checks_screenshots">Screenshots show the app running, not the editor.</string>
+    <string name="submit_checks_summary">The summary says in one line what the project does.</string>
+    <string name="submit_checks_icon">The app has its own icon, not the default one.</string>
+    <string name="submit_checks_own">It is your own work, with no secret keys or AI chat history in it.</string>
+    <string name="submit_warn_english">Store listings must be in English, and this reads like another language. Write it in English; you can keep a translation below it.</string>
+    <string name="submit_warn_summary">Say in one line what the project does. A summary that only repeats the name is the most common reason a listing is sent back.</string>
+    <string name="submit_warn_spam">Wording like “download free” or “mod apk” reads as spam, and listings with it are sent back.</string>
+    <string name="submit_confirm_title">Before you send it</string>
+    <string name="submit_confirm_body">A moderator is likely to send this back:</string>
+    <string name="submit_confirm_fix">Fix it</string>
+    <string name="submit_confirm_send">Send anyway</string>
     <string name="submit_required">Fill in the title, summary, description and category.</string>
     <string name="submit_target">Publishing as</string>
     <string name="submit_target_new">A new listing</string>
@@ -786,6 +867,11 @@ We never collect your code, file or project names, which features you use, or an
     <string name="you_moderation">Moderation</string>
     <string name="you_moderation_waiting">%1$d waiting for review</string>
     <string name="you_moderation_clear">Nothing is waiting for review</string>
+    <string name="you_account">Account</string>
+    <plurals name="you_releases">
+        <item quantity="one">%1$d release</item>
+        <item quantity="other">%1$d releases</item>
+    </plurals>
     <string name="moderation_title">Moderation</string>
     <string name="moderation_not_allowed">This account does not moderate the store.</string>
     <string name="moderation_tab_queue">Queue</string>
@@ -920,6 +1006,27 @@ We never collect your code, file or project names, which features you use, or an
     <string name="profile_missing">No publisher with that name</string>
     <string name="profile_unrated">Unrated</string>
     <string name="profile_signin_to_follow">Sign in to follow</string>
+    <string name="profile_highlights">Highlights</string>
+    <string name="profile_award_installs">Most installed</string>
+    <string name="profile_award_liked">Most liked</string>
+    <string name="profile_award_rated">Top rated</string>
+    <string name="profile_award_newest">Newest</string>
+    <string name="profile_sort_popular">Popular</string>
+    <string name="profile_group_projects">Apps and projects</string>
+    <string name="profile_group_plugins">Plugins</string>
+    <string name="profile_joined">Joined %1$s</string>
+    <plurals name="profile_ratings">
+        <item quantity="one">%1$d rating</item>
+        <item quantity="other">%1$d ratings</item>
+    </plurals>
+    <plurals name="profile_age_months">
+        <item quantity="one">%1$d month ago</item>
+        <item quantity="other">%1$d months ago</item>
+    </plurals>
+    <plurals name="profile_age_years">
+        <item quantity="one">%1$d year ago</item>
+        <item quantity="other">%1$d years ago</item>
+    </plurals>
     <string name="like_action">Like</string>
     <string name="like_liked">Liked</string>
     <string name="like_signin">Sign in to like</string>
@@ -947,8 +1054,12 @@ We never collect your code, file or project names, which features you use, or an
     <string name="learn_continue">Continue</string>
     <string name="learn_completed">Completed</string>
     <!-- Learn tab, Material 3 Expressive redesign -->
-    <string name="learn_lessons_done">%1$d lessons done</string>
+    <plurals name="learn_lessons_done">
+        <item quantity="one">%1$d lesson done</item>
+        <item quantity="other">%1$d lessons done</item>
+    </plurals>
     <string name="learn_module_meta">%1$d of %2$d lessons · %3$d min</string>
+    <string name="learn_continue_meta">Lesson %1$d of %2$d · %3$s</string>
     <string name="learn_resume_lesson">Resume lesson %1$d</string>
     <string name="learn_minutes">%1$d min</string>
     <string name="learn_lessons_progress">%1$d / %2$d lessons</string>
@@ -1358,8 +1469,26 @@ We never collect your code, file or project names, which features you use, or an
     <!-- sdk (SdkManagerScreen) -->
     <string name="sdk_manager_title">SDK Manager</string>
     <string name="sdk_could_not_load">Could not load packages.</string>
-    <string name="sdk_sources_documentation">Sources &amp; documentation</string>
-    <string name="sdk_sources_documentation_desc">Download SDK platform sources and JDK sources so the editor can show javadoc, parameter names, and go-to-source into the SDK. Downloads continue in the background, so you can leave this screen and keep working.</string>
+    <string name="sdk_intro">Install the Android platforms your modules compile against, and sources so the editor can show docs and go to SDK source. Downloads keep going in the background, so you can leave this screen.</string>
+    <string name="sdk_show_all_versions">Show all versions (%1$d)</string>
+    <string name="sdk_show_fewer">Show fewer</string>
+    <string name="sdk_tag_latest">Latest</string>
+    <string name="sdk_tag_project">Your project</string>
+    <string name="sdk_fail_offline">Couldn't reach the download server. Check your internet connection, then try again.</string>
+    <string name="sdk_fail_storage">There isn't enough free storage to finish this download. Free up some space, then try again.</string>
+    <string name="sdk_fail_not_found">The download server no longer has this package. Refresh the list, then try again.</string>
+    <string name="sdk_fail_server_code">The download server had a problem (HTTP %1$d). This is usually temporary, so try again in a moment.</string>
+    <string name="sdk_fail_server">The download server had a problem. This is usually temporary, so try again in a moment.</string>
+    <string name="sdk_fail_license">This package's license needs to be accepted before it can install.</string>
+    <string name="sdk_fail_corrupt">The downloaded file was damaged. Try again to download a fresh copy.</string>
+    <string name="sdk_fail_cancelled">Cancelled. What was already downloaded is kept, so it picks up where it stopped.</string>
+    <string name="sdk_fail_unknown">The download didn't finish.</string>
+    <string name="sdk_load_failed_title">Couldn't load the package list</string>
+    <string name="sdk_action_free_space">Free up space</string>
+    <string name="sdk_action_refresh">Refresh list</string>
+    <string name="sdk_action_review_license">Review license</string>
+    <string name="sdk_details_show">Details</string>
+    <string name="sdk_details_hide">Hide details</string>
     <string name="sdk_downloads">Downloads</string>
     <string name="sdk_clear_finished">Clear finished</string>
     <string name="sdk_jdk">JDK</string>
@@ -1786,6 +1915,11 @@ We never collect your code, file or project names, which features you use, or an
     <string name="set_editor_two_axis_desc">Drag in any direction to scroll both axes at once (touch)</string>
     <string name="set_editor_pinch">Pinch to zoom</string>
     <string name="set_editor_pinch_desc">Pinch with two fingers to change the code font size</string>
+    <string name="set_editor_volume_keys">Volume keys move the cursor</string>
+    <string name="set_editor_volume_keys_desc">While typing on a phone, volume up moves the cursor left and volume down moves it right, instead of changing the volume</string>
+    <string name="set_editor_inline_blame">Who changed this line</string>
+    <string name="set_editor_inline_blame_desc">In a Git project, show who last changed the caret's line, when, and why, faded after its end</string>
+    <string name="blame_uncommitted">Not committed yet</string>
     <string name="set_editor_kbd_suggest">Keyboard suggestions</string>
     <string name="set_editor_kbd_suggest_desc">Let the soft keyboard autocorrect, suggest, and auto-space (a normal keyboard). Turn off for raw code input, so a typed '.' doesn't get an auto-inserted space, at the cost of the suggestion strip.</string>
     <string name="set_editor_close_unsaved">Closing a tab with unsaved changes</string>
@@ -1841,7 +1975,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="set_br_dexfork">Max concurrent dex forks</string>
     <!-- Privacy &amp; Data -->
     <string name="set_privacy_analytics">Share performance analytics</string>
-    <string name="set_privacy_analytics_desc">Anonymous performance and ad metrics only, never your code or file names</string>
+    <string name="set_privacy_analytics_desc">Anonymous usage counts, performance and ad metrics, never your code or file names</string>
     <string name="set_privacy_clear">Clear caches</string>
     <string name="set_privacy_clear_desc">Free regenerable dependency / language / preview caches (never source)</string>
     <string name="set_privacy_clear_btn">Clear</string>
@@ -1863,6 +1997,114 @@ We never collect your code, file or project names, which features you use, or an
     <!-- Editor fallbacks -->
     <string name="rename_failed">Rename failed</string>
     <string name="learn_check_failed">Check failed</string>
+    <string name="learn_paths">Paths</string>
+    <string name="learn_path_meta">%1$d of %2$d tracks</string>
+    <string name="learn_path_next">Next: %1$s</string>
+    <string name="learn_path_complete">Path complete</string>
+    <string name="learn_path_you_are_here">You are here</string>
+    <string name="learn_level_beginner">Beginner</string>
+    <string name="learn_level_intermediate">Intermediate</string>
+    <string name="learn_level_advanced">Advanced</string>
+    <string name="learn_recommended_after">Recommended after %1$s</string>
+    <string name="learn_prereq_notice">This track builds on %1$s. You can start it anyway.</string>
+    <string name="learn_kind_checkpoint">Checkpoint</string>
+    <string name="learn_kind_capstone">Capstone</string>
+    <string name="learn_check_layout">Check layout</string>
+    <string name="learn_checking">Checking…</string>
+    <string name="learn_layout_preview">Preview</string>
+    <string name="learn_checkpoint_title">Checkpoint complete</string>
+    <string name="learn_checkpoint_score">%1$d of %2$d right first time</string>
+    <string name="learn_checkpoint_perfect">A perfect score. You are ready for what comes next.</string>
+    <string name="learn_checkpoint_good">Solid. Revisit the lessons behind the ones you missed whenever you like.</string>
+    <string name="learn_checkpoint_retry">Worth another look. Go back over the track, then take the checkpoint again.</string>
+    <string name="learn_done">Done</string>
+    <string name="learn_check">Check</string>
+    <string name="learn_tour_title">Learn CodeAssist in a few minutes</string>
+    <string name="learn_tour_body">Short hands-on lessons right in the editor: quick fixes, adding libraries, running your code and Git. Each step checks that you did it.</string>
+    <string name="learn_tour_start">Start the tour</string>
+    <string name="learn_tour_later">Not now</string>
+    <string name="learn_task_more">More</string>
+    <string name="learn_task_less">Less</string>
+    <string name="learn_more_actions">More actions</string>
+    <string name="learn_menu_stuck">Stuck?</string>
+    <string name="learn_menu_community">Learn together</string>
+    <string name="learn_hint_progress">Hint %1$d of %2$d</string>
+    <string name="learn_solution_sub">Reveals the full answer</string>
+    <string name="learn_ask_sub">Post your code and the error for other learners</string>
+    <string name="learn_discussion_sub">Questions other learners asked here</string>
+    <string name="learn_solutions_sub">How others solved it</string>
+    <string name="learn_check_again">Check again</string>
+    <string name="learn_previous_step">Previous step</string>
+    <string name="learn_collapse_sub">Give the code more room</string>
+    <string name="learn_discussion">Discussion</string>
+    <string name="learn_discussion_count">Discussion (%1$d)</string>
+    <string name="learn_ask_question">Ask a question</string>
+    <string name="learn_ask_for_help">Ask for help</string>
+    <string name="learn_no_questions">No questions yet. Stuck? Ask, and other learners can help.</string>
+    <string name="learn_this_exercise">This exercise</string>
+    <string name="learn_whole_lesson">Whole lesson</string>
+    <plurals name="learn_answers_n">
+        <item quantity="one">%1$d answer</item>
+        <item quantity="other">%1$d answers</item>
+    </plurals>
+    <string name="learn_solved">Solved</string>
+    <string name="learn_couldnt_load">Couldn't load this. Check your connection and try again.</string>
+    <string name="learn_try_again">Try again</string>
+    <string name="learn_question_title_label">Title</string>
+    <string name="learn_question_title_hint">What are you stuck on?</string>
+    <string name="learn_question_body_label">Details</string>
+    <string name="learn_question_body_hint">What did you try, and what happened?</string>
+    <string name="learn_attach_code">Attach my code</string>
+    <string name="learn_attach_error">Attach the error</string>
+    <string name="learn_post">Post</string>
+    <string name="learn_posting">Posting…</string>
+    <string name="learn_your_answer">Your answer</string>
+    <string name="learn_answer_hint">Point the way to the fix rather than pasting the whole solution.</string>
+    <string name="learn_add_code">Add code</string>
+    <string name="learn_show_code">Show code</string>
+    <string name="learn_code_hidden">Code is hidden so it doesn't spoil the exercise</string>
+    <string name="learn_mark_solved">Mark as solved</string>
+    <string name="learn_unmark_solved">Unmark as solved</string>
+    <string name="learn_report">Report</string>
+    <string name="learn_delete">Delete</string>
+    <string name="learn_report_title">Why are you reporting this?</string>
+    <string name="learn_reason_spam">Spam</string>
+    <string name="learn_reason_abuse">Abusive or rude</string>
+    <string name="learn_reason_spoiler">Gives away the answer</string>
+    <string name="learn_reason_wrong">Wrong or misleading</string>
+    <string name="learn_reason_other">Something else</string>
+    <string name="learn_report_sent">Thanks. A moderator will take a look.</string>
+    <string name="learn_sign_in_to_post">Sign in to ask and answer questions</string>
+    <string name="learn_solutions">Solutions</string>
+    <string name="learn_see_solutions">See solutions</string>
+    <string name="learn_solutions_locked">Pass this exercise to see how other learners solved it.</string>
+    <string name="learn_solutions_empty">No shared solutions yet. Yours will appear here when you pass.</string>
+    <string name="learn_share_solutions">Share my solutions</string>
+    <string name="learn_share_solutions_sub">When you pass an exercise, learners who passed it too can see your code.</string>
+    <string name="learn_sort_top">Top</string>
+    <string name="learn_sort_new">New</string>
+    <string name="learn_you">You</string>
+    <string name="learn_error_label">What went wrong</string>
+    <string name="learn_their_code">Their code</string>
+    <string name="learn_about_step">About: %1$s</string>
+    <string name="learn_reports_title">Learn reports</string>
+    <string name="learn_reports_n">%1$d reports</string>
+    <string name="learn_hide">Hide</string>
+    <string name="learn_keep">Keep</string>
+    <string name="learn_hidden_label">Hidden</string>
+    <string name="learn_cancel">Cancel</string>
+    <string name="learn_step_short">%1$d/%2$d</string>
+    <string name="learn_collapse_task">Collapse the task</string>
+    <string name="learn_expand_task">Show the task</string>
+    <string name="learn_streak_chip">%1$d-day streak</string>
+    <string name="learn_streak_label">Day streak</string>
+    <string name="learn_best_streak">Best: %1$d days</string>
+    <string name="learn_lessons_label">Lessons started</string>
+    <string name="learn_badges_none">Finish a track to earn its badge.</string>
+    <string name="learn_section_title">Learning</string>
+    <string name="learn_sync_title">Keep your progress everywhere</string>
+    <string name="learn_sync_body">Sign in to save your lessons to your account, pick up on any device, and keep a daily streak.</string>
+    <string name="learn_sign_in">Sign in</string>
     <!-- Command palette result-section headers ("Go to"; the rest reuse the filter-tab labels) -->
     <string name="palette_section_goto">Go to</string>
     <!-- Quick-doc section headers -->
@@ -1967,6 +2209,7 @@ We never collect your code, file or project names, which features you use, or an
     <string name="icons_add_as">Add as</string>
     <string name="icons_add_count">Add %1$d to project</string>
     <string name="icons_batch_added">Added %1$d</string>
+    <string name="icons_added">Added %1$s</string>
     <string name="icons_batch_existing">%1$d already in the project</string>
     <string name="icons_batch_failed">Couldn't add %1$s</string>
     <string name="icons_copy_to">Copy to another folder</string>
@@ -2371,4 +2614,8 @@ We never collect your code, file or project names, which features you use, or an
     <string name="challenge_exponent">exponent %1$s</string>
     <string name="challenge_legend_yours">yours</string>
     <string name="challenge_legend_reference">reference</string>
+    <string name="you_delete_account">Delete account</string>
+    <string name="you_delete_account_title">Delete your account?</string>
+    <string name="you_delete_account_body">This permanently deletes your CodeAssist account and everything stored with it: your profile, published projects, reviews, likes, follows, challenge results, and AI points. Projects on this device are not affected. This can't be undone.</string>
+    <string name="you_delete_account_deleting">Deleting…</string>
 </resources>

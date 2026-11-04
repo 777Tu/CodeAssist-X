@@ -181,8 +181,130 @@ clang's candidate format is chunked (`[#void#]push_back(<#const value_type &__x#
 be stripped rather than shown. It carries no *kind*, so the shape implies it: a parameter list means
 something callable, `Pattern` is a snippet, a bare name is a macro in C and a type in C++.
 
-Asked once per word, not per keystroke: the cache is keyed on the buffer and the **start** of the word being
-typed, so narrowing a prefix re-filters what clang already said instead of re-parsing.
+Asked once per word, not per keystroke: the cache is keyed on the buffer **outside** the word being typed and
+the word's start, so narrowing a prefix re-filters what clang already said instead of re-parsing. (It used to
+hash the whole buffer, which changed on every keystroke and re-ran clang for each one.)
+
+## The resident daemon
+
+When the toolchain carries `libndkclangd.so` (tools/ndk-toolchain/daemon), completion and error checks go
+to it instead of launching clang: one long-lived process over libclang that keeps each open file's
+translation unit and its in-memory preamble between requests. No process start, no `.pch` load. Answers come
+back in clang's command-line formats, so `ClangDiagnostics` and `ClangCompletions` read them unchanged;
+completion lines also carry libclang's cursor kind (`COMPLETION(CXXMethod): ...`), so the popup shows real
+fields, methods and macros instead of guessing from the shape.
+
+Measured in the IDE on the emulator, `native-lib.cpp`:
+
+| | clang per request (precompiled preamble) | daemon |
+| --- | --- | --- |
+| completion | 32-47 ms | 18-21 ms |
+| error check | 22-32 ms | 17-19 ms |
+
+About 29 MB resident with two files open. Policy, all in `ClangDaemon`:
+
+- **Optional, never required.** Every failure (no daemon in this toolchain, could not start, died, timed
+  out, could not parse the file) answers null and the request runs clang directly, exactly as below. After
+  three deaths in a session it is left off.
+- **One request at a time.** A request cancelled while waiting its turn is dropped before it is sent; one
+  already sent runs to the end, because killing the daemon would throw away every file's preamble.
+- **Stopped after 10 minutes idle**, so the memory is not held for files nobody is editing. It also exits on
+  its own when its stdin closes, so it never outlives the IDE.
+- Each request's time inside clang goes to `<dataDir>/daemon/ndkclangd.log` (truncated at each start).
+- C++ requests pass `-fpch-instantiate-templates` too (check 46-56 -> 16-25 ms in the shell benchmark).
+
+**Testing it on a device:** `samples/ndk-plugin/run-tests-on-device.sh` dexes the whole JUnit 5 suite and
+runs it under `dalvikvm` on every attached arm64 device (API 30+), with the toolchain pushed beside it.
+`ClangDaemonDeviceTest` only runs there: the real daemon's checks and completions through the Kotlin parsers
+on ART's regex engine, C macros, a flag change reparsing, and the daemon killed between and during requests.
+
+## The precompiled preamble
+
+This is the path used when the daemon is unavailable.
+
+Nearly all of a completion or error check used to be re-parsing the headers: `#include <string>` is tens of
+thousands of lines of libc++. `ClangPreamble` finds the run of `#include`s and directives at the top of the
+file (cut at a line start, never inside an open `#if`), `PreambleCache` compiles it once into a `.pch` under
+`<dataDir>/preambles` (keyed on its text, the flags, the language, the source directory and the toolchain),
+and every request after that passes `-include-pch <pch> -Xclang -preamble-bytes=<n>,1`. clang loads the
+headers and skips those bytes of the buffer, so it parses only the user's own code.
+
+- A request whose preamble is not built yet runs uncached and queues the build on one background thread.
+  The newest queued request wins, so typing a new `#include` builds once, not once per keystroke.
+- clang refuses a `.pch` whose headers changed since it was built ("has been modified since the AST
+  file"). The request is then re-run without it and the preamble is rebuilt.
+- The four most recently used are kept, at about 8 MB each.
+- C++ preambles are built with `-fpch-instantiate-templates`, so the templates the headers use are
+  instantiated once into the `.pch` instead of at the end of every check. That halved the error check (in
+  the IDE, ~52 -> ~27 ms on the template's `native-lib.cpp`). The rare price: code that explicitly
+  specializes a template after a header already used it can see a false "explicit specialization after
+  instantiation" in the editor. The build never uses the `.pch`, so it is unaffected.
+
+Measured in the IDE on the emulator (arm64, API 37), on `native-lib.cpp` from the Native C++ App template:
+
+| | before | after |
+| --- | --- | --- |
+| completion after `hello.` | ~450 ms: a 242 ms parse, plus a `--version` launch, plus up to 100 ms of polling on each of the two (see below) | 32-47 ms |
+| error check | the same, around a ~210 ms parse | ~52 ms |
+
+Two process costs also went: `prepare()` launched `clang --version` before **every** request (now once per
+process), and `Process.waitFor(timeout, unit)` on Android polls by sleeping in steps of up to 100 ms, so a
+25 ms compile came back ~100 ms late. The timeout is now a watchdog that kills the process, and the read
+blocks on `waitFor()` without a timeout.
+
+**A superseded request kills its clang.** The analysis engine cancels a file's pass when the user types
+again, and completion cancels a superseded popup; `killableTool` turns that coroutine cancellation into
+`destroyForcibly()` on the process (`ToolCancellation`), so a check nobody will see stops instead of
+competing for the CPU with the one that replaced it. On Android, killing the process closes its streams and
+the pending read throws `InterruptedIOException`; that is treated as the expected end of a run we stopped.
+
+## Semantic highlighting
+
+The lexer colours by shape; the semantic layer colours by what clang resolved. `NdkLanguageBackend` is a thin
+C/C++ language backend (the buffer as one node, no resolution of its own) whose `semanticHighlighter` asks the
+resident daemon's `tokens` command: `clang_tokenize` + `clang_annotateTokens` over the file it already holds
+parsed, one line per identifier (`<byte offset> <byte length> <kind> <modifiers>`), converted from UTF-8 bytes
+to editor chars by `ClangSemanticTokens`. Kinds: local variable, parameter, field (globals and static members
+too, with `static`), constant (a `const` global), function, method, class (structs, unions, typedefs, aliases,
+and a constructor's name), enum, enum constant, type parameter, namespace, label, and **macro**, a colour
+attribute the UI facet registers (`cppMacro`, a child of "constant", editable in Settings > Editor Colors).
+
+Details that matter:
+- Macros need `CXTranslationUnit_DetailedPreprocessingRecord`, or `clang_annotateTokens` never sees them.
+- Inside a macro's arguments (`SQUARE(p.x)`) every token is annotated to the expansion; the arguments are
+  asked for their own cursor, and only the macro's name is the macro. In a `#define` only the name is coloured.
+- A declaration's cursor covers its whole extent, so only the token at its name is the declaring occurrence.
+- Cheap: the editor asks for errors and tokens on the same buffer back to back, and the daemon skips the
+  reparse when a unit already holds exactly that text (`tokens` 1 ms after a check; in the IDE the check after
+  tokens shows 0 ms).
+
+**Host change:** the editor's daemon only ran the semantic pass for `.java`/`.kt`/`.kts`
+(`EditorCenter.appliesTo`), which shut out every plugin language and XML's own highlighter. It now runs for
+every file; a backend with no highlighter answers empty at once.
+
+## Run: C/C++ console programs
+
+"Run <module>" appears for a module with the `[ndk]` facet that is not an Android app or library and has a
+`main()` in its sources (the "C/C++ Console App" template makes one). The row links the program, reusing the
+build's objects (everything is `-fPIC`, which a position-independent executable links as readily as a
+library), and runs it in the IDE's Run console: output streams, typed input is its stdin, Stop ends it.
+
+**How it can run at all.** Since Android 10 an app may not `exec()` a file in its own storage: running the
+program directly fails with `error=13, Permission denied` (`avc: denied { execute_no_trans }`). The system
+linker may load one, so it runs as `/system/bin/linker64 <file>` (`avc: granted { execute }`), copied first
+into the IDE's internal cache (`java.io.tmpdir`) because shared storage is mounted noexec. Android 9 and older
+execute it directly. Both verified on the API 37 emulator from inside the IDE's process. That `granted` line is
+an audit: Android is watching this permission, and a future version could remove it.
+
+**Why a launcher.** `libndkrun.so` (tools/ndk-toolchain/daemon/ndkrun.c) runs the program in a pseudo-terminal.
+Through plain pipes C's stdio buffers stdout fully, so `printf("Name: "); scanf(...)` shows no prompt until the
+program exits; on a terminal the prompt appears before the read, as in a shell. The terminal is set up for the
+IDE's console: no echo (the console shows what was typed), no `\n` -> `\r\n`, canonical input, and the console's
+end-of-input becomes a terminal EOF. A crash prints the signal (`Segmentation fault`) and exits 128+N. Both the
+launcher and the program die with their parent (`PR_SET_PDEATHSIG`), so Stop never leaves one running.
+
+**The console needs SPI 3.2.0** (`RunAction.console`). On an older IDE the program still runs, with its output in
+the build log and no input.
 
 ## JNI
 

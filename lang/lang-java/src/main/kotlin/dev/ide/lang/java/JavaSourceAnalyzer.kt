@@ -228,6 +228,10 @@ class JavaSourceAnalyzer private constructor(
     ): List<dev.ide.lang.dom.TextRange> =
         IntellijPsiHost.withParseLock { dev.ide.lang.java.rename.JavaRename.referencesIn(env.parse(name, text), target) }
 
+    /** Highlight-usages-at-caret over [file]'s live [text]; see [dev.ide.lang.java.rename.JavaRename.usageHighlightsAt]. */
+    fun usageHighlightsAt(file: VirtualFile, text: CharSequence, offset: Int): List<dev.ide.lang.highlight.UsageHighlight>? =
+        IntellijPsiHost.withParseLock { dev.ide.lang.java.rename.JavaRename.usageHighlightsAt(psiOf(file, text), offset) }
+
     private val navigation by lazy {
         JavaNavigation(env.facade) { fqn -> subtypeIndexQuery(fqn).map { it.fqn } }
     }
@@ -241,8 +245,8 @@ class JavaSourceAnalyzer private constructor(
         IntellijPsiHost.withParseLock { navigation.targets(psiOf(file, text), offset, kind) }
 
     /** Where the source class [fqn], or its [member], is declared, for a go-to from another language. */
-    fun declarationOf(fqn: String, member: String?): JavaNavTarget? =
-        IntellijPsiHost.withParseLock { navigation.declarationOf(fqn, member) }
+    fun declarationOf(fqn: String, member: String?, paramTypes: List<String>? = null): JavaNavTarget? =
+        IntellijPsiHost.withParseLock { navigation.declarationOf(fqn, member, paramTypes) }
 
     /** The go-to actions that have a target at [offset], each with its targets. */
     fun navigationOptions(file: VirtualFile, text: CharSequence, offset: Int): List<Pair<JavaNavKind, List<JavaNavTarget>>> =

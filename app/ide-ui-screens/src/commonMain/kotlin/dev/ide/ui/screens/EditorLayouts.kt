@@ -52,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -113,6 +114,7 @@ import dev.ide.ui.components.RightToolOverlay
 import dev.ide.ui.ext.ToolWindowAnchor
 import dev.ide.ui.ext.ToolWindowRegistry
 import dev.ide.ui.generated.resources.Res
+import dev.ide.ui.generated.resources.bookmarks_panel_title
 import dev.ide.ui.generated.resources.buildc_build
 import dev.ide.ui.generated.resources.logs_title
 import dev.ide.ui.generated.resources.run
@@ -222,6 +224,9 @@ internal fun buildLeftPanels(
         SidebarPanel(LeftPanelId.STRUCTURE, structureTitle, CaIcons.code, order = 30) {
             StructureOutline(state, onNavigated = closeDrawer, modifier = Modifier.fillMaxSize())
         },
+        SidebarPanel(LeftPanelId.BOOKMARKS, stringResource(Res.string.bookmarks_panel_title), CaIcons.pin, order = 35) {
+            BookmarksTodoPanel(state, onNavigated = closeDrawer, modifier = Modifier.fillMaxSize())
+        },
     )
     // The source-control panel is contributed by the version-control plugin (it registers under
     // LeftPanelId.SOURCE, so it takes this rail slot and the phone bottom-nav slot that maps to it). With the
@@ -242,6 +247,8 @@ private fun dispatchSymbolAction(state: IdeUiState, action: String) {
         CustomizationActions.MOVE_LINE_DOWN -> s.moveLines(1)
         CustomizationActions.DUPLICATE_LINE -> s.duplicateSelection()
         CustomizationActions.NEXT_PROBLEM -> s.goToDiagnostic(forward = true)
+        CustomizationActions.PASTE_HISTORY -> s.requestPasteHistory()
+        CustomizationActions.TOGGLE_BOOKMARK -> s.toggleBookmark()
     }
 }
 
@@ -765,6 +772,16 @@ internal fun CompactLayout(
                     )
                     // While the keyboard is up: a coding-symbol accessory bar sits directly above it. Off-keyboard,
                     // the dock's collapsed bar takes the slot instead.
+                    // Volume keys move the caret while typing, when the user turned that on.
+                    val takeVolumeKeys = keyboardOpen && state.active != null && state.volumeKeysMoveCaret
+                    DisposableEffect(takeVolumeKeys) {
+                        if (takeVolumeKeys) {
+                            dev.ide.ui.platform.VolumeKeyCaret.handler = { dir ->
+                                state.active?.session?.moveHorizontal(dir, select = false)
+                            }
+                        }
+                        onDispose { dev.ide.ui.platform.VolumeKeyCaret.handler = null }
+                    }
                     if (keyboardOpen && state.active != null) {
                         // Derived: the diagnostics list is replaced on every edit, and this scope should
                         // recompose only when the jump key appears or goes away.
@@ -773,7 +790,7 @@ internal fun CompactLayout(
                             derivedStateOf { activeSession?.diagnostics?.isNotEmpty() == true }
                         }
                         EditorSymbolBar(
-                            symbols = state.symbolKeys.ifEmpty { DEFAULT_SYMBOL_KEYS },
+                            symbols = effectiveSymbolKeys(state.symbolKeys, state.active?.path),
                             onSymbol = { sym -> state.active?.session?.commitText(sym) },
                             onAction = { id -> dispatchSymbolAction(state, id) },
                             showDiagnosticJump = hasDiagnostics,
@@ -781,11 +798,23 @@ internal fun CompactLayout(
                             // The dismiss key only where the platform offers no way out of the keyboard
                             // itself; Android's back already does it. See [hasSystemBack].
                             onHideKeyboard = if (hasSystemBack) null else ({ state.active?.session?.ime?.hide() }),
+                            trackpad = remember(state) {
+                                object : SymbolBarTrackpad {
+                                    override fun begin() { state.active?.session?.beginFloatingCaret() }
+                                    override fun move(columns: Float, lines: Float) {
+                                        state.active?.session?.moveFloatingCaret(columns, lines)
+                                    }
+                                    override fun end() { state.active?.session?.endFloatingCaret() }
+                                }
+                            },
                         )
                     }
                     // Reserve the dock's collapsed-bar slot so the editor column isn't hidden behind it. Zen mode hides
                     // the bar, unless the console is pulled up.
-                    if (!keyboardOpen && !state.zenMode) androidx.compose.foundation.layout.Spacer(Modifier.height(DockBarHeight))
+                    // Room for the dock's bar, which a lesson hides (see the BuildDock below).
+                    if (!keyboardOpen && !state.zenMode && !(LocalLessonBanner.current != null && state.learnFocus)) {
+                        androidx.compose.foundation.layout.Spacer(Modifier.height(DockBarHeight))
+                    }
                 }
                 // The bottom nav is the collapsed face of the build dock: swipe it up (or tap its build
                 // chip / the top-bar console toggle) and it expands into the build console.
@@ -793,7 +822,9 @@ internal fun CompactLayout(
                     open = state.consoleOpen,
                     onOpenChange = { state.consoleOpen = it },
                     buildState = buildState,
-                    hidden = (keyboardOpen || state.zenMode) && !state.consoleOpen,
+                    // Hidden during a lesson too: Search / Source / AI are distractions there (and the AI would
+                    // do the exercise). The console still opens for a run; Files and Run stay in the top bar.
+                    hidden = (keyboardOpen || state.zenMode || (LocalLessonBanner.current != null && state.learnFocus)) && !state.consoleOpen,
                     modifier = Modifier.align(Alignment.BottomCenter),
                     hint = dockHint,
                     onHintShown = {
@@ -809,10 +840,14 @@ internal fun CompactLayout(
                             onSelect = { state.onBottomNav(it) },
                             showSource = leftPanels.any { it.id == LeftPanelId.SOURCE },
                             rightTool = rightPrimary?.let { tw ->
-                                RightToolNavItem(actionIcon(tw.iconId), tw.title, open = state.selectedRightPanel != null) {
-                                    if (state.selectedRightPanel != null) state.selectedRightPanel = null
-                                    else state.selectRightPanel(tw.id)
-                                }
+                                RightToolNavItem(
+                                    actionIcon(tw.iconId), tw.title, open = state.selectedRightPanel != null,
+                                    onClick = {
+                                        if (state.selectedRightPanel != null) state.selectedRightPanel = null
+                                        else state.selectRightPanel(tw.id)
+                                    },
+                                    busy = tw.busy?.invoke(state.backend) == true,
+                                )
                             },
                         )
                     },

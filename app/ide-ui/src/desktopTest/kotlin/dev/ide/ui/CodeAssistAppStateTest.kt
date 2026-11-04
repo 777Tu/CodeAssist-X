@@ -31,7 +31,10 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -51,7 +54,22 @@ class CodeAssistAppStateTest {
         val folderKind: UiProjectFolderKind = UiProjectFolderKind.GRADLE,
         /** The Projects Store this backend serves. Unsupported unless a test exercises the store. */
         private val storeService: StoreService = StoreService.Unsupported,
+        /** Learn: when set, opening a lesson workspace succeeds and becomes the open project. */
+        val workspaceOpens: Boolean? = null,
     ) : StubBackend() {
+        var projectRoot = "/stub"
+        override val project: ProjectInfo get() = ProjectInfo("p", projectRoot, 0)
+        val workspaceRequests = ArrayList<String>()
+        override val learn: dev.ide.ui.backend.LearnService = object : dev.ide.ui.backend.LearnService {
+            override fun learnAvailable() = true
+            override suspend fun openWorkspace(lessonId: String): Boolean {
+                workspaceRequests += lessonId
+                if (workspaceOpens != true) return false
+                projectRoot = "/home/learn-workspaces/kotlin"
+                epochFlow.value++
+                return true
+            }
+        }
         /** What a picked `.zip` unpacks to; null = not a zip. */
         var archive: UiProjectArchive? = null
         var discarded = 0
@@ -74,6 +92,7 @@ class CodeAssistAppStateTest {
         override suspend fun inspectProjectFolder(path: String): UiProjectFolderKind = folderKind
         override suspend fun openProject(rootPath: String): Boolean {
             opened += rootPath
+            projectRoot = rootPath
             epochFlow.value++
             return true
         }
@@ -289,6 +308,23 @@ class CodeAssistAppStateTest {
         assertEquals(Screen.Hub, app.screen)
         app.navigateBack()
         assertEquals(Screen.Editor, app.screen)
+    }
+
+    /** Back from a Settings page lands on the row the user opened, not at the top of the list. */
+    @Test
+    fun theSettingsListKeepsItsPlaceUntilSettingsIsLeft() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        app.openHub(Screen.Projects)
+        val scroll = app.hubListScroll
+        app.navigateTo(Screen.Storage)
+        app.navigateBack()
+        assertSame(scroll, app.hubListScroll, "kept through a visit to one of its pages")
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+        assertNotSame(scroll, app.hubListScroll, "a fresh list next time Settings is opened")
     }
 
     @Test
@@ -553,6 +589,25 @@ class CodeAssistAppStateTest {
         app.openHub(Screen.Projects)
         app.openKeystoreManagerFromHub()
         assertFalse(app.keystoreInProject)
+    }
+
+    @Test
+    fun aProjectOpenedFromTheAiTabKeepsTheUserInTheChat() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        // The AI tab opens (or the agent creates) a project in the background: no jump to the editor.
+        app.selectHomeTab(HomeTab.Ai)
+        backend.openProject("/ws/app")
+        advanceUntilIdle()
+        assertEquals(Screen.Projects, app.screen)
+
+        // Anywhere else, opening a project still lands in the editor.
+        app.selectHomeTab(HomeTab.Projects)
+        backend.openProject("/ws/app")
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
     }
 
     @Test
@@ -901,6 +956,168 @@ class CodeAssistAppStateTest {
         assertEquals(Screen.Projects, app.screen)
         // Returning re-reads progress so the just-finished steps show.
         assertTrue(app.learnEpoch > epochBefore)
+    }
+
+    @Test
+    fun aTrackOpenedFromAPathStepsBackToThePath() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        app.openPath("path-android")
+        assertEquals(Screen.LearnPath, app.screen)
+        app.openTrackFromPath("kotlin-basics")
+        assertEquals(Screen.LessonTrack, app.screen)
+        app.openLesson("kt-hello")
+        app.navigateBack()
+        assertEquals(Screen.LessonTrack, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.LearnPath, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+
+        // A track opened from the Learn tab still goes straight back to the tab.
+        app.openTrack("kotlin-basics")
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    @Test
+    fun aLessonWithExercisesMovesIntoTheEditorAndBackOut() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = true).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        app.openTrack("kotlin-basics")
+        app.openLesson("kt-basics-capstone")
+        assertEquals(Screen.LessonPlayer, app.screen)
+        // The player hands a lesson with exercises over to the editor.
+        app.openLessonInEditor("kt-basics-capstone", 1)
+        advanceUntilIdle()
+        assertEquals(listOf("kt-basics-capstone"), backend.workspaceRequests)
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.lessonInEditor)
+        assertEquals(1, app.lessonInitialStep)
+        // The workspace is never remembered as the project to reopen on the next launch.
+        assertNotEquals("/home/learn-workspaces/kotlin", backend.prefs["session.lastProject"])
+
+        // Back leaves the lesson for its track, without the close-project prompt.
+        app.navigateBack()
+        assertEquals(Screen.LessonTrack, app.screen)
+        assertFalse(app.lessonInEditor)
+        assertFalse(app.confirmCloseProject)
+    }
+
+    @Test
+    fun openingAnotherProjectEndsTheLesson() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = true).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openLessonInEditor("kt-basics-capstone", 0)
+        advanceUntilIdle()
+        assertTrue(app.lessonInEditor)
+        app.openProject(ProjectInfo("app", "/ws/app", 1))
+        advanceUntilIdle()
+        assertFalse(app.lessonInEditor, "the banner belongs to the lesson's workspace only")
+        assertEquals(Screen.Editor, app.screen)
+    }
+
+    @Test
+    fun aWorkspaceThatWillNotOpenLeavesTheLessonInThePlayer() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = false).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openLesson("kt-basics-capstone")
+        app.openLessonInEditor("kt-basics-capstone", 0)
+        advanceUntilIdle()
+        assertFalse(app.lessonInEditor)
+        assertTrue(app.lessonEditorUnavailable)
+        assertEquals(Screen.LessonPlayer, app.screen)
+    }
+
+    @Test
+    fun aDiscussionOpenedFromALessonReturnsToIt() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = true).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openLessonInEditor("kt-basics-capstone", 1)
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.openDiscussion("kt-basics-capstone", "kt-cap-i")
+        assertEquals(Screen.LearnDiscussion, app.screen)
+        app.openThread("t1")
+        assertEquals(Screen.LearnThread, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.LearnDiscussion, app.screen)
+        assertEquals("kt-cap-i", app.communityStepId)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen, "back to the lesson, not the home screen")
+        assertTrue(app.lessonInEditor, "the lesson is still running")
+    }
+
+    @Test
+    fun askingReplacesTheFormWithTheNewQuestion() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = true).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openLessonInEditor("kt-basics-capstone", 1)
+        advanceUntilIdle()
+        app.openAsk("kt-basics-capstone", "kt-cap-i", code = "fun main() {}", errorText = "Test 1 of 4 failed")
+        assertEquals(Screen.LearnAsk, app.screen)
+        assertEquals("fun main() {}", app.askPrefill?.code)
+        app.questionPosted("t9")
+        assertEquals(Screen.LearnThread, app.screen)
+        assertEquals("t9", app.communityThreadId)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen, "Back skips the posted form")
+    }
+
+    @Test
+    fun anAnsweredQuestionPushOpensItsThread() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openNotificationTarget(
+            dev.ide.ui.backend.UiNotification(
+                id = "n1", kind = dev.ide.ui.backend.UiNotificationKind.LEARN, title = "New answer to your question",
+                target = dev.ide.ui.backend.UiNotificationTarget.Screen("learnThread:abc-123"),
+            ),
+        )
+        assertEquals(Screen.LearnThread, app.screen)
+        assertEquals("abc-123", app.communityThreadId)
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    @Test
+    fun aFirstTimeUserIsOfferedTheCodeAssistTourOnce() = runTest {
+        val backend = AppBackend(mapOf("migration.acknowledged" to "true", "legacy.recovery.seen" to "true"))
+            .apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        assertTrue(app.showOnboarding)
+        app.dismissOnboarding()
+        assertTrue(app.showLearnTourOffer)
+        app.startLearnTour()
+        assertFalse(app.showLearnTourOffer)
+        assertEquals(Screen.LessonPlayer, app.screen)
+        assertEquals("ca-ed-lightbulb", app.currentLessonId)
+        assertEquals("true", backend.prefs["learn.tourOffered"])
+
+        // Never again, even if onboarding is somehow dismissed a second time.
+        val again = appState(backend)
+        advanceUntilIdle()
+        again.dismissOnboarding()
+        assertFalse(again.showLearnTourOffer)
+    }
+
+    @Test
+    fun learnWorkspacePathsAreRecognised() {
+        assertTrue(isLearnWorkspace("/data/user/0/app/files/learn-workspaces/kotlin"))
+        assertTrue(isLearnWorkspace("C:\\Users\\me\\.codeassist\\learn-workspaces\\java\\"))
+        assertFalse(isLearnWorkspace("/sdcard/CodeAssist/projects/learn-workspaces-demo"))
+        assertFalse(isLearnWorkspace("/ws/app"))
     }
 
     @Test

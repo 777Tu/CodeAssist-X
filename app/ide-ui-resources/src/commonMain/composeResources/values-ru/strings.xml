@@ -9,11 +9,11 @@
     <string name="backup_projects">Резервное копирование</string>
     <string name="got_it">Понятно</string>
     <string name="help_improve_codeassist">Помочь улучшить CodeAssist</string>
-    <string name="help_improve_codeassist_content"><![CDATA[Делитесь анонимными данными о производительности, чтобы мы могли видеть задержки и сбои и исправлять нужные вещи.
+    <string name="help_improve_codeassist_content"><![CDATA[Делитесь анонимными данными об использовании и производительности, чтобы мы видели задержки, сбои и то, какими функциями пользуются чаще всего, и исправляли нужные вещи.
 
-Мы собираем: версию приложения и модель устройства, время сборки, индексации и автодополнения кода, статус сборки, очищенные отчеты о сбоях, а также когда реклама показывается или закрывается и изменения ваших настроек рекламы.
+Мы собираем: версию приложения и модель устройства, время сборки, индексации, автодополнения кода и предпросмотра, статус сборки, очищенные отчеты о сбоях, как часто используется каждая функция (например, сколько раз открывали предпросмотр макета или поиск использований), а также когда реклама показывается или закрывается и изменения ваших настроек рекламы.
 
-Мы никогда не собираем ваш код, имена файлов или проектов, используемые функции или что-либо, что идентифицирует вас. Вы можете изменить это в любое время в разделе «Еще» при открытом проекте.]]></string>
+Мы никогда не собираем ваш код, имена файлов или проектов, то, что вы вводите, или что-либо, что идентифицирует вас. Вы можете изменить это в любое время в разделе «Еще» при открытом проекте.]]></string>
     <string name="learn_more">Подробнее</string>
     <string name="allow">Разрешить</string>
     <string name="no_thanks">Нет, спасибо</string>
@@ -93,6 +93,12 @@
     <string name="support_show_ads_desc">Показывать рекламу в приложении. Вы можете отключить ее в любое время.</string>
     <string name="support_show_interstitials">Полноэкранная реклама</string>
     <string name="support_show_interstitials_desc">Иногда полноэкранная реклама во время долгих сборок и после завершённых уроков.</string>
+    <plurals name="ads_off_locked">
+        <item quantity="one">Реклама остаётся включённой сутки после установки или обновления. Отключить её можно будет через %1$d час.</item>
+        <item quantity="few">Реклама остаётся включённой сутки после установки или обновления. Отключить её можно будет через %1$d часа.</item>
+        <item quantity="many">Реклама остаётся включённой сутки после установки или обновления. Отключить её можно будет через %1$d часов.</item>
+        <item quantity="other">Реклама остаётся включённой сутки после установки или обновления. Отключить её можно будет через %1$d часа.</item>
+    </plurals>
     <string name="ads_off_title">Отключить рекламу?</string>
     <string name="ads_off_body">Можно отключить только полноэкранную рекламу и оставить небольшую рекламу в списках и панелях.</string>
     <string name="ads_off_all">Всю</string>
@@ -265,6 +271,42 @@
     <string name="breadcrumb_blocks">Блоки</string>
     <string name="breadcrumb_preview">Предпросмотр</string>
     <string name="breadcrumb_split">Разделение</string>
+    <string name="breadcrumb_nav_back">Назад</string>
+    <string name="breadcrumb_nav_forward">Вперёд</string>
+    <string name="symbolbar_more">Ещё клавиши</string>
+    <string name="symbolbar_trackpad">Перетащите, чтобы двигать курсор</string>
+    <string name="conflict_current">Текущее</string>
+    <string name="conflict_incoming">Входящее</string>
+    <string name="conflict_both">Оба</string>
+    <string name="conflict_current_desc">Оставить текущую сторону</string>
+    <string name="conflict_incoming_desc">Оставить входящую сторону</string>
+    <string name="conflict_both_desc">Оставить обе стороны</string>
+    <string name="gesture_nothing_to_undo">Нечего отменять</string>
+    <string name="gesture_nothing_to_redo">Нечего возвращать</string>
+    <string name="paste_history_title">Вставить из истории</string>
+    <string name="change_revert">Откатить</string>
+    <string name="change_before">В последнем коммите</string>
+    <string name="change_added">Добавлено после последнего коммита</string>
+    <string name="history_title">Локальная история</string>
+    <string name="symbolbar_bookmark">Закладка</string>
+    <string name="bookmarks_title">Закладки</string>
+    <string name="bookmarks_empty">Закладок пока нет. Отметьте строку с курсором клавишей F11 или кнопкой «Закладка» за ⋯ на панели символов.</string>
+    <string name="todo_title">TODO</string>
+    <string name="todo_refresh">Обновить</string>
+    <string name="todo_empty">В проекте нет комментариев TODO и FIXME.</string>
+    <string name="bookmarks_panel_title">Закладки и TODO</string>
+    <string name="history_back">Назад</string>
+    <string name="history_restore">Восстановить</string>
+    <string name="history_empty">Пока ничего не сохранено. Каждое сохранение файла оставляет здесь версию.</string>
+    <string name="history_same">Совпадает с текущим файлом</string>
+    <string name="edchrome_local_history">Локальная история</string>
+    <string name="paste_history_clear">Очистить</string>
+    <string name="paste_history_empty">Здесь появится текст, который вы копируете или вырезаете в редакторе.</string>
+    <string name="symbolbar_clipboard">Буфер обмена</string>
+    <plurals name="paste_history_lines">
+        <item quantity="one">%1$d строка</item>
+        <item quantity="other">%1$d строк</item>
+    </plurals>
     <string name="edchrome_files">Файлы</string>
     <string name="edchrome_more">Ещё</string>
     <string name="sidebar_hide_tool_window_bar">Скрыть панель инструментов</string>
@@ -327,6 +369,13 @@
     <string name="kotlin_configure">Настроить Kotlin</string>
     <string name="kotlin_configuring">Настройка…</string>
     <string name="kotlin_configure_failed">Не удалось настроить Kotlin: %1$s</string>
+    <string name="missing_libraries_notice">Этот файл использует библиотеки, которые ещё не добавлены: %1$s</string>
+    <string name="missing_libraries_add_all">Добавить все</string>
+    <string name="missing_libraries_adding">Добавление…</string>
+    <string name="missing_library_failed">Не удалось добавить библиотеку: %1$s</string>
+    <string name="ad_inspector">Ad Inspector</string>
+    <string name="ad_inspector_desc">Какие рекламные сети загружаются и почему какая-то не работает. Только в сборках для разработки на тестовых устройствах.</string>
+    <string name="ad_inspector_open">Открыть</string>
     <string name="sources_download">Скачать</string>
     <string name="sources_downloading">Скачивание…</string>
     <string name="sources_download_failed">Не удалось скачать: %1$s</string>
@@ -339,6 +388,40 @@
     <string name="home_store">Обзор</string>
     <string name="home_learn">Обучение</string>
     <string name="store_title">Обзор</string>
+    <string name="submit_checks_title">Что проверяют модераторы</string>
+    <string name="submit_checks_english">Название, краткое описание и описание написаны на английском.</string>
+    <string name="submit_checks_screenshots">Скриншоты показывают работающее приложение, а не редактор.</string>
+    <string name="submit_checks_summary">Краткое описание одной строкой говорит, что делает проект.</string>
+    <string name="submit_checks_icon">У приложения свой значок, а не стандартный.</string>
+    <string name="submit_checks_own">Это ваша собственная работа, без секретных ключей и истории чатов с ИИ.</string>
+    <string name="submit_warn_english">Страницы в магазине должны быть на английском, а этот текст похож на другой язык. Напишите его на английском; перевод можно оставить ниже.</string>
+    <string name="submit_warn_summary">Скажите одной строкой, что делает проект. Краткое описание, которое только повторяет название, — самая частая причина возврата.</string>
+    <string name="submit_warn_spam">Фразы вроде «download free» или «mod apk» выглядят как спам, и такие страницы возвращают.</string>
+    <string name="submit_confirm_title">Перед отправкой</string>
+    <string name="submit_confirm_body">Скорее всего, модератор вернёт это:</string>
+    <string name="submit_confirm_fix">Исправить</string>
+    <string name="submit_confirm_send">Всё равно отправить</string>
+    <string name="store_trending">В тренде</string>
+    <string name="store_trending_search">Искать «%1$s»</string>
+    <string name="store_translate">Перевести</string>
+    <string name="store_translating">Перевод…</string>
+    <string name="store_translated">Переведено автоматически</string>
+    <string name="store_show_original">Показать оригинал</string>
+    <string name="store_update_to">Обновить до v%1$s</string>
+    <string name="store_update_versions">Установлена v%1$s · доступна v%2$s</string>
+    <string name="store_update_conflict_title">Вы изменили этот проект</string>
+    <string name="store_update_conflict_body">Обновление на месте перезапишет ваши изменения в:</string>
+    <string name="store_update_conflict_more">и ещё %1$d</string>
+    <string name="store_update_conflict_unknown">Этот проект был установлен до того, как CodeAssist начал отслеживать изменения, поэтому он не может отличить ваши правки от оригинала.</string>
+    <string name="store_update_conflict_keep">Если установить новую версию отдельным проектом, ваша копия останется в точности как есть.</string>
+    <string name="store_update_as_copy">Установить как новую копию</string>
+    <string name="home_update_review">Посмотреть</string>
+    <string name="store_update_merge">Обновить и сохранить мои изменения</string>
+    <string name="store_update_changed_files">Файлы, которые вы изменили после установки:</string>
+    <string name="store_update_merge_note">Ваши изменения и новая версия объединяются пофайлово. Где вы оба изменили одни и те же строки, сохраняются оба варианта, чтобы вы выбрали.</string>
+    <string name="store_merge_done_title">Обновлено, ваши изменения сохранены</string>
+    <string name="store_merge_conflicts_body">Вы и автор изменили одни и те же строки в этих файлах. Обе версии есть в файле, между маркерами &lt;&lt;&lt;&lt;&lt;&lt;&lt; и &gt;&gt;&gt;&gt;&gt;&gt;&gt;, чтобы вы выбрали:</string>
+    <string name="store_merge_open">Открыть проект</string>
     <string name="store_subtitle">Шаблоны и примеры проектов для начала работы</string>
     <string name="store_settings_and_tools">Настройки и инструменты</string>
     <string name="store_search_hint">Поиск шаблонов и примеров</string>
@@ -693,8 +776,26 @@
     <string name="keystore_import_key_password">Пароль ключа (пусто = пароль хранилища)</string>
     <string name="sdk_manager_title">Менеджер SDK</string>
     <string name="sdk_could_not_load">Не удалось загрузить пакеты.</string>
-    <string name="sdk_sources_documentation">Исходники и документация</string>
-    <string name="sdk_sources_documentation_desc">Скачайте исходники платформы SDK и исходники JDK, чтобы редактор мог показывать javadoc, имена параметров и переходить к исходному коду SDK. Загрузки продолжаются в фоне, поэтому вы можете покинуть этот экран и продолжить работу.</string>
+    <string name="sdk_intro">Устанавливайте платформы Android, с которыми компилируются ваши модули, и исходники, чтобы редактор показывал документацию и переходил к исходному коду SDK. Загрузки продолжаются в фоне, так что этот экран можно закрыть.</string>
+    <string name="sdk_show_all_versions">Показать все версии (%1$d)</string>
+    <string name="sdk_show_fewer">Показать меньше</string>
+    <string name="sdk_tag_latest">Последняя</string>
+    <string name="sdk_tag_project">Ваш проект</string>
+    <string name="sdk_fail_offline">Не удалось связаться с сервером загрузок. Проверьте подключение к интернету и попробуйте снова.</string>
+    <string name="sdk_fail_storage">Недостаточно свободного места, чтобы завершить загрузку. Освободите место и попробуйте снова.</string>
+    <string name="sdk_fail_not_found">На сервере загрузок больше нет этого пакета. Обновите список и попробуйте снова.</string>
+    <string name="sdk_fail_server_code">На сервере загрузок произошла ошибка (HTTP %1$d). Обычно это временно, попробуйте снова чуть позже.</string>
+    <string name="sdk_fail_server">На сервере загрузок произошла ошибка. Обычно это временно, попробуйте снова чуть позже.</string>
+    <string name="sdk_fail_license">Перед установкой этого пакета нужно принять его лицензию.</string>
+    <string name="sdk_fail_corrupt">Загруженный файл повреждён. Попробуйте снова, чтобы скачать новую копию.</string>
+    <string name="sdk_fail_cancelled">Отменено. Уже загруженная часть сохранена, загрузка продолжится с того же места.</string>
+    <string name="sdk_fail_unknown">Загрузка не завершилась.</string>
+    <string name="sdk_load_failed_title">Не удалось загрузить список пакетов</string>
+    <string name="sdk_action_free_space">Освободить место</string>
+    <string name="sdk_action_refresh">Обновить список</string>
+    <string name="sdk_action_review_license">Посмотреть лицензию</string>
+    <string name="sdk_details_show">Подробности</string>
+    <string name="sdk_details_hide">Скрыть подробности</string>
     <string name="sdk_downloads">Загрузки</string>
     <string name="sdk_clear_finished">Очистить завершённые</string>
     <string name="sdk_jdk">JDK</string>
@@ -1052,6 +1153,11 @@
     <string name="set_editor_two_axis_desc">Перетаскивайте в любом направлении, чтобы прокручивать сразу по обеим осям (касание)</string>
     <string name="set_editor_pinch">Масштабирование щипком</string>
     <string name="set_editor_pinch_desc">Сведите или разведите два пальца, чтобы изменить размер шрифта кода</string>
+    <string name="set_editor_volume_keys">Клавиши громкости двигают курсор</string>
+    <string name="set_editor_volume_keys_desc">При наборе на телефоне клавиша громкости вверх сдвигает курсор влево, вниз — вправо, вместо изменения громкости</string>
+    <string name="set_editor_inline_blame">Кто изменил эту строку</string>
+    <string name="set_editor_inline_blame_desc">В Git-проекте показывать, кто последним изменил строку с курсором, когда и зачем, бледным текстом после её конца</string>
+    <string name="blame_uncommitted">Ещё не закоммичено</string>
     <string name="set_editor_kbd_suggest">Подсказки клавиатуры</string>
     <string name="set_editor_kbd_suggest_desc">Разрешить экранной клавиатуре автоисправление, подсказки и автопробелы (обычная клавиатура). Выключите для ввода чистого кода, чтобы после набранной «.» не вставлялся автоматический пробел, ценой полосы подсказок.</string>
     <string name="set_editor_close_unsaved">Закрытие вкладки с несохранёнными изменениями</string>
@@ -1101,7 +1207,7 @@
     <string name="set_br_dexbatch_desc">В очень большом приложении финальный этап dex-преобразования объединяет классы пакетами, чтобы не держать их все в памяти одновременно. Меньшие пакеты снижают расход памяти (хорошо для устройств с малым объёмом памяти), но немного увеличивают размер APK (меньше общего сжатия между классами); большие пакеты упаковывают плотнее, но требуют больше памяти на каждое слияние. Большинство приложений никогда до этого не доходят: настройка срабатывает лишь при нескольких тысячах классов.</string>
     <string name="set_br_dexfork">Максимум параллельных dex-процессов</string>
     <string name="set_privacy_analytics">Делиться аналитикой производительности</string>
-    <string name="set_privacy_analytics_desc">Только анонимные метрики производительности и рекламы, никогда ваш код или имена файлов</string>
+    <string name="set_privacy_analytics_desc">Только анонимная статистика использования функций, метрики производительности и рекламы, никогда ваш код или имена файлов</string>
     <string name="set_privacy_clear">Очистить кеши</string>
     <string name="set_privacy_clear_desc">Освободить восстановимые кеши зависимостей / языка / предпросмотра (никогда исходники)</string>
     <string name="set_privacy_clear_btn">Очистить</string>
@@ -1255,4 +1361,15 @@
     <string name="close_project_save_and_close">Сохранить и закрыть</string>
     <string name="sdk_platform_tools">Инструменты платформы</string>
     <string name="sdk_platform_tools_desc">adb: с его помощью «Запуск» устанавливает и открывает приложение на телефоне или эмуляторе, подключённом к этому компьютеру.</string>
+    <string name="you_delete_account">Удалить аккаунт</string>
+    <string name="you_delete_account_title">Удалить аккаунт?</string>
+    <string name="you_delete_account_body">Ваш аккаунт CodeAssist будет удалён навсегда вместе со всем, что с ним связано: профилем, опубликованными проектами, отзывами, лайками, подписками, результатами задач и баллами ИИ. Проекты на этом устройстве не затрагиваются. Отменить это нельзя.</string>
+    <string name="you_delete_account_deleting">Удаление…</string>
+    <string name="you_account">Аккаунт</string>
+    <plurals name="you_releases">
+        <item quantity="one">%1$d выпуск</item>
+        <item quantity="few">%1$d выпуска</item>
+        <item quantity="many">%1$d выпусков</item>
+        <item quantity="other">%1$d выпуска</item>
+    </plurals>
 </resources>

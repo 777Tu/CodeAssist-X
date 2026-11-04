@@ -620,6 +620,8 @@ class IdeServices private constructor(
         }
 
         override fun projectJavaFiles() = this@IdeServices.projectJavaFiles()
+        override fun projectKotlinFiles() = this@IdeServices.projectFilesEndingWith(".kt")
+        override fun javaDeclarationAt(file: Path, text: String, offset: Int) = this@IdeServices.javaDeclarationAt(file, text, offset)
         override fun isValidJavaIdentifier(s: String) = this@IdeServices.isValidJavaIdentifier(s)
         override val composePreviewRunner get() = this@IdeServices.composePreviewRunner
         override fun analyzerFor(module: Module, language: LanguageId) =
@@ -1087,10 +1089,13 @@ class IdeServices private constructor(
             val start = System.nanoTime()
             val scope = runCatching { buildIndexScope() }.getOrElse { return }
             val scoped = System.nanoTime()
+            // Alongside the pass where memory allows, after it where it is tight (two peaks must not stack there).
+            if (!DeviceMemory.isLow) prewarmResourceRepositories()
             runCatching {
                 if (invalidate) indexService.invalidate()
                 indexService.ensureUpToDate(scope)
             }
+            if (DeviceMemory.isLow) prewarmResourceRepositories()
             val end = System.nanoTime()
             val pass = (indexService as? IndexServiceImpl)?.lastPass
             val kinds = pass?.built.orEmpty().map { it to builtKind(it, store.rootPath, sharedCachesRoot) }
@@ -1374,6 +1379,9 @@ class IdeServices private constructor(
      */
     private val diskBaselines = ConcurrentHashMap<Path, String>()
 
+    /** Saved versions of the project's files, kept beside it (see [LocalHistory]). */
+    val localHistory: LocalHistory by lazy { LocalHistory(store.rootPath.resolve(".platform/local-history"), store.rootPath) }
+
     /** [text] is both the overlay for [norm] and what its file holds. */
     private fun putInStep(norm: Path, text: String) {
         openDocuments[norm] = text
@@ -1496,7 +1504,9 @@ class IdeServices private constructor(
         overlayChanged(path)
         path.parent?.let { Files.createDirectories(it) }
         path.writeText(text)
-        diskBaselines[path] = text
+        // What the save replaced, as last read or written, kept with the new text in local history.
+        val before = diskBaselines.put(path, text)
+        runCatching { localHistory.recordSave(path, before, text) }
         events.fileChanged(path, text)
     }
 
@@ -1703,6 +1713,7 @@ class IdeServices private constructor(
     /** Drop the cached synthetic classes so the next analyze/complete regenerates them (e.g. after a res edit),
      *  and list the Kotlin source roots again (files may have come or gone). */
     fun invalidateSyntheticClasses() {
+        resFilesEpoch.incrementAndGet() // files may have come or gone under res/: re-walk before trusting the repo
         kotlinLightClasses.rescan()
         kotlinLightGeneration.incrementAndGet()
         invalidateResourceSynthetics()
@@ -1738,6 +1749,8 @@ class IdeServices private constructor(
         syntheticCache = null
         kotlinSyntheticCache.clear()
         repoCache.clear()
+        resDiskFingerprints.clear()
+        resourceModel.clear()
         customViewCache.clear()
         frameworkResCache.clear()
     }
@@ -2537,6 +2550,7 @@ class IdeServices private constructor(
                     it.isAndroidModule =
                         module.facets.get(AndroidFacet.KEY) != null || module.type.platform == PlatformKind.ANDROID
                     it.javaSourceLocator = { fqn, member -> javaSourceTarget(module, fqn, member) }
+                    it.javaMemberLocator = { fqn, member, paramTypes -> javaSourceTarget(module, fqn, member, paramTypes) }
                     it.apiContext = { apiLevelContext(module.id) }
                     it.permissionContext = { permissionContext(module.id) }
                     it.extensionCacheDir = store.rootPath.resolve(".platform/caches/kotlin-ext")
@@ -2636,6 +2650,7 @@ class IdeServices private constructor(
         // The preview caches' fingerprints track res/source FILES but not the dependency classpath, which
         // changes here (deps/SDK/facet/language-level edits) — so drop them to force a rebuild.
         repoCache.clear()
+        resDiskFingerprints.clear() // the res dir set itself can change with the dependencies
         customViewCache.clear()
         // A dependency/facet change can add or drop library View subclasses (and the seed hierarchy), so the
         // source-view snapshot must recompute on next use, not just on a source save.
@@ -3105,6 +3120,11 @@ class IdeServices private constructor(
         offset: Int,
         kind: dev.ide.lang.kotlin.NavKind,
     ): List<dev.ide.lang.kotlin.NavTarget> {
+        if (kind == dev.ide.lang.kotlin.NavKind.USAGES) {
+            val usages = runCatching { refactor.usages(file, text, offset) }
+                .onFailure { navigationLog.warn("find usages failed in $file", it) }.getOrNull().orEmpty()
+            if (usages.isNotEmpty()) return usages.map { (path, range) -> usageNavTarget(path, range.start) }
+        }
         val targets = kotlinEditor.navigationTargets(file, text, offset, kind)
         if (targets.isNotEmpty()) return targets
         val java = javaNavKind(kind)?.let { k ->
@@ -3192,6 +3212,17 @@ class IdeServices private constructor(
 
     private val navigationLog by lazy { Log.logger("ide.navigation") }
 
+    /** A Find Usages row: `File.kt:line  the line's code`, landing on [offset] in [path]. */
+    private fun usageNavTarget(path: Path, offset: Int): dev.ide.lang.kotlin.NavTarget {
+        val text = openDocuments[path.toAbsolutePath().normalize()] ?: runCatching { path.readText() }.getOrNull().orEmpty()
+        val at = offset.coerceIn(0, text.length)
+        val line = text.substring(0, at).count { it == '\n' } + 1
+        val lineStart = text.lastIndexOf('\n', at - 1) + 1
+        val lineEnd = text.indexOf('\n', at).let { if (it < 0) text.length else it }
+        val snippet = text.substring(lineStart, lineEnd).trim().let { if (it.length > 70) it.take(67) + "..." else it }
+        return dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(path), at, "${path.fileName}:$line  $snippet", "usage")
+    }
+
     /** The Java analyzer of [file]'s module, for a `.java` file in one. */
     private fun javaAnalyzerFor(file: Path): dev.ide.lang.java.JavaSourceAnalyzer? {
         if (!file.toString().endsWith(".java")) return null
@@ -3232,7 +3263,7 @@ class IdeServices private constructor(
             )
             is dev.ide.lang.java.navigate.JavaNavLocation.Generated ->
                 openJavaBufferDeclaring(loc.topLevelFqn)?.let { it to loc.offset }
-                    ?: kotlinLightClassLocation(loc.classFqn, loc.member)
+                    ?: kotlinLightClassLocation(loc.classFqn, loc.member, loc.paramCount, loc.paramTypes)
                     ?: return@mapNotNull null
         }
         dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(path), offset, t.label, t.kind)
@@ -3240,10 +3271,26 @@ class IdeServices private constructor(
 
     /** A Kotlin file's go-to into the project's Java source: the class [fqn] or its [member], resolved by the
      *  Java analyzer of [module]. */
-    private fun javaSourceTarget(module: Module, fqn: String, member: String?): dev.ide.lang.kotlin.NavTarget? {
+    private fun javaSourceTarget(
+        module: Module, fqn: String, member: String?, paramTypes: List<String>? = null,
+    ): dev.ide.lang.kotlin.NavTarget? {
         val java = analyzerFor(module) as? dev.ide.lang.java.JavaSourceAnalyzer ?: return null
-        val target = runCatching { java.declarationOf(fqn, member) }.getOrNull() ?: return null
+        val target = runCatching { java.declarationOf(fqn, member, paramTypes) }.getOrNull() ?: return null
         return javaNavTargets(null, listOf(target)).firstOrNull()
+    }
+
+    /**
+     * Where the symbol a reference at [offset] in Java [file] resolves to is declared (file, name offset), through
+     * Java's go-to-declaration: a Java declaration, or a Kotlin one reached through its light class. Null when it
+     * resolves to nothing or to a library.
+     */
+    internal fun javaDeclarationAt(file: Path, text: String, offset: Int): Pair<Path, Int>? {
+        val java = javaAnalyzerFor(file) ?: return null
+        val raw = runCatching {
+            java.navigationTargets(store.vfs.fileFor(file), text, offset, dev.ide.lang.java.navigate.JavaNavKind.DECLARATION)
+        }.getOrNull() ?: return null
+        val t = javaNavTargets(file, raw).firstOrNull { it.kind != "library" } ?: return null
+        return Paths.get(t.file.path).toAbsolutePath().normalize() to t.offset
     }
 
     /** The open `.java` buffer whose top-level class is [fqn]. */
@@ -3251,11 +3298,13 @@ class IdeServices private constructor(
         javaOverlayEntries.entries.firstOrNull { (path, e) -> e.fqcn == fqn && openDocuments.containsKey(path) }?.key
 
     /** Where the Kotlin declaration rendered as light class [classFqn]'s [member] is. */
-    private fun kotlinLightClassLocation(classFqn: String, member: String?): Pair<Path, Int>? {
+    private fun kotlinLightClassLocation(
+        classFqn: String, member: String?, paramCount: Int? = null, paramTypes: List<String>? = null,
+    ): Pair<Path, Int>? {
         val path = Paths.get(kotlinLightClasses.fileDeclaring(classFqn) ?: return null)
         val text = openDocuments[path] ?: runCatching { path.readText() }.getOrNull() ?: return null
         val offset = runCatching {
-            dev.ide.lang.kotlin.synthetic.LightClassDeclarations.offsetOf(path.fileName.toString(), text, classFqn, member)
+            dev.ide.lang.kotlin.synthetic.LightClassDeclarations.offsetOf(path.fileName.toString(), text, classFqn, member, paramCount, paramTypes)
         }.getOrDefault(0)
         return path to offset
     }
@@ -3504,6 +3553,10 @@ class IdeServices private constructor(
      *  Read-only (Java/JDT); empty when the position is not a resolvable symbol. */
     fun findReferences(file: Path, text: String, offset: Int): List<Pair<Path, dev.ide.lang.dom.TextRange>> =
         refactor.findReferences(file, text, offset)
+
+    /** Highlight-usages-at-caret in [file]'s own buffer; null where only the editor's textual scan applies. */
+    fun usageHighlights(file: Path, text: String, offset: Int): List<dev.ide.lang.highlight.UsageHighlight>? =
+        refactor.usageHighlights(file, text, offset)
 
     // ---- file & package operations (delete / rename / move / copy), for files AND directories/packages ----
 
@@ -3805,6 +3858,18 @@ class IdeServices private constructor(
         return out
     }
 
+    /** Every file across the workspace's modules' source roots whose name ends with [suffix]. */
+    private fun projectFilesEndingWith(suffix: String): List<Path> {
+        val out = ArrayList<Path>()
+        for (m in modules()) for (root in sourceRoots(m)) {
+            if (!Files.isDirectory(root)) continue
+            runCatching {
+                Files.walk(root).use { s -> s.filter { it.toString().endsWith(suffix) }.forEach { out.add(it) } }
+            }
+        }
+        return out.distinct()
+    }
+
     /** Every `.java`/`.kt` file across the workspace's modules (for the move-time import sweep). */
     private fun projectSourceFiles(): List<Path> {
         val out = ArrayList<Path>()
@@ -3997,6 +4062,23 @@ class IdeServices private constructor(
                 else -> null
             }
         }
+    }
+
+    /** The diagnostics last published for [file] (every language's), for a fix that looks across the file. */
+    internal fun publishedDiagnostics(file: VirtualFile): List<dev.ide.analysis.Diagnostic> =
+        runCatching { analysisEngine.diagnostics(file) }.getOrDefault(emptyList())
+
+    /**
+     * The libraries [file]'s code uses (imports, class names, layout tags) that its module does not have, read off
+     * the file's published diagnostics, with the module. Null for a file outside every module.
+     */
+    internal fun missingLibrariesIn(file: Path, text: String): Pair<Module, List<dev.ide.core.services.MissingLibraries.Need>>? {
+        val module = moduleForEditableFile(file) ?: return null
+        val diagnostics = publishedDiagnostics(store.vfs.fileFor(file))
+        if (diagnostics.isEmpty()) return module to emptyList()
+        return module to dev.ide.core.analysis.MissingLibraryScan.needs(
+            dependencies.missingLibraries, diagnostics, text, module, indexService,
+        )
     }
 
     /** [module]'s `AndroidManifest.xml` as the facet names it, or null for a non-Android module. */
@@ -4708,6 +4790,25 @@ class IdeServices private constructor(
 
     private val repoCache = ConcurrentHashMap<String, CachedRepo>()
 
+    /** Parses res XML per file and remembers each, so a rebuild for one edited buffer re-parses only that file. */
+    private val resourceModel = dev.ide.android.support.resources.CachingResourceModel()
+
+    /**
+     * The on-disk half of a module's res fingerprint, reused while [resFilesEpoch] is unchanged and it is younger
+     * than [RES_DISK_FINGERPRINT_TTL_MS]. Computing it walks and stats every `.xml` under every res dir, AAR
+     * dependencies included, and the repository is asked for several times per completion and per diagnostics
+     * pass; on device that walk is a FUSE stat storm. The IDE's own file operations bump the epoch (they arrive
+     * as VFS events, which call [invalidateSyntheticClasses]); the TTL bounds how long a write from outside the
+     * IDE can go unseen. Unsaved edits don't need a walk at all: they are in the buffer half of the fingerprint.
+     */
+    private class DiskFingerprint(val epoch: Long, val at: Long, val value: String)
+    private val resDiskFingerprints = ConcurrentHashMap<String, DiskFingerprint>()
+    private val resFilesEpoch = java.util.concurrent.atomic.AtomicLong()
+
+    /** Content hash of each open res buffer, remembered per text instance (the overlay stores the same String). */
+    private class BufferHash(val text: String, val hash: String)
+    private val resBufferHashes = ConcurrentHashMap<Path, BufferHash>()
+
     /** Serializes resource-repository builds so concurrent first-callers (analysis + preview on project open)
      *  don't each launch a full parse of the same dependency `res/` set. */
     private val repoBuildLock = Any()
@@ -4788,18 +4889,34 @@ class IdeServices private constructor(
      * re-parsed per use case. Rebuilt only when the module's res files change (the `.xml` fingerprint), and
      * stampede-guarded so concurrent first-callers don't each launch a full parse.
      */
+    /**
+     * Parse each Android module's resources in the background, so the editor's first pass doesn't. The first
+     * type name a Kotlin file resolves can reach the synthetic `R` class, which needs every resource XML of the
+     * module and its libraries parsed (~0.7 s on an emulator, on the engine thread, during the first preview or
+     * highlighting of a cold start). Started with each index pass: the res set follows the dependencies. The
+     * repository is keyed on the res files' fingerprint and built under [repoBuildLock], so a pass that asks while
+     * this runs waits for it instead of parsing a second time, and a stale one is never served.
+     */
+    private fun prewarmResourceRepositories() {
+        val android = runCatching { modules().filter { it.facets.get(AndroidFacet.KEY) != null } }.getOrDefault(emptyList())
+        if (android.isEmpty()) return
+        indexScope.launch(Dispatchers.IO) {
+            for (m in android) runCatching { resourceRepository(m) }
+        }
+    }
+
     private fun resourceRepository(module: Module): CachedRepo? {
         val key = module.id.value
         val resDirs = runCatching { AndroidResources.resourceDirs(module, store.workspace) }.getOrDefault(emptyList())
         // Fingerprint the res FILES on disk PLUS any open editor buffer of a res `.xml` under those dirs — so an
         // UNSAVED edit (a just-typed `<string>`) produces a fresh fingerprint and rebuilds the repository, and
         // the synthetic `R` sees the new resource before the file is saved (matching the live XML `@string/` path).
-        val fp = filesFingerprint(resDirs, ".xml") + resourceBufferFingerprint(resDirs)
+        val fp = resDiskFingerprint(key, resDirs) + resourceBufferFingerprint(resDirs)
         repoCache[key]?.let { if (it.fingerprint == fp) return it }
         return synchronized(repoBuildLock) {
             val cur = repoCache[key]
             if (cur != null && cur.fingerprint == fp) cur
-            else runCatching { AndroidResources.repository(module, store.workspace, textOverride = ::resourceBufferText) }
+            else runCatching { AndroidResources.repository(module, store.workspace, resourceModel, textOverride = ::resourceBufferText) }
                 .getOrNull()?.let { CachedRepo(fp, it).also { c -> repoCache[key] = c } }
         }
     }
@@ -4814,9 +4931,21 @@ class IdeServices private constructor(
         val norm = resDirs.map { it.toAbsolutePath().normalize() }
         return openDocuments.entries.asSequence()
             .filter { (p, _) -> p.toString().endsWith(".xml") && norm.any { p.startsWith(it) } }
-            .map { (p, text) -> "$p:${dev.ide.platform.ContentHash.of(text).value}" }
+            .map { (p, text) -> "$p:${bufferHash(p, text)}" }
             .sorted().joinToString("|", prefix = "|buf:")
             .takeIf { it != "|buf:" } ?: ""
+    }
+
+    private fun resDiskFingerprint(moduleKey: String, resDirs: List<Path>): String {
+        val epoch = resFilesEpoch.get()
+        val now = System.currentTimeMillis()
+        resDiskFingerprints[moduleKey]?.let { if (it.epoch == epoch && now - it.at < RES_DISK_FINGERPRINT_TTL_MS) return it.value }
+        return filesFingerprint(resDirs, ".xml").also { resDiskFingerprints[moduleKey] = DiskFingerprint(epoch, now, it) }
+    }
+
+    private fun bufferHash(path: Path, text: String): String {
+        resBufferHashes[path]?.let { if (it.text === text) return it.hash }
+        return dev.ide.platform.ContentHash.of(text).value.also { resBufferHashes[path] = BufferHash(text, it) }
     }
 
     /** The shared merged repository instance for [module] (see [resourceRepository]), or null. */
@@ -5255,6 +5384,8 @@ class IdeServices private constructor(
     }
 
     companion object {
+        /** How long a module's on-disk res fingerprint is trusted without a VFS event (see [resDiskFingerprints]). */
+        private const val RES_DISK_FINGERPRINT_TTL_MS = 3_000L
         private const val PERMISSION_CONTEXT_TTL_NANOS = 2_000_000_000L
         private const val PLATFORM_PERMISSION = "android.permission."
         /** The name of the library [ensureKotlinStdlib] adds, and the prefix of a kotlin-stdlib jar. */

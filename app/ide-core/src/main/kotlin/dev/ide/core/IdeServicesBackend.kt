@@ -5,6 +5,7 @@ import dev.ide.core.build.BuildFailureKind
 import dev.ide.core.build.BuildRunner
 import dev.ide.core.perf.MemSample
 import dev.ide.core.perf.PerfSampler
+import dev.ide.core.perf.UsageCounter
 import dev.ide.core.plugins.AgentPlugin
 import dev.ide.core.plugins.VcsPlugin
 import dev.ide.core.project.ProjectManager
@@ -67,7 +68,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -254,7 +254,8 @@ class IdeServicesBackend(
             try {
                 return scheduler.background(label = label, block = block)
             } catch (_: EngineCanceledException) {
-                delay(BACKGROUND_RETRY_MS)
+                // Re-queue once the completion that preempted this is done, rather than polling while it runs.
+                scheduler.awaitInteractiveIdle()
             }
         }
     }
@@ -500,7 +501,10 @@ class IdeServicesBackend(
         dev.ide.core.backend.ChallengeBackend(this, dailyChallengeService)
     // Held as the concrete type so the Compose preview host can reach its ide-core-only lesson-lowering methods
     // ([lowerLessonComposePreview]) that return an ide-core type the [LearnService] UI interface can't name.
-    private val learnBackend = LearnBackend(this)
+    private val learnBackend = LearnBackend(
+        this,
+        manager?.applicationContainer?.getServiceOrNull(LEARN_REMOTE_SERVICE) ?: dev.ide.store.LearnRemoteService.Unsupported,
+    )
     override val learn: LearnService = learnBackend
     override val sdk: SdkService = SdkBackend(this)
     override val settings: SettingsService = SettingsBackend(this)
@@ -610,18 +614,31 @@ class IdeServicesBackend(
             compatibility = runCatching { services.isCompatibilityMode() }.getOrDefault(false),
         )
 
-    // ---- Compose preview (LayoutPreviewBackend; aggregator-level, uses the preview lane) ----
+    // ---- Compose preview (LayoutPreviewBackend; aggregator-level) ----
+    // Lowering after an edit uses the preview lane. The small setup reads a first frame waits on (readiness,
+    // libraries, resource roots, sandbox, isolation) use the background lane: each is a few milliseconds, and on
+    // the preview lane every one of them queued behind the editor's whole run of passes on the opened file.
 
-    /** The lowered preview to render — lowest-priority engine work, preempted by analysis and completion,
-     *  retries until the engine is free. Returns an ide-core type; on-device preview host calls this. */
-    suspend fun lowerComposePreview(path: String, functionName: String, arity: Int, text: String): LoweredComposePreview? {
+    /**
+     * The lowered preview to render. Returns an ide-core type; the preview hosts call this.
+     *
+     * A re-lower after an edit is lowest-priority engine work: preempted by analysis and completion, it retries
+     * until the engine is free, so it never competes with typing. An [urgent] one (the host has nothing on screen
+     * yet: a preview just opened, or the user switched to another) queues with the editor's own passes instead and
+     * is not preempted by them. On a cold open the lowering itself took ~60 ms but waited ~3 s behind the
+     * highlighting and diagnostics of the same file (and a cold first attempt was thrown away when they arrived).
+     */
+    suspend fun lowerComposePreview(
+        path: String, functionName: String, arity: Int, text: String, urgent: Boolean = false,
+    ): LoweredComposePreview? {
         // A live-literal edit patches the last lowering directly: no lane wait behind the editor's analysis. Off the
         // caller's thread all the same (the host asks from the UI thread): the patch diffs the whole buffer.
         withContext(Dispatchers.Default) {
             runCatching { services.liveLiteralPreview(Paths.get(path), text, functionName, arity) }.getOrNull()
         }?.let { return it }
-        return timedPass("lower", path, { it?.program?.size ?: 0 }) {
-            preview { services.lowerComposePreview(Paths.get(path), text, functionName, arity) }
+        return timedPass(if (urgent) "lowerFirst" else "lower", path, { it?.program?.size ?: 0 }) {
+            if (urgent) background("lowerPreview") { services.lowerComposePreview(Paths.get(path), text, functionName, arity) }
+            else preview { services.lowerComposePreview(Paths.get(path), text, functionName, arity) }
         }
     }
 
@@ -634,29 +651,29 @@ class IdeServicesBackend(
      *  The preview host polls this to show a transient "Preparing" state (and retry) instead of latching a
      *  first-run (index still building) failure into a permanent "unresolved call" error. */
     suspend fun composePreviewReady(path: String): Boolean =
-        preview { services.composePreviewReady(Paths.get(path)) }
+        background("previewSetup") { services.composePreviewReady(Paths.get(path)) }
 
     /** The project library inputs for the on-device Compose preview's `DexClassLoader` (see
      *  [IdeServices.composePreviewLibs]). Lowest-priority engine work; preempted by analysis and completion. */
     suspend fun composePreviewLibs(path: String): ComposePreviewLibs? =
-        preview { services.composePreviewLibs(Paths.get(path)) }
+        background("previewSetup") { services.composePreviewLibs(Paths.get(path)) }
 
     /** The preview-sandbox categories the open project restricts (`SandboxCategory.id` strings from the
      *  project-scoped Compose Preview settings); the preview host builds a `PreviewSandboxPolicy` from them.
      *  A pref read, but routed through the preview lane like its sibling calls so it never races a swap of
      *  the inner services on project switch. */
     suspend fun composePreviewSandbox(): Set<String> =
-        preview { services.composePreviewSandbox() }
+        background("previewSetup") { services.composePreviewSandbox() }
 
     /** Whether the `@Preview` should render in the `:preview` OS process (the isolation toggle, default OFF).
      *  The Android host reads this to choose the remote streaming path over the in-process renderer. */
     suspend fun composePreviewIsolated(): Boolean =
-        preview { services.composePreviewIsolated() }
+        background("previewSetup") { services.composePreviewIsolated() }
 
     /** The previewed module's res-dir paths + R namespace, so the `:preview` process can rebuild the resource
      *  repository (it can't receive the in-memory one). Null for a non-Android module / one with no res dirs. */
     suspend fun composePreviewResourceRoots(path: String): ComposePreviewResourceRoots? =
-        preview { services.composePreviewResourceRoots(Paths.get(path)) }
+        background("previewSetup") { services.composePreviewResourceRoots(Paths.get(path)) }
 
     /** The previewed module's resources + R package for interpreter-mediated resource resolution
      *  (`stringResource`/`R.string.x`/…); the launcher builds a `PreviewResourceResolver` from it. Off the UI
@@ -707,9 +724,32 @@ class IdeServicesBackend(
         else -> null
     }
 
+    /**
+     * Which wording the user's "granted" answered: [ANALYTICS_SCOPE_USAGE] once it named feature usage. A consent
+     * from before that (the sheet then promised "never which features you use") keeps performance data flowing
+     * but counts no usage, and the sheet asks again.
+     */
+    private fun consentCoversUsage(): Boolean =
+        analyticsConsent() == true && manager?.preference(ANALYTICS_SCOPE_PREF) == ANALYTICS_SCOPE_USAGE
+
+    override fun analyticsNeedsAsking(): Boolean =
+        analyticsAvailable() && (analyticsConsent() == null || (analyticsConsent() == true && !consentCoversUsage()))
+
     override fun setAnalyticsConsent(granted: Boolean) {
         manager?.setPreference(ANALYTICS_CONSENT_PREF, if (granted) "granted" else "denied")
+        // The sheet the user just answered is the current wording, so a yes covers usage and a no covers nothing.
+        manager?.setPreference(ANALYTICS_SCOPE_PREF, if (granted) ANALYTICS_SCOPE_USAGE else "")
         analytics.enabled = granted
+        if (!granted) usage.clear()
+    }
+
+    /** Feature-use counts, reported per feature when telemetry is flushed ([flushTelemetry], [close]). */
+    private val usage = UsageCounter { feature, count ->
+        track(dev.ide.analytics.Events.FEATURE_USED, mapOf("feature" to feature, "count" to count.toString()))
+    }
+
+    override fun countFeature(feature: String) {
+        if (consentCoversUsage()) usage.count(feature)
     }
 
     override fun track(event: String, props: Map<String, String>) {
@@ -800,6 +840,7 @@ class IdeServicesBackend(
             runCatching { perf.flushAll() }
             runCatching { frames.flushAll() }
             runCatching { frameCpu.flushAll() }
+            runCatching { usage.flushAll() }
             runCatching { analytics.flush() }
         }
     }
@@ -811,6 +852,7 @@ class IdeServicesBackend(
         runCatching { perf.flushAll() } // drain partial latency windows so the last session's samples ship
         runCatching { frames.flushAll() }
         runCatching { frameCpu.flushAll() }
+        runCatching { usage.flushAll() }
         runCatching { analytics.flush() }
         runCatching { analytics.close() }
         // The version-control backend holds an open repository handle and its own refresh coroutine.
@@ -826,9 +868,8 @@ class IdeServicesBackend(
 
     private companion object {
         const val ANALYTICS_CONSENT_PREF = "analytics.consent"
-
-        /** How long a preempted background-lane call waits before running again (a completion's typical span). */
-        const val BACKGROUND_RETRY_MS = 30L
+        const val ANALYTICS_SCOPE_PREF = "analytics.consent.scope"
+        const val ANALYTICS_SCOPE_USAGE = "usage"
     }
 
     /** Make [next] the active project: swap it in, bump the epoch (re-keys UI state), and close the old one. */
@@ -880,7 +921,7 @@ class IdeServicesBackend(
  * handle the tags; unresolved project resources fall back (lesson XML is authored to be self-contained). Never
  * the real-view path (that needs the SDK + a built project). Returns null on any inflation failure.
  */
-private fun renderStandaloneLayout(
+internal fun renderStandaloneLayout(
     xml: String, request: dev.ide.preview.PreviewRequest
 ): dev.ide.preview.LayoutPreviewResult? = runCatching {
     dev.ide.preview.impl.LayoutPreviewService().preview(

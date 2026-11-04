@@ -258,10 +258,11 @@ fun BuildConsole(
                 BuildTab.Logcat -> LtrContent { LogcatTab(appLog) { backend?.build?.clearAppLog() } }
             }
         }
-        // A compact native ad in the console footer, only while nothing is building — a natural pause, never
-        // over a running build — and only in a console tall enough to spare the room. Renders nothing unless ads
-        // are active.
-        if (!running) FooterAdSlot(AdPlacement.BUILD_CONSOLE, paneHeight)
+        // The console footer's ad: a compact native card while nothing is building (a natural pause), and a
+        // banner a few seconds into a running build, while the log is being watched rather than tapped. Each only
+        // in a console tall enough to spare the room; neither renders unless ads are active.
+        if (running) BuildRunningBannerSlot(paneHeight, Modifier.chromePadding())
+        else FooterAdSlot(AdPlacement.BUILD_CONSOLE, paneHeight)
     }
     }
     }
@@ -1114,7 +1115,14 @@ private fun LogLineRow(
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 modifier = Modifier.align(Alignment.TopStart)
-                    .graphicsLayer { translationX = reveal() - slotPx },
+                    .graphicsLayer {
+                        val r = reveal()
+                        translationX = r - slotPx
+                        // Parked, it sits one slot to the left of the row's start, but the row is padded on
+                        // that side and a label wider than the slot minus the padding showed its last digits
+                        // there at rest ("8 > Task :app:..."). Hidden until a drag brings it in.
+                        alpha = (r / slotPx).coerceIn(0f, 1f)
+                    },
             )
         }
         return
