@@ -653,6 +653,11 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         programInterpreter = ctx.programInterpreter,
     )
 
+    /** The plugins' test runners, minus any that claim a kind the built-in runners own. */
+    internal fun testProviders(): List<dev.ide.build.TestProvider> =
+        ctx.platform.extensions.extensions(dev.ide.build.TEST_PROVIDER_EP)
+            .filter { it.id.isNotBlank() && it.id != TestOutput.LOCAL && it.id != TestOutput.INSTRUMENTED && ':' !in it.id }
+
     /** Messages from [buildContext]'s error channel, awaiting the next [launch]. */
     private val extensionWarnings = java.util.Collections.synchronizedList(ArrayList<String>())
 
@@ -664,6 +669,15 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
      */
     private fun contributedAction(id: String): Pair<String, RunAction>? {
         val context = buildContext()
+        // A plugin's tests: `<provider id>:<module>[:<targets>]`, the shape a gutter mark and a re-run both use.
+        for (provider in testProviders()) {
+            if (!id.startsWith("${provider.id}:")) continue
+            val rest = id.removePrefix("${provider.id}:")
+            val module = ctx.modules().firstOrNull { it.name == rest.substringBefore(':') } ?: continue
+            val targets = rest.substringAfter(':', "").split('\n').filter { it.isNotEmpty() }
+            val project = ctx.projectOf(module) ?: continue
+            provider.run(module, targets, project, context)?.let { return module.name to it }
+        }
         for (project in ctx.store.workspace.projects) {
             val system = buildSystemFor(project) ?: continue
             val spec = project.runTasksSafely(system).firstOrNull { it.id == id } ?: continue
@@ -691,6 +705,9 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         // every such module offers — so a library module (no main) is still buildable from the Run picker.
         for (m in ctx.modules()) {
             if (!isConsoleRunModule(m)) continue
+            // A plugin's module type (a Dart package) that no build system builds offers its own rows through
+            // RUN_TASK_PROVIDER_EP; a Build row here would only fail with "no build system supports it".
+            if (buildSystemFor(m.type) == null && ctx.projectOf(m)?.let { buildSystemFor(it) } == null) continue
             if (runnableMainFor(m) != null) add(
                 RunTaskOption(
                     "run:${m.name}", "Run ${m.name}", "run"
@@ -702,6 +719,11 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         // active variant.
         for (m in ctx.modules()) {
             if (hasTestSources(m)) add(RunTaskOption("test:${m.name}", "Test ${m.name}", "test"))
+            for (provider in testProviders()) {
+                if (runCatching { provider.appliesTo(m) }.getOrDefault(false)) {
+                    add(RunTaskOption("${provider.id}:${m.name}", "${provider.displayName} · ${m.name}", "test"))
+                }
+            }
             // Instrumented tests need a device the IDE drives over adb, so only where the installer can.
             if (m.type.id == "android-app" && ctx.apkInstaller?.runsInstrumentation == true && hasAndroidTestSources(m)) {
                 add(RunTaskOption("${TestOutput.INSTRUMENTED}:${m.name}", "Instrumented tests · ${m.name}", "test"))
@@ -1460,7 +1482,7 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         val wasRunning = _buildState.value.status == RunStatus.Running
         _buildState.update {
             if (it.status == RunStatus.Running) it.copy(
-                status = RunStatus.Failed, log = it.log + logLine("Stopped.", UiLogLevel.Warn)
+                status = RunStatus.Failed, stopped = true, log = it.log + logLine("Stopped.", UiLogLevel.Warn)
             ) else it
         }
         if (wasRunning) {

@@ -78,6 +78,13 @@ fun CodeAssistApp(
     /** Called once [openStoreItemId] has been acted on, so the host can clear it. Without that the same
      *  id arriving twice would not re-fire, a link being tapped twice being the ordinary case. */
     onStoreItemIdHandled: () -> Unit = {},
+    /** The target of a tapped tray notification (Android), acted on when it changes to a non-null value. */
+    openNotificationTarget: dev.ide.ui.backend.UiNotificationTarget? = null,
+    /** Called once [openNotificationTarget] has been acted on, so the host can clear it. */
+    onNotificationTargetHandled: () -> Unit = {},
+    /** Told whether the user has a project open ([CodeAssistAppState.projectOpen]), for host features that act
+     *  on it from outside the composition (Android's "Open with" for a source file). */
+    onProjectOpenChange: (Boolean) -> Unit = {},
 ) {
     // Register the UI facets of the enabled plugins, then load once. The backend reports exactly the plugins
     // whose engine half is enabled (see BuiltInPlugins' unified engine+UI declaration), so this shell code names
@@ -114,6 +121,11 @@ fun CodeAssistApp(
     LaunchedEffect(openStoreItemId) {
         openStoreItemId?.let { app.openStoreItemById(it); onStoreItemIdHandled() }
     }
+    // A tapped tray notification, the same way: acted on once, then cleared through the host.
+    LaunchedEffect(openNotificationTarget) {
+        openNotificationTarget?.let { app.openNotificationTarget(it); onNotificationTargetHandled() }
+    }
+    LaunchedEffect(app.projectOpen) { onProjectOpenChange(app.projectOpen) }
 
     // Theme + accent + code font come from settings; the Settings screen (and the quick toggle) update them
     // live. "system" follows the OS dark-mode signal.
@@ -160,10 +172,10 @@ fun CodeAssistApp(
             LocalPluginNavigator provides app::openPluginScreen,
             LocalSettingsPageOpener provides { id -> app.openSettingsPageFrom(app.screen, id) },
             // A contributed panel can open a file the same way an action's OpenFile effect does, and lands the
-            // user on the editor to see it. Guarded on a project being open (`epoch > 0`), since a tab over
-            // nothing is not a state the shell has.
+            // user on the editor to see it. Guarded on a project being open, since a tab over nothing is not a
+            // state the shell has (and `epoch > 0` would reopen a project the user closed behind Home).
             LocalPluginFileOpener provides { path, offset ->
-                if (app.epoch > 0) {
+                if (app.projectOpen) {
                     state.openAt(path, offset)
                     app.navigateTo(Screen.Editor)
                 }

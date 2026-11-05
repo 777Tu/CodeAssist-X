@@ -103,6 +103,8 @@ class CodeAssistAppStateTest {
         override suspend fun previewImportPackage(archivePath: String): UiImportPreview? = importPreview
         override suspend fun importExternalProject(sourceRootPath: String): UiProjectResult {
             imported += sourceRootPath
+            // A successful import opens the project, as the real one does (it swaps the engine in).
+            if (importResult.success) epochFlow.value++
             return importResult
         }
         override fun analyticsAvailable(): Boolean = true
@@ -301,6 +303,8 @@ class CodeAssistAppStateTest {
         app.navigateBack()
         assertEquals(Screen.Projects, app.screen)
 
+        backend.epochFlow.value++ // a project open, for the hub to be opened over
+        advanceUntilIdle()
         app.openHub(Screen.Editor)
         // A hub sub-screen steps back to the hub, which then steps back to the editor it was opened from.
         app.navigateTo(Screen.Settings)
@@ -333,6 +337,8 @@ class CodeAssistAppStateTest {
         val app = appState(backend)
         advanceUntilIdle()
         app.hubTwoPane = true
+        backend.epochFlow.value++ // a project open, for the hub to be opened over
+        advanceUntilIdle()
 
         // The wide hub and its destinations are one surface: stepping "back to the hub" would show the same
         // sidebar again, so Back leaves to where the hub was opened from.
@@ -353,6 +359,261 @@ class CodeAssistAppStateTest {
         app.navigateTo(Screen.KeystoreCreate)
         app.navigateBack()
         assertEquals(Screen.KeystoreManager, app.screen)
+    }
+
+    // ---- the editor needs an open project ----
+
+    /** With no project ever loaded, the editor's backend throws "No project is open": a stale way in goes Home. */
+    @Test
+    fun theEditorIsNoDestinationBeforeAnyProjectIsOpen() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        assertFalse(app.projectOpen)
+
+        app.navigateTo(Screen.Editor)
+        assertEquals(Screen.Projects, app.screen)
+
+        // The hub's default return is the editor; reached from Home without setting it, Back still lands Home.
+        app.navigateTo(Screen.Hub)
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    /**
+     * Closing a project only leaves the editor: its engine stays loaded behind the picker, so `epoch > 0` still
+     * holds. A stale Back target or a link from Home (a plugin's Logs row) used to reopen the closed project,
+     * and the session resume then recorded it as the project to reopen on the next launch.
+     */
+    @Test
+    fun aClosedProjectIsNotReopenedByAStaleWayIntoTheEditor() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openProject(ProjectInfo("app", "/ws/app", 1))
+        advanceUntilIdle()
+        Snapshot.sendApplyNotifications()
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.projectOpen)
+        assertEquals("/ws/app", backend.prefs["session.lastProject"])
+
+        app.navigateTo(Screen.Projects) // the editor's close
+        Snapshot.sendApplyNotifications()
+        advanceUntilIdle()
+        assertFalse(app.projectOpen)
+        assertEquals(1, app.epoch, "the engine stays loaded behind the picker")
+        assertEquals("", backend.prefs["session.lastProject"])
+
+        // A Logs row / plugin file link from Home.
+        app.navigateTo(Screen.Editor)
+        advanceUntilIdle()
+        assertEquals(Screen.Projects, app.screen)
+        // A Back target left pointing at the editor.
+        app.openHub(Screen.Editor)
+        app.navigateBack()
+        Snapshot.sendApplyNotifications()
+        advanceUntilIdle()
+        assertEquals(Screen.Projects, app.screen)
+        assertEquals("", backend.prefs["session.lastProject"], "the closed project is not recorded for resume")
+
+        // Opening it again from the picker is a real way in.
+        app.openProject(ProjectInfo("app", "/ws/app", 1))
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.projectOpen)
+    }
+
+    /** The AI tab opens a project behind Home and its buttons take the user in, even after a visit elsewhere. */
+    @Test
+    fun theAiTabsOpenEditorEntersAProjectItLoadedBehindHome() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.selectHomeTab(HomeTab.Ai)
+        backend.epochFlow.value++
+        advanceUntilIdle()
+        assertEquals(Screen.Projects, app.screen, "stays in the chat")
+
+        app.openGetPlugins()
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+        app.enterEditor()
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.projectOpen)
+    }
+
+    /** A lesson's workspace is not a project the user opened: once the lesson ends, no way back leads into it. */
+    @Test
+    fun aFinishedLessonsWorkspaceIsNoEditorDestination() = runTest {
+        val backend = AppBackend(settledPrefs(), workspaceOpens = true).apply { analyticsConsent = false }
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.openTrack("kotlin-basics")
+        app.openLesson("kt-basics-capstone")
+        app.openLessonInEditor("kt-basics-capstone", 1)
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.navigateBack()
+        assertEquals(Screen.LessonTrack, app.screen)
+        assertFalse(app.projectOpen)
+        app.navigateTo(Screen.Editor)
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    /** Settings over a project shows its pages; from Home (a project closed behind it or not) only the app's. */
+    @Test
+    fun settingsIsProjectScopedOnlyOverAnOpenProject() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        backend.epochFlow.value++
+        advanceUntilIdle()
+
+        app.openHub(Screen.Editor)
+        assertTrue(app.hubInProject)
+        app.openKeystoreManagerFromHub()
+        assertTrue(app.keystoreInProject)
+        app.navigateBack()
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.navigateTo(Screen.Projects) // close
+        app.openHub(Screen.Projects)
+        assertFalse(app.hubInProject)
+        app.openKeystoreManagerFromHub()
+        assertFalse(app.keystoreInProject)
+    }
+
+    // ---- links and notifications that arrive mid-edit ----
+
+    /**
+     * A store link (or a tapped notification) opening a store item over the editor: Back returns to the editor.
+     * It used to leave for Home, closing the project without the close confirmation.
+     */
+    @Test
+    fun aStoreItemOpenedOverTheEditorStepsBackToIt() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        backend.epochFlow.value++
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.openStoreItem(communityItem("some.project"))
+        assertEquals(Screen.StoreItem, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.projectOpen)
+
+        // The run's base is spent with it: a store item opened from Home goes back Home.
+        app.navigateTo(Screen.Projects)
+        app.openStoreItem(communityItem("some.project"))
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    /** The daily challenge's push names `challenges`, a home tab: its tap used to match no screen and do nothing. */
+    @Test
+    fun theDailyChallengeNotificationOpensTheChallengesTab() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        app.openNotificationTarget(dev.ide.ui.backend.UiNotificationTarget.Screen("challenges"))
+        assertEquals(Screen.Projects, app.screen)
+        assertEquals(HomeTab.Challenges, app.homeTab)
+    }
+
+    /** A `screen` route reaches only destinations that stand on their own, never one that needs a project. */
+    @Test
+    fun notificationRoutesReachOnlyStandAloneDestinations() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        for (route in listOf("ModuleConfig", "Run", "KeystoreImport", "IconManager", "PluginScreen", "Editor", "nope")) {
+            app.openNotificationTarget(dev.ide.ui.backend.UiNotificationTarget.Screen(route))
+            assertEquals(Screen.Projects, app.screen, route)
+        }
+        app.openNotificationTarget(dev.ide.ui.backend.UiNotificationTarget.Screen("You"))
+        assertEquals(Screen.You, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+    }
+
+    /** A notification tapped at launch wins over reopening the last project behind it. */
+    @Test
+    fun aNotificationTappedAtLaunchWinsOverSessionResume() = runTest {
+        val backend = AppBackend(settledPrefs() + ("session.lastProject" to "/ws/app")).apply { analyticsConsent = false }
+        val app = appState(backend)
+        app.openNotificationTarget(dev.ide.ui.backend.UiNotificationTarget.Submissions)
+        // The resume reads the project list on a real IO thread: give it the time it would have taken.
+        repeat(30) {
+            advanceUntilIdle()
+            Thread.sleep(10)
+        }
+        advanceUntilIdle()
+        assertTrue(backend.opened.isEmpty(), "resume stood down")
+        assertEquals(Screen.You, app.screen)
+    }
+
+    // ---- Home's "Get plugins" entry ----
+
+    @Test
+    fun getPluginsReturnsHomeThroughAPluginPage() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+
+        withScreens("vcs.history") {
+            app.openGetPlugins()
+            assertEquals(dev.ide.ui.screens.PluginsTab.Get, app.pluginsStartTab)
+            app.openPluginScreen("vcs.history")
+            app.navigateBack()
+            assertEquals(Screen.Plugins, app.screen)
+            assertEquals(Screen.Projects, app.pluginsReturn, "a plugin's page is part of the visit")
+            assertEquals(dev.ide.ui.screens.PluginsTab.Get, app.pluginsStartTab)
+            app.navigateBack()
+            assertEquals(Screen.Projects, app.screen)
+        }
+    }
+
+    /**
+     * Leaving Get plugins sideways (another sidebar destination in the wide layout) kept its entry, so the
+     * hub's Plugins tool later opened on the Get tab and its Back left an open project for Home.
+     */
+    @Test
+    fun getPluginsEntryEndsWhenTheScreenIsLeftAnyWay() = runTest {
+        val backend = settled()
+        val app = appState(backend)
+        advanceUntilIdle()
+        app.hubTwoPane = true
+
+        app.openGetPlugins()
+        app.openSettingsPage("appearance") // the sidebar's other destination
+        assertEquals(Screen.Hub, app.pluginsReturn)
+        assertNull(app.pluginsStartTab)
+        app.navigateBack()
+        assertEquals(Screen.Projects, app.screen)
+
+        backend.epochFlow.value++
+        advanceUntilIdle()
+        app.openHub(Screen.Editor)
+        app.navigateTo(Screen.Plugins)
+        assertNull(app.pluginsStartTab, "the hub's Plugins tool opens on its usual tab")
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
+
+        // The phone: Plugins steps back to the hub, then the editor.
+        app.hubTwoPane = false
+        app.openHub(Screen.Editor)
+        app.navigateTo(Screen.Plugins)
+        app.navigateBack()
+        assertEquals(Screen.Hub, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
     }
 
     // ---- plugin-contributed screens ----
@@ -711,6 +972,36 @@ class CodeAssistAppStateTest {
         assertEquals(Screen.Projects, app.screen)
         assertNull(app.importPreview)
         assertNull(app.importArchivePath)
+    }
+
+    /** A package handed in mid-edit: Cancel goes back to the editor, not Home (which closed the project). */
+    @Test
+    fun cancellingAPackageHandedInMidEditReturnsToTheEditor() = runTest {
+        val preview = UiImportPreview(
+            name = "Sample", description = "", author = "", createdBy = "", isAndroid = false,
+            packageName = null, moduleCount = 1,
+            modules = listOf(UiPackagedModule("app", "android-app", fileCount = 3, sizeBytes = 128)), fileCount = 3,
+            uncompressedSizeBytes = 128, hasBundledDeps = false, icon = null, files = emptyList(),
+            compatible = true,
+        )
+        val backend = settled(importPreview = preview)
+        val app = appState(backend)
+        advanceUntilIdle()
+        backend.epochFlow.value++
+        advanceUntilIdle()
+        assertEquals(Screen.Editor, app.screen)
+
+        app.openImportPackage("/tmp/sample.caproj")
+        assertEquals(Screen.ImportProject, app.screen)
+        app.navigateBack()
+        assertEquals(Screen.Editor, app.screen)
+        assertTrue(app.projectOpen)
+
+        // The next one, from Home, cancels back Home.
+        app.navigateTo(Screen.Projects)
+        app.openImportPackage("/tmp/sample.caproj")
+        app.cancelImportPreview()
+        assertEquals(Screen.Projects, app.screen)
     }
 
     /** A host that always "picks" the same Gradle folder. */
@@ -1268,6 +1559,8 @@ class CodeAssistAppStateTest {
         val app = appState(backend)
         advanceUntilIdle()
 
+        backend.epochFlow.value++ // module config is opened from a project's editor
+        advanceUntilIdle()
         app.openModuleConfig("app", ModulesTab.Dependencies)
         assertEquals(Screen.ModuleConfig, app.screen)
         assertEquals("app", app.configModule)

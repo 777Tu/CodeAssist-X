@@ -1,5 +1,6 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.platform.excludeSystemGestures
 import dev.ide.ui.backend.RunGutter
 import dev.ide.ui.backend.TestOutput
 import dev.ide.ui.LocalPluginFileOpener
@@ -46,12 +47,7 @@ import dev.ide.ui.components.IconButtonCa
 import dev.ide.ui.generated.resources.zen_exit
 import dev.ide.ui.icons.CaIcons
 import dev.ide.ui.platform.touchInput
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemGestures
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
@@ -114,6 +110,10 @@ internal fun EditorCenter(
     frame: (@Composable (editorBody: @Composable () -> Unit) -> Unit)? = null,
 ) {
     val project = state.backend.project
+    // A language server's own edits (workspace/applyEdit outside a command): applied like a multi-file fix.
+    LaunchedEffect(state.backend) {
+        state.backend.editor.externalEdits.collect { edits -> state.applyWorkspaceEdits(edits) }
+    }
     // Local history for the active tab, opened from the top bar's ⋯ menu.
     if (state.localHistoryOpen) {
         val file = state.active
@@ -572,8 +572,8 @@ internal fun EditorCenter(
     }
 }
 
-/** Zen mode's way out, at the end of the tabs strip: clear of the screen edge's back-gesture zone, which would
- *  otherwise take the tap once the system bars are hidden. */
+/** Zen mode's way out, at the end of the tabs strip. It opts out of the screen edge's back-gesture zone, which
+ *  would otherwise take the tap once the system bars are hidden, instead of being inset clear of it (an empty strip). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ZenExitButton(onExit: () -> Unit) {
@@ -583,7 +583,7 @@ private fun ZenExitButton(onExit: () -> Unit) {
         tooltip = { PlainTooltip { Text(label, style = MaterialTheme.typography.labelMedium) } },
         state = rememberTooltipState(),
         enableUserInput = !touchInput,
-        modifier = Modifier.windowInsetsPadding(WindowInsets.systemGestures.only(WindowInsetsSides.End)).padding(end = 6.dp),
+        modifier = Modifier.excludeSystemGestures().padding(end = 6.dp),
     ) {
         IconButtonCa(CaIcons.collapse, label, onExit, boxSize = 30, iconSize = 16)
     }
@@ -682,12 +682,10 @@ private fun EditorDaemonEffect(
             // and a plugin's language (the NDK plugin's C/C++), which this gate used to shut out by extension. A
             // backend with no highlighter answers empty at once, so the pass costs nothing for plain text.
             DaemonPass.SEMANTIC -> true
-            // Folding stays Java/Kotlin; @Preview markers are Kotlin-only; diagnostics + inlay apply to every
-            // backend (they no-op for languages that don't provide them).
-            DaemonPass.FOLDS ->
-                active.path.endsWith(".java") || active.path.endsWith(".kt") || active.path.endsWith(
-                    ".kts"
-                )
+            // Folding likewise: XML and a plugin's language (a language server's folding ranges) have folds of
+            // their own, and a backend without a folding service answers empty at once. @Preview markers are
+            // Kotlin-only; diagnostics + inlay apply to every backend (they no-op where not provided).
+            DaemonPass.FOLDS -> true
 
             DaemonPass.PREVIEWS -> active.path.endsWith(".kt") || active.path.endsWith(".kts")
             else -> true

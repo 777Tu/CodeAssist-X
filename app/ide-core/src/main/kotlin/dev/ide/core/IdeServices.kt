@@ -458,7 +458,10 @@ class IdeServices private constructor(
         val fromAnalyzers = platform.extensions.extensions(ANALYZER_EP).flatMap { it.languages }
         val fromProviders = platform.extensions.extensions(DIAGNOSTIC_PROVIDER_EP).flatMap { it.languages }
         // A declaration provider reads the same target, so a language it names needs the gate open too.
-        val fromNavigation = platform.extensions.extensions(dev.ide.analysis.DECLARATION_PROVIDER_EP).flatMap { it.languages }
+        val fromNavigation = platform.extensions.extensions(dev.ide.analysis.DECLARATION_PROVIDER_EP).flatMap { it.languages } +
+            platform.extensions.extensions(dev.ide.analysis.NAVIGATION_PROVIDER_EP).flatMap { it.languages } +
+            platform.extensions.extensions(dev.ide.analysis.REFERENCE_PROVIDER_EP).flatMap { it.languages } +
+            platform.extensions.extensions(dev.ide.analysis.RENAME_PROVIDER_EP).flatMap { it.languages }
         (fromAnalyzers + fromProviders + fromNavigation).toHashSet()
     }
 
@@ -622,6 +625,7 @@ class IdeServices private constructor(
         override fun projectJavaFiles() = this@IdeServices.projectJavaFiles()
         override fun projectKotlinFiles() = this@IdeServices.projectFilesEndingWith(".kt")
         override fun javaDeclarationAt(file: Path, text: String, offset: Int) = this@IdeServices.javaDeclarationAt(file, text, offset)
+        override fun pluginTarget(file: Path, text: String) = this@IdeServices.pluginTarget(file, text)
         override fun isValidJavaIdentifier(s: String) = this@IdeServices.isValidJavaIdentifier(s)
         override val composePreviewRunner get() = this@IdeServices.composePreviewRunner
         override fun analyzerFor(module: Module, language: LanguageId) =
@@ -1456,6 +1460,7 @@ class IdeServices private constructor(
     fun documentClosed(file: Path) {
         val norm = file.toAbsolutePath().normalize()
         diskBaselines.remove(norm)
+        env.languageServers.documentClosed(norm)
         if (openDocuments.remove(norm) == null) return
         // Same reason as [updateDocument]: dropping a `res/` buffer changes what the synthetic `R` resolves,
         // and dropping a Kotlin buffer puts its light classes back on what disk holds.
@@ -2264,7 +2269,7 @@ class IdeServices private constructor(
     /** Content roots to surface in the project tree — code, resources, and assets (so `res/` is editable). */
     fun treeRoots(module: Module): List<Path> {
         return module.sourceSets.flatMap { it.contentRoots }
-            .filter { cr -> cr.roles.any { it in TREE_ROOT_ROLES } }.map { Paths.get(it.dir.path) }
+            .filter { cr -> cr.roles.any(::surfacedInTree) }.map { Paths.get(it.dir.path) }
     }
 
     /**
@@ -2273,7 +2278,7 @@ class IdeServices private constructor(
      * package contexts (compactable + new-class targets).
      */
     fun treeRootsDetailed(module: Module): List<TreeRootInfo> = module.sourceSets.flatMap { ss ->
-        ss.contentRoots.filter { cr -> cr.roles.any { it in TREE_ROOT_ROLES } }
+        ss.contentRoots.filter { cr -> cr.roles.any(::surfacedInTree) }
             .map { TreeRootInfo(Paths.get(it.dir.path), ss.name, it.roles) }
     }
 
@@ -2319,10 +2324,14 @@ class IdeServices private constructor(
         .filter { ContentRole.AIDL in it.roles }
         .map { Paths.get(it.dir.path) }
 
-    /** The module that owns [file] (its source root is a prefix), or null if outside the project. */
+    /**
+     * The module that owns [file] (its source root is a prefix), or null if outside the project. A file a
+     * language server serves is also owned outside the source roots: see [moduleForLanguageServerFile].
+     */
     fun moduleForFile(file: Path): Module? {
         val target = file.toAbsolutePath().normalize()
         return modules().firstOrNull { module -> sourceRoots(module).any { target.startsWith(it) } }
+            ?: moduleForLanguageServerFile(target)
     }
 
     /** Transitive subtypes of [superFqn] from the workspace subtype index (binary + Java/Kotlin source), for
@@ -2665,6 +2674,24 @@ class IdeServices private constructor(
     fun moduleForEditableFile(file: Path): Module? =
         moduleForFile(file) ?: moduleForResourceFile(file) ?: moduleForAidlFile(file) ?: moduleForManifestFile(file)
 
+    /**
+     * The module a file served by a language server is analysed under when no source root holds it: the
+     * deepest module whose directory contains it, else the project's first module. A Dart package or a Python
+     * script sits in no Java-shaped source root, and every editor pass is gated on a module, so without this
+     * the server was asked (the off-engine prefetch is not gated) while the editor showed nothing. The module
+     * only selects the analyzer; a language server's analyzer ignores it. Only for a language whose backend
+     * IS the server, so a Java or Kotlin file outside the source roots stays unanalysed as before.
+     */
+    private fun moduleForLanguageServerFile(file: Path): Module? {
+        if (languageServerFor(file)?.servesBackend != true) return null
+        val target = file.toAbsolutePath().normalize()
+        if (!target.startsWith(workspaceRoot.toAbsolutePath().normalize())) return null
+        val all = modules()
+        return all.filter { target.startsWith(Paths.get(it.dir.path).toAbsolutePath().normalize()) }
+            .maxByOrNull { it.dir.path.length }
+            ?: all.firstOrNull()
+    }
+
     /** The module whose [AndroidFacet] manifest path is [file], or null. */
     private fun moduleForManifestFile(file: Path): Module? {
         val target = file.toAbsolutePath().normalize()
@@ -2859,6 +2886,7 @@ class IdeServices private constructor(
      * file gets `androidTest:` marks, where instrumented tests can run (the desktop, over adb).
      */
     private fun testGutterMarks(file: Path, text: String): List<dev.ide.plugin.editor.GutterMark> {
+        pluginTestGutterMarks(file, text).takeIf { it.isNotEmpty() }?.let { return it }
         val name = file.fileName?.toString() ?: return emptyList()
         if (!name.endsWith(".kt") && !name.endsWith(".java")) return emptyList()
         val target = file.toAbsolutePath().normalize()
@@ -2888,6 +2916,34 @@ class IdeServices private constructor(
                 actionId = TestOutput.GUTTER_ACTION_PREFIX + taskId,
                 order = 100,
             )
+        }
+    }
+
+    /**
+     * Run marks for a plugin language's tests ([dev.ide.build.TEST_PROVIDER_EP]): the providers for [file]'s
+     * language name the tests in its live buffer, and each mark starts `<provider>:<module>:<target>`.
+     */
+    private fun pluginTestGutterMarks(file: Path, text: String): List<dev.ide.plugin.editor.GutterMark> {
+        val language = languageFor(file)
+        val providers = build.testProviders().filter { language in it.languages }
+        if (providers.isEmpty()) return emptyList()
+        val module = moduleForFile(file) ?: return emptyList()
+        val lineStarts = ArrayList<Int>().apply { add(0); text.forEachIndexed { i, c -> if (c == '\n') add(i + 1) } }
+        return providers.flatMap { provider ->
+            runCatching { provider.tests(module, file.toString(), text) }
+                .onFailure { navigationLog.warn("test provider '${provider.id}' failed on $file", it) }
+                .getOrDefault(emptyList())
+                .map { t ->
+                    val line = lineStarts.binarySearch(t.offset.coerceIn(0, text.length)).let { if (it >= 0) it else -it - 2 }
+                    dev.ide.plugin.editor.GutterMark(
+                        line = line,
+                        iconId = "run",
+                        tint = dev.ide.plugin.editor.DecorationTint.Success,
+                        tooltip = if (t.group) "Run all tests in ${t.name}" else "Run ${t.name}",
+                        actionId = TestOutput.GUTTER_ACTION_PREFIX + "${provider.id}:${module.name}:${t.target}",
+                        order = 100,
+                    )
+                }
         }
     }
 
@@ -3132,8 +3188,13 @@ class IdeServices private constructor(
         }.orEmpty()
         if (java.isNotEmpty()) return java
         val android = androidEditor.navigation.targets(file, text, offset, kind)
-        if (android.isNotEmpty() || kind != dev.ide.lang.kotlin.NavKind.DECLARATION) return android
-        return resourceDeclaration(file, text, offset) ?: pluginDeclarations(file, text, offset)
+        if (android.isNotEmpty()) return android
+        return when (kind) {
+            dev.ide.lang.kotlin.NavKind.DECLARATION -> resourceDeclaration(file, text, offset) ?: pluginDeclarations(file, text, offset)
+            dev.ide.lang.kotlin.NavKind.IMPLEMENTATION -> pluginNavigation(file, text, offset, dev.ide.analysis.NavigationKind.IMPLEMENTATION)
+            dev.ide.lang.kotlin.NavKind.TYPE_DECLARATION -> pluginNavigation(file, text, offset, dev.ide.analysis.NavigationKind.TYPE_DECLARATION)
+            else -> android
+        }
     }
 
     /**
@@ -3165,6 +3226,12 @@ class IdeServices private constructor(
             val i = opts.indexOfFirst { it.first == dev.ide.lang.kotlin.NavKind.DECLARATION }
             if (i < 0) opts.add(dev.ide.lang.kotlin.NavKind.DECLARATION to contributed)
             else opts[i] = opts[i].first to (opts[i].second + contributed).distinctBy { it.file.path to it.offset }
+        }
+        // Implementation and type declaration for a plugin's language, where no built-in answered.
+        for ((navKind, pluginKind) in PLUGIN_NAV_KINDS) {
+            if (opts.any { it.first == navKind }) continue
+            val targets = pluginNavigation(file, text, offset, pluginKind)
+            if (targets.isNotEmpty()) opts.add(navKind to targets)
         }
         return opts.sortedBy { it.first.ordinal }
     }
@@ -3320,15 +3387,41 @@ class IdeServices private constructor(
         val providers = platform.extensions.extensions(dev.ide.analysis.DECLARATION_PROVIDER_EP)
             .filter { it.languages.isEmpty() || language in it.languages }
         if (providers.isEmpty()) return emptyList()
-        if (moduleForEditableFile(file) != null) updateDocument(file, text)
-        val target = runCatching {
-            runSync { analysisEnvironment.targetFor(store.vfs.fileFor(file), needsBindings = false) }
-        }.getOrNull() ?: return emptyList()
+        val target = pluginTarget(file, text) ?: return emptyList()
         return providers.flatMap { provider ->
             runCatching { runSync { provider.declarations(target, offset) } }
                 .onFailure { navigationLog.warn("declaration provider '${provider.id}' failed on $file", it) }
                 .getOrDefault(emptyList())
         }.map { dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(Paths.get(it.path)), it.offset, it.label, "declaration") }
+    }
+
+    /**
+     * The analysis target for [file]'s live buffer [text], as the plugin providers (declarations, navigation,
+     * usages, rename) are handed it: the same target diagnostics get. Null when the file cannot be analysed.
+     */
+    internal fun pluginTarget(file: Path, text: String): dev.ide.analysis.AnalysisTarget? {
+        if (moduleForEditableFile(file) != null) updateDocument(file, text)
+        return runCatching {
+            runSync { analysisEnvironment.targetFor(store.vfs.fileFor(file), needsBindings = false) }
+        }.getOrNull()
+    }
+
+    /** Go to Implementation / Type Declaration targets the [dev.ide.analysis.NAVIGATION_PROVIDER_EP] plugins give. */
+    private fun pluginNavigation(
+        file: Path, text: String, offset: Int, kind: dev.ide.analysis.NavigationKind,
+    ): List<dev.ide.lang.kotlin.NavTarget> {
+        val language = languageFor(file)
+        val providers = platform.extensions.extensions(dev.ide.analysis.NAVIGATION_PROVIDER_EP)
+            .filter { it.languages.isEmpty() || language in it.languages }
+        if (providers.isEmpty()) return emptyList()
+        val target = pluginTarget(file, text) ?: return emptyList()
+        val label = if (kind == dev.ide.analysis.NavigationKind.IMPLEMENTATION) "implementation" else "type"
+        return providers.flatMap { provider ->
+            runCatching { runSync { provider.targets(target, offset, kind) } }
+                .onFailure { navigationLog.warn("navigation provider '${provider.id}' failed on $file", it) }
+                .getOrDefault(emptyList())
+        }.distinctBy { it.path to it.offset }
+            .map { dev.ide.lang.kotlin.NavTarget(store.vfs.fileFor(Paths.get(it.path)), it.offset, it.label, label) }
     }
 
     /** A single-element DECLARATION target list for the Android resource reference under [offset], or null. */
@@ -5357,6 +5450,9 @@ class IdeServices private constructor(
     override fun close() {
         // Stop being the app's active engine (only if a newer project hasn't already taken over).
         if (env.activeEngine === this) env.activeEngine = null
+        // This project's language servers: `shutdown` + `exit`, off this thread.
+        runCatching { languageServerFiles?.dispose() }
+        runCatching { env.languageServers.projectClosed(workspaceRoot) }
         analysisEngine.dispose()
         // The build/run cleanup (unblocking an in-flight run + clearing the process-global sandbox broker)
         // now happens in BuildService.dispose(), run when the workspace container is disposed by store.close().
@@ -5386,6 +5482,11 @@ class IdeServices private constructor(
     companion object {
         /** How long a module's on-disk res fingerprint is trusted without a VFS event (see [resDiskFingerprints]). */
         private const val RES_DISK_FINGERPRINT_TTL_MS = 3_000L
+        /** The go-to kinds a [dev.ide.analysis.NavigationProvider] answers, as the editor's own. */
+        private val PLUGIN_NAV_KINDS = listOf(
+            dev.ide.lang.kotlin.NavKind.IMPLEMENTATION to dev.ide.analysis.NavigationKind.IMPLEMENTATION,
+            dev.ide.lang.kotlin.NavKind.TYPE_DECLARATION to dev.ide.analysis.NavigationKind.TYPE_DECLARATION,
+        )
         private const val PERMISSION_CONTEXT_TTL_NANOS = 2_000_000_000L
         private const val PLATFORM_PERMISSION = "android.permission."
         /** The name of the library [ensureKotlinStdlib] adds, and the prefix of a kotlin-stdlib jar. */
@@ -5802,6 +5903,26 @@ class IdeServices private constructor(
         }
     }
 
+    /** The VFS subscription feeding the language servers' file watchers; null when no plugin registered one. */
+    @Volatile private var languageServerFiles: dev.ide.platform.MessageBusConnection? = null
+
+    /** Files whose diagnostics a language server changed on its own; the editor re-analyzes the open ones. */
+    val externalDiagnosticsChanged: kotlinx.coroutines.flow.Flow<Set<Path>> get() = env.languageServers.diagnosticsChanged
+
+    /**
+     * The language server support serving [file]'s language, or null. The editor uses it to do a pass's server
+     * round trip off the engine thread first ([dev.ide.lsp.client.LspLanguageSupport.prefetch]), so the engine
+     * call that follows is a lookup rather than a wait on another process.
+     */
+    /** [file]'s language id, as the file-type mappings route it (for diagnostics in the timing log). */
+    fun languageIdOf(file: Path): String = languageFor(file).id
+
+    fun languageServerFor(file: Path): dev.ide.lsp.client.LspLanguageSupport? =
+        if (env.languageServers.hasServers) env.languageServers.supportFor(languageFor(file)) else null
+
+    /** Edits a language server asked to make on its own; the editor applies them like a multi-file quick fix. */
+    val languageServerEdits: kotlinx.coroutines.flow.Flow<Map<Path, List<DocumentEdit>>> get() = env.languageServers.externalEdits
+
     /**
      * The last of construction, deliberately after every property: Kotlin runs property initializers and `init`
      * blocks in source order, so anything that can call back into this engine from ANOTHER thread must not
@@ -5819,6 +5940,14 @@ class IdeServices private constructor(
         // app registry). Set once the engine is fully constructed, so it can't be resolved half-built. The
         // backend re-asserts this on project swap; an engine clears it (if still itself) on close.
         env.activeEngine = this
+        // The language servers watch files through the client: a save, a create, a delete reaches them here.
+        if (env.languageServers.hasServers) {
+            languageServerFiles = store.bus.connect().also { conn ->
+                conn.subscribe(dev.ide.vfs.VfsTopics.CHANGES, dev.ide.vfs.VfsListener { events ->
+                    env.languageServers.filesChanged(events)
+                })
+            }
+        }
         openJob?.start()
     }
 }
@@ -5858,7 +5987,15 @@ internal class ActiveEngineXmlResourceHost(private val env: ApplicationEnvironme
         host?.createResourceFile(file, rClass, name)
 }
 
-/** Content roles surfaced in the project tree (code + resources + assets + AIDL); see [IdeServices.treeRoots]. */
+/**
+ * Whether a content root with [role] shows in the project tree: the built-in code, resource, asset and AIDL
+ * roles, and every role a plugin defined. A plugin's role is the layout of a language the core knows nothing
+ * about (a Dart package, a Python package root), and hiding it left such a module looking empty in the
+ * Project view. The built-ins left out (`jni-libs`, `excluded`) stay out.
+ */
+private fun surfacedInTree(role: ContentRole): Boolean = role in TREE_ROOT_ROLES || role !in ContentRole.entries
+
+/** The built-in content roles surfaced in the project tree (code + resources + assets + AIDL); see [IdeServices.treeRoots]. */
 private val TREE_ROOT_ROLES = setOf(
     ContentRole.SOURCE,
     ContentRole.GENERATED,
@@ -5883,9 +6020,16 @@ private class IdeAnalysisTarget(
     override fun checkCanceled() = dev.ide.platform.EngineCancellation.checkCanceled()
 }
 
-/** Drives a `suspend` SPI call to completion synchronously (the analyzer never actually suspends). */
+/**
+ * Drives a `suspend` SPI call to completion synchronously. The built-in analyzers never actually suspend, so the
+ * result is there when [startCoroutine] returns; a plugin's provider may (a `withContext`, a channel), and this
+ * then blocks the calling thread until it resumes, wherever that happens, rather than reading a result that is
+ * not there yet.
+ */
 internal fun <T> runSync(block: suspend () -> T): T {
-    var result: Result<T>? = null
-    block.startCoroutine(Continuation(EmptyCoroutineContext) { result = it })
-    return result!!.getOrThrow()
+    val result = java.util.concurrent.atomic.AtomicReference<Result<T>?>(null)
+    val done = java.util.concurrent.CountDownLatch(1)
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { result.set(it); done.countDown() })
+    if (result.get() == null) done.await()
+    return result.get()!!.getOrThrow()
 }

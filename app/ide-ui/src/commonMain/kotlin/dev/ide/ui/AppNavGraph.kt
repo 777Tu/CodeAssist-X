@@ -81,6 +81,7 @@ import dev.ide.ui.screens.LearnSolutionsScreen
 import dev.ide.ui.screens.LearnThreadScreen
 import dev.ide.ui.screens.ModuleConfigScreen
 import dev.ide.ui.screens.ModulesTab
+import dev.ide.ui.screens.LanguageServersScreen
 import dev.ide.ui.screens.PluginsScreen
 import dev.ide.ui.screens.ProjectsHomeScreen
 import dev.ide.ui.screens.ExploreFeed
@@ -159,11 +160,16 @@ internal fun AppNavGraph(
  */
 @Composable
 private fun rememberHubSections(app: CodeAssistAppState, state: IdeUiState): List<HubSection> {
-    val global = app.hubReturn != Screen.Editor
+    val global = !app.hubInProject
     val pages = remember(state.backend, global, app.screen) {
         state.backend.settings.settingsPages().filter { !global || it.scope == "app" }
     }
-    return hubSections(pages)
+    // A user-configured language server is a program the IDE starts, which Android does not allow an app to
+    // do for one it did not ship; there a language comes from a plugin instead.
+    val hidden = remember(state.backend) {
+        if (state.backend.settings.languageServersSupported()) emptySet() else setOf(HubTool.LanguageServers)
+    }
+    return hubSections(pages, hidden)
 }
 
 /**
@@ -201,6 +207,7 @@ private fun hubTargetOf(app: CodeAssistAppState, s: Screen): HubTarget? = when (
     Screen.SdkManager -> HubTarget.Tool(HubTool.SdkManager)
     Screen.KeystoreManager -> if (app.isHubPane(s)) HubTarget.Tool(HubTool.Keystore) else null
     Screen.Plugins -> HubTarget.Tool(HubTool.Plugins)
+    Screen.LanguageServers -> HubTarget.Tool(HubTool.LanguageServers)
     Screen.Storage -> HubTarget.Tool(HubTool.Storage)
     else -> null
 }
@@ -212,6 +219,7 @@ private fun screenOf(tool: HubTool): Screen = when (tool) {
     HubTool.SdkManager -> Screen.SdkManager
     HubTool.Keystore -> Screen.KeystoreManager
     HubTool.Plugins -> Screen.Plugins
+    HubTool.LanguageServers -> Screen.LanguageServers
     HubTool.Storage -> Screen.Storage
 }
 
@@ -239,14 +247,14 @@ private fun SettingsRoute(
         backend = state.backend,
         onBack = { app.navigateTo(Screen.Hub) },
         onSettingsChanged = app::reloadSettings,
-        // The logs viewer is an editor overlay; only meaningful with a project open.
+        // The logs viewer is an editor overlay; only meaningful with a project open (not one closed behind Home).
         onOpenLogs = {
-            if (app.epoch > 0) {
+            if (app.projectOpen) {
                 state.logsOpen = true
                 app.navigateTo(Screen.Editor)
             }
         },
-        view = if (app.hubReturn == Screen.Editor) SettingsView.All else SettingsView.Global,
+        view = if (app.hubInProject) SettingsView.All else SettingsView.Global,
         title = stringResource(Res.string.settings_title),
         codeFont = codeFont,
         fileActions = fileActions,
@@ -275,7 +283,7 @@ private fun AppRoute(
         Screen.CreateProject -> CreateProjectScreen(
             backend = backend,
             onCancel = { app.navigateTo(Screen.Projects) },
-            onCreated = { app.navigateTo(Screen.Editor) },
+            onCreated = { app.enterEditor() },
             initialTemplateId = app.createTemplateId,
         )
 
@@ -493,7 +501,12 @@ private fun AppRoute(
             )
         }
 
-        Screen.Editor -> EditorScreen(
+        // The editor needs a loaded project. The state already turns every stale way in back Home
+        // ([CodeAssistAppState.projectOpen]); this is the backstop for an engine unloaded under the editor, which
+        // must not compose a screen whose backend throws "No project is open" (a wrong Back target did, in 3.40.0).
+        Screen.Editor -> if (app.epoch <= 0) {
+            LaunchedEffect(Unit) { app.navigateTo(Screen.Projects) }
+        } else EditorScreen(
             state = state,
             onToggleTheme = { app.toggleTheme(dark) },
             onOpenHub = { app.openHub(Screen.Editor) },
@@ -595,11 +608,20 @@ private fun AppRoute(
             }
         }
 
+        Screen.LanguageServers -> LanguageServersScreen(backend = state.backend, onBack = { app.navigateTo(Screen.Hub) })
+
         Screen.Plugins -> PluginsScreen(
             backend = state.backend,
-            onBack = { app.navigateTo(Screen.Hub) },
-            // The Logs viewer is an editor overlay, so the row offers it only with a project open.
-            onOpenLogs = if (app.epoch > 0) {
+            onBack = {
+                val back = app.pluginsReturn
+                app.resetPluginsEntry()
+                app.navigateTo(back)
+            },
+            onOpenUrl = if (fileActions.canOpenUrl) ({ url: String -> fileActions.openUrl(url) }) else null,
+            startTab = app.pluginsStartTab,
+            // The Logs viewer is an editor overlay, so the row offers it only with a project open (a project closed
+            // behind Home is still loaded, which is why this is not `epoch > 0`).
+            onOpenLogs = if (app.projectOpen) {
                 { pluginId ->
                     state.logsSource = pluginId
                     state.logsOpen = true
@@ -618,6 +640,8 @@ private fun AppRoute(
 
         Screen.Storage -> StorageScreen(
             backend = state.backend,
+            // A project closed behind Home is still loaded; it is not "open" and may be deleted here.
+            projectOpen = app.projectOpen,
             onBack = { app.navigateTo(Screen.Hub) },
         )
 
@@ -625,7 +649,7 @@ private fun AppRoute(
             backend = state.backend,
             // The live formatter preview is engine-backed: available when the hub (hence Code Style) was
             // opened from the editor, not from the project picker.
-            hasProject = app.hubReturn == Screen.Editor,
+            hasProject = app.hubInProject,
             onBack = { app.navigateTo(Screen.Hub) },
         )
 
@@ -778,10 +802,10 @@ private fun rememberAiTab(app: CodeAssistAppState, state: IdeUiState, fileAction
         object : HomeTabContext {
             override val backend get() = app.backend
             override val fileActions get() = fileActions
-            override fun openEditor() = app.navigateTo(Screen.Editor)
+            override fun openEditor() = app.enterEditor()
             override fun openFile(path: String) {
                 state.openAt(path, 0)
-                app.navigateTo(Screen.Editor)
+                app.enterEditor()
             }
             // The same run the editor's Run button starts, with the console open to follow it.
             override val runProject: (() -> Unit)? = if (state.backend.build.supported()) {
@@ -791,7 +815,7 @@ private fun rememberAiTab(app: CodeAssistAppState, state: IdeUiState, fileAction
                         val selected = state.selectedRunTask
                         if (selected != null) state.backend.build.runTask(selected.id) else state.backend.build.runBuild()
                     }
-                    app.navigateTo(Screen.Editor)
+                    app.enterEditor()
                 }
             } else null
         }
@@ -920,6 +944,8 @@ private fun ProjectPickerRoute(
         onJoinDiscord = if (fileActions.canOpenUrl) {
             { fileActions.openUrl(BetaInfo.DISCORD_URL) }
         } else null,
+        // Downloading is a browser's job, so the card is offered only where links open.
+        onGetPlugins = if (fileActions.canOpenUrl) app::openGetPlugins else null,
         onSponsor = if (fileActions.canOpenUrl) {
             { fileActions.openUrl(BetaInfo.SPONSOR_URL) }
         } else null,

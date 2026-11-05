@@ -148,7 +148,21 @@ class CodeAssistAppState(
      */
     var screen: Screen
         get() = currentScreen
-        private set(value) {
+        private set(next) {
+            // The editor needs an open project. Every real way in (open, create, import, a lesson, the AI tab)
+            // marks one open first, so what arrives here without one is a stale Back target or a link from
+            // Home into a project that was closed: it goes Home instead. Closing only leaves the editor (the
+            // engine stays loaded, so the screen behind it would show the closed project and the session
+            // resume would record it again), and before any project is loaded the editor's backend throws.
+            val value = if (next == Screen.Editor && !projectOpen) Screen.Projects else next
+            // Home is where closing a project lands.
+            if (value == Screen.Projects) projectOpen = false
+            // Home's "Get plugins" entry lasts only while the user is on the Plugins screen (or a plugin page
+            // opened from it); leaving any other way must not make the hub's Plugins tool open on the Get tab
+            // and return Home later.
+            if (value != Screen.Plugins && value != Screen.PluginScreen) resetPluginsEntry()
+            // Entering a stacked run (the store's screens) from anywhere else: that is where its Back ends.
+            if (navigatesAsStack(value) && !navigatesAsStack(currentScreen)) stackBase = currentScreen
             if (value != currentScreen && !navigatesAsStack(value)) backStack.clear()
             // Leaving Settings altogether: the next visit starts at the top of its list.
             if (isHubPane(currentScreen) && !isHubPane(value)) hubListScroll = ScrollState(0)
@@ -191,6 +205,38 @@ class CodeAssistAppState(
     var homeTab: HomeTab by mutableStateOf(HomeTab.Projects)
         private set
 
+    /**
+     * Whether the user has a project open: set when one is opened, created or imported (or a lesson's workspace
+     * is), cleared when they leave it for Home or a lesson ends, or when the engine is unloaded. NOT `epoch > 0`:
+     * closing a project keeps its engine loaded behind the picker, so the epoch stays up after it is closed.
+     */
+    var projectOpen: Boolean by mutableStateOf(false)
+        private set
+
+    /**
+     * The screen a stacked run (the store's screens) was entered from, where Back goes once its stack is spent.
+     * Home's Explore tab for the usual entry; the editor for a store link or a tapped notification that arrived
+     * mid-edit, which used to drop the user on Home and so close their project without asking.
+     */
+    private var stackBase: Screen = Screen.Projects
+
+    /** Where the import preview's Cancel goes: Home, or the editor when a package was handed in mid-edit. */
+    private var importReturn: Screen = Screen.Projects
+
+    /**
+     * Session resume gives way to anything that got there first: a project opened by the user, a link or a
+     * tapped notification ([resumeSuperseded]); and while its own open is in flight ([resumePending]) the
+     * epoch bump it causes does not pull a user who has already moved on into the editor.
+     */
+    private var resumeSuperseded = false
+    private var resumePending = false
+
+    /** Where the Plugins screen's back goes, and the tab it opens on: the hub's Plugins tool, or Home's card. */
+    var pluginsReturn: Screen by mutableStateOf(Screen.Hub)
+        private set
+    var pluginsStartTab: dev.ide.ui.screens.PluginsTab? by mutableStateOf(null)
+        private set
+
     /** Where the Settings and Tools hub returns on Back: the picker (opened with no project) or the editor. */
     var hubReturn: Screen by mutableStateOf(Screen.Editor)
         private set
@@ -222,6 +268,10 @@ class CodeAssistAppState(
      *  a project is closed back to the picker, which is exactly when the row must not show. */
     var keystoreInProject: Boolean by mutableStateOf(false)
         private set
+
+    /** Whether Settings was opened over an open project (from the editor or one of its screens), not from Home:
+     *  the project-scoped pages, the live formatter preview and the keystore's signing row need one. */
+    val hubInProject: Boolean get() = projectOpen && hubReturn != Screen.Projects
 
     /** Where the Icon Manager returns on Back: the editor, or a module's config when opened from there. */
     var iconManagerReturn: Screen by mutableStateOf(Screen.Editor)
@@ -424,12 +474,18 @@ class CodeAssistAppState(
         scope.launch {
             backend.projects.projectEpoch.collect {
                 epoch = it
+                // A newly loaded project is an open one (even one the AI tab opened behind Home); no engine at
+                // all is no project.
+                projectOpen = it > 0
                 // Any other project opened while a lesson was up ends the lesson: the banner belongs to the
                 // lesson's workspace only.
                 if (lessonInEditor && !isLearnWorkspace(backend.project.rootPath)) lessonInEditor = false
                 // The AI tab opens and creates projects in the background and keeps the user in the chat; the
                 // tab's own buttons take them into the editor.
-                if (it > 0 && !(screen == Screen.Projects && homeTab == HomeTab.Ai)) screen = Screen.Editor
+                // A resume that finished after the user moved on (a store link at launch, say) leaves them there.
+                val resumedLate = resumePending && screen != Screen.Projects
+                if (it > 0) resumePending = false
+                if (it > 0 && !resumedLate && !(screen == Screen.Projects && homeTab == HomeTab.Ai)) enterEditor()
             }
         }
         // Starting a console run (a `run` task) opens a fresh interactive session: keyed on its id, jump to the
@@ -450,7 +506,10 @@ class CodeAssistAppState(
             if (!reopenLast || last == null) return@launch
             if (backend.projects.projectEpoch.value > 0) return@launch // already in a project
             val exists = withContext(ioDispatcher) { backend.projects.projects().any { it.rootPath == last } }
-            if (exists) backend.projects.openProject(last)
+            // A link, a tapped notification or the user got somewhere first: that wins over resuming.
+            if (!exists || resumeSuperseded || screen != Screen.Projects) return@launch
+            resumePending = true
+            if (!backend.projects.openProject(last)) resumePending = false
         }
         // Track which project (if any) the user has open, for the resume above. Entering the editor (or its Run
         // screen, which only an open project has) records the project; the picker, where closing a project
@@ -508,6 +567,16 @@ class CodeAssistAppState(
      *  the same as the top bar's back arrow; the editor draws it and clears it. */
     var confirmCloseProject by mutableStateOf(false)
 
+    /**
+     * Into the editor on the project that is loaded, as an intent: an open, create or import that just loaded
+     * it, or the AI tab's buttons for the one it opened. Marks it open, which a plain [navigateTo] does not (a
+     * Back target or a link from Home must not reopen a project the user closed). Inert with nothing loaded.
+     */
+    fun enterEditor() {
+        if (backend.projects.projectEpoch.value > 0) projectOpen = true
+        screen = Screen.Editor
+    }
+
     /** Go to [target] with no extra state to carry (the plain forward/back moves between screens). */
     fun navigateTo(target: Screen) {
         screen = target
@@ -542,6 +611,23 @@ class CodeAssistAppState(
         screen = Screen.PluginScreen
     }
 
+    /** Home's "Get plugins" card: the Plugins screen on its download tab, back to Home. */
+    fun openGetPlugins() {
+        pluginsReturn = Screen.Projects
+        pluginsStartTab = dev.ide.ui.screens.PluginsTab.Get
+        // The hub's own return too: the Plugins screen is one of its panes, and every Back path that goes
+        // through the hub (the wide layout's, the phone's Plugins -> Hub -> back) must land on Home, not on an
+        // editor with no project open (which threw "No project is open").
+        hubReturn = Screen.Projects
+        screen = Screen.Plugins
+    }
+
+    /** Any other way into the Plugins screen (the hub): its usual tab, back to the hub. */
+    fun resetPluginsEntry() {
+        pluginsReturn = Screen.Hub
+        pluginsStartTab = null
+    }
+
     /** Open Settings (the hub), remembering [from] as its Back destination. */
     fun openHub(from: Screen) {
         hubReturn = from
@@ -573,7 +659,7 @@ class CodeAssistAppState(
     }
 
     /** Open the hub's Keystore Manager entry: a project context only when the hub itself came from the editor. */
-    fun openKeystoreManagerFromHub() = openKeystoreManager(Screen.Hub, inProject = hubReturn == Screen.Editor)
+    fun openKeystoreManagerFromHub() = openKeystoreManager(Screen.Hub, inProject = hubInProject)
 
     /**
      * Open the Icon Manager, remembering where Back goes. [resDir] preselects an import target, which is how
@@ -615,7 +701,8 @@ class CodeAssistAppState(
     // ---- project intents ----
 
     fun openProject(project: ProjectInfo) {
-        scope.launch { if (backend.projects.openProject(project.rootPath)) screen = Screen.Editor }
+        resumeSuperseded = true
+        scope.launch { if (backend.projects.openProject(project.rootPath)) enterEditor() }
     }
 
     fun deleteProject(project: ProjectInfo) {
@@ -677,8 +764,9 @@ class CodeAssistAppState(
      * goes back to offering an install, which is the truth, rather than landing on an empty editor.
      */
     fun openInstalledProject(rootPath: String) {
+        resumeSuperseded = true
         scope.launch {
-            if (backend.projects.openProject(rootPath)) screen = Screen.Editor else refreshProjects()
+            if (backend.projects.openProject(rootPath)) enterEditor() else refreshProjects()
         }
     }
 
@@ -729,6 +817,7 @@ class CodeAssistAppState(
         if (preview != null) {
             importArchivePath = path
             importPreview = preview
+            if (screen != Screen.ImportProject) importReturn = screen
             screen = Screen.ImportProject
         } else {
             openProjectArchive(path)
@@ -762,14 +851,19 @@ class CodeAssistAppState(
         scope.launch { backend.projects.discardProjectArchive() }
     }
 
-    fun cancelImportPreview() = leaveImportPreview(Screen.Projects)
+    /** Back out of the preview to where it was opened over (Home, or the editor when a package arrived mid-edit). */
+    fun cancelImportPreview() = leaveImportPreview(finished = false)
 
-    fun finishImportPreview() = leaveImportPreview(Screen.Editor)
+    fun finishImportPreview() = leaveImportPreview(finished = true)
 
-    private fun leaveImportPreview(next: Screen) {
+    private fun leaveImportPreview(finished: Boolean) {
+        val back = importReturn
         importPreview = null
         importArchivePath = null
-        screen = next
+        importReturn = Screen.Projects
+        // Back into the editor goes through the screen setter, which sends it Home if that project has since
+        // stopped being open; finishing opened the imported project, a real way in.
+        if (finished) enterEditor() else screen = back
     }
 
     // ---- project import ----
@@ -870,7 +964,7 @@ class CodeAssistAppState(
         importBusy = false
         if (result.success) {
             if (convert) pendingGradleConvert = true
-            screen = Screen.Editor
+            enterEditor()
         } else {
             importError = ImportError.GradleFailed(result.message)
         }
@@ -918,7 +1012,7 @@ class CodeAssistAppState(
         scope.launch {
             val ok = runCatching { backend.learn.openWorkspace(lessonId) }.getOrDefault(false)
             if (ok) {
-                screen = Screen.Editor
+                enterEditor()
             } else {
                 lessonInEditor = false
                 lessonEditorUnavailable = true
@@ -986,6 +1080,8 @@ class CodeAssistAppState(
     /** Leave a lesson that ran in the editor: back to its track (or Learn), re-reading progress. */
     fun exitLessonEditor() {
         lessonInEditor = false
+        // The workspace is not a project the user opened: no Back target may lead into it once the lesson ends.
+        projectOpen = false
         learnEpoch++
         screen = if (currentTrackId != null) Screen.LessonTrack else Screen.Projects
     }
@@ -1135,6 +1231,7 @@ class CodeAssistAppState(
      * ignoring the tap.
      */
     fun openStoreItemById(id: String) {
+        resumeSuperseded = true
         if (id.isBlank()) return showStore()
         scope.launch {
             val item = findStoreItem(id)
@@ -1229,9 +1326,14 @@ class CodeAssistAppState(
      * store item withdrawn between the notification being posted and the user opening it, and neither is
      * worth an error dialog. The notification stays in the list so it is not silently swallowed.
      */
-    fun openNotificationTarget(notification: dev.ide.ui.backend.UiNotification) {
-        when (val target = notification.target) {
-            null -> Unit
+    fun openNotificationTarget(notification: dev.ide.ui.backend.UiNotification) = openNotificationTarget(notification.target)
+
+    /** Act on [target], from the in-app list or a tapped tray notification the host hands over. */
+    fun openNotificationTarget(target: dev.ide.ui.backend.UiNotificationTarget?) {
+        if (target == null) return
+        // Claimed up front, so a session resume still running at launch cannot open a project over the tap.
+        resumeSuperseded = true
+        when (target) {
             is dev.ide.ui.backend.UiNotificationTarget.Project -> {
                 val match = backend.projects.projects().firstOrNull { it.rootPath == target.rootPath }
                 if (match != null) openProject(match)
@@ -1244,10 +1346,25 @@ class CodeAssistAppState(
             }
             // The submissions live on the You screen, which is what a review decision is about.
             dev.ide.ui.backend.UiNotificationTarget.Submissions -> openYou()
-            is dev.ide.ui.backend.UiNotificationTarget.Screen -> when {
-                // "Someone answered your question": the route carries the thread.
-                target.route.startsWith(LEARN_THREAD_ROUTE) -> openThread(target.route.removePrefix(LEARN_THREAD_ROUTE))
-                else -> Screen.entries.firstOrNull { it.name == target.route }?.let { navigateTo(it) }
+            is dev.ide.ui.backend.UiNotificationTarget.Screen -> openNotificationRoute(target.route)
+        }
+    }
+
+    /**
+     * A `screen` target's route, as the server names it. Only destinations that stand on their own are honoured.
+     * A route used to be looked up among every [Screen] by name, so a server-side typo or a new route could land
+     * on one that needs a project or arguments (Module config, Run, a keystore import), while the daily
+     * challenge's `challenges` matched nothing and its tap did nothing. Anything else is ignored.
+     */
+    private fun openNotificationRoute(route: String) {
+        when {
+            // "Someone answered your question": the route carries the thread.
+            route.startsWith(LEARN_THREAD_ROUTE) -> openThread(route.removePrefix(LEARN_THREAD_ROUTE))
+            route.equals(Screen.You.name, ignoreCase = true) -> openYou()
+            // A home tab by name (`challenges` for the daily challenge, `Store`, `Learn`).
+            else -> HomeTab.entries.firstOrNull { it.name.equals(route, ignoreCase = true) }?.let {
+                selectHomeTab(it)
+                screen = Screen.Projects
             }
         }
     }
@@ -1324,6 +1441,12 @@ class CodeAssistAppState(
 
             // The keystore Create/Import sub-screens step back to their manager, not all the way out.
             screen == Screen.KeystoreCreate || screen == Screen.KeystoreImport -> screen = Screen.KeystoreManager
+            // Plugins opened from Home's card goes back there, not up into the hub it is also a pane of.
+            screen == Screen.Plugins && pluginsReturn != Screen.Hub -> {
+                val back = pluginsReturn
+                resetPluginsEntry()
+                screen = back
+            }
             // The wide hub is one surface with its destinations: Back leaves it from any of them.
             hubTwoPane && isHubPane(screen) -> screen = hubReturn
             // The hub's sub-screens step back to the hub; the keystore manager honours its entry origin.
@@ -1351,9 +1474,13 @@ class CodeAssistAppState(
             screen == Screen.LessonTrack -> exitLessonTrack()
             screen == Screen.LearnPath -> exitLearnPath()
             // Nothing left on the stack, and contributed screens took their own exit above: what is left is
-            // a store screen the user entered the run on, so Back leaves for the Explore tab (still the
-            // selected home tab).
-            navigatesAsStack(screen) -> screen = Screen.Projects
+            // a store screen the user entered the run on, so Back leaves for where the run was entered from:
+            // the Explore tab (still the selected home tab), or the editor a link or notification interrupted.
+            navigatesAsStack(screen) -> {
+                val base = stackBase
+                stackBase = Screen.Projects
+                screen = base
+            }
 
             screen == Screen.ChallengePlayer -> exitChallenge()
             screen == Screen.ChallengeBoard -> exitChallengeBoard()

@@ -897,6 +897,157 @@ the built-in navigation found nothing, so a plugin cannot shadow a declaration a
 menu lists both. For a plugin that must also run on an older IDE, register it from a class of its own after
 checking the host has SPI 3.1.0, so the older host never loads a type it does not have.
 
+### Teach the IDE a language through a language server
+
+If a Language Server Protocol server exists for your language (the Dart analysis server, gopls,
+rust-analyzer, clangd, pyright), you do not have to write a backend. Since SPI 3.3.0 a plugin declares the
+server on `LANGUAGE_SERVER_EP` (in the `lsp-api` artifact) and the IDE's own LSP client does the rest:
+
+```kotlin
+class DartPlugin : Plugin {
+    override val manifest = PluginManifest(
+        id = "dart-support", name = "Dart",
+        capabilities = listOf(PluginCapabilities.LANG_SERVER),
+    )
+
+    override fun register(reg: PluginRegistration) {
+        reg.register(FILE_TYPE_EP, FileTypeMapping(listOf(".dart"), LanguageId("dart")))
+        reg.register(LANGUAGE_SERVER_EP, object : LanguageServerDefinition {
+            override val id = "dart"
+            override val displayName = "Dart analysis server"
+            override val languages = setOf(LanguageId("dart"))
+
+            override fun start(context: LanguageServerContext): LanguageServerConnection? {
+                // On Android the executable must be in your APK's native library directory.
+                val dart = reg.nativeLibrary("dart") ?: return null   // libdart.so; null: not available here
+                return LanguageServerConnection.process(listOf(dart.toString(), "language-server"), context.root)
+            }
+
+            // The workspace root, when it is not the project root: the nearest pubspec.yaml.
+            override fun rootFor(file: Path, context: LanguageServerContext): Path? =
+                generateSequence(file.parent) { it.parent }
+                    .takeWhile { it.startsWith(context.projectRoot) }
+                    .firstOrNull { Files.exists(it.resolve("pubspec.yaml")) }
+        })
+    }
+}
+```
+
+That is the whole language integration. The host starts the server the first time a `.dart` file of an open
+project is analysed (off the engine thread), keeps the server's copy of every open buffer in sync, and turns
+each capability the server advertises into the editor feature that matches it:
+
+| The server's answer | What the editor shows |
+| --- | --- |
+| `publishDiagnostics` or `textDocument/diagnostic` | Squiggles, gutter marks and inline error chips |
+| `codeAction` (with `codeAction/resolve` and `workspace/executeCommand`) | Quick fixes and refactorings at the caret; the `workspace/applyEdit` a command sends back becomes the action's edit, applied like any quick fix |
+| `completion` | Completion, with snippets (`$1`, `${1:name}`) and auto-import edits |
+| `signatureHelp`, `hover`, `inlayHint` | Parameter info, Quick Documentation (Markdown), inlay hints |
+| `definition`, `implementation`, `typeDefinition` | Go to Declaration, Implementation and Type Declaration |
+| `references`, `documentHighlight`, `prepareRename` + `rename` | Find Usages, highlight usages at the caret, Rename across the project |
+| `semanticTokens/full`, `foldingRange`, `documentSymbol`, `formatting` | Semantic colouring, folding, the structure view and breadcrumbs, Reformat Code (and Optimize Imports through `source.organizeImports`) |
+
+Three things are still yours to register, because the protocol does not cover them: the file-type mapping, the
+editor's **lexical** colouring (`ui.editorLanguage`, which shows before the server has answered and wherever
+it is unavailable), and the project model if your language has one (a module type, an importer for
+`pubspec.yaml`, templates). A served file is analysed wherever it is in the project, but the model is what makes
+it look like your language's project: declare its directories as content roots under a `ContentRole` of your
+own and the Project view shows them (a plugin's roles are surfaced there like the built-in code roots), and
+a module type no build system builds offers its own Run rows rather than a Build row that cannot work. The
+Dart plugin (`samples/dart-plugin`) is a complete example.
+
+How it behaves, so you can plan around it:
+
+- **One server per (definition, workspace root).** `rootFor` decides the root; files that answer the same
+  root share a server. Servers shut down (`shutdown` + `exit`) when their project closes.
+- **Every request has a budget** (1.5 s for the first handshake wait, 2.5 s for diagnostics, 3 s for
+  completion, longer for references and rename) and the engine's cancel token is polled while it waits, so a
+  slow server degrades to "no answer" rather than freezing the editor. A file analysed while the server was
+  still starting is analysed again once it is ready.
+- **The server's work never holds the engine thread.** The editor does each pass's round trip (diagnostics,
+  completion, semantic colours, folding, inlay hints, hover, signature help, the structure view) off the
+  IDE's single analysis thread first, and the engine's own call then finds the answer cached for that version
+  of the document. A slow server delays its own language's results, not Java's or Kotlin's.
+- **A server that exits is restarted** on the next request. Only a crash loop (more than three failures within
+  three minutes) leaves it down until the project is reopened, which the user is told once. A server Android
+  killed in the background (Android 12 and later stop an app's child processes there) comes back every time.
+  `start` returning null (no toolchain yet) is asked again after 30 seconds.
+- **Every request is timed.** A request slower than 1.5 s or an answer over about 1 MB is always logged
+  (`lsp-perf ... (slow or large)`), with the time the client spent parsing it. With Settings > Analysis >
+  Advanced > "Log analysis timings" on, every request is, and a per-method summary is logged when the server
+  shuts down. Read them in Settings > Privacy > View logs.
+- **A served file needs no source root.** A file of your language anywhere in the project is analysed, even
+  outside every module's source roots (a Dart package beside the app, a script folder). Features keyed to a
+  module (a test provider's marks, say) see the deepest module whose directory holds the file, else the
+  project's first module; contribute source roots through a module type when your language has a real one.
+- **Identical requests are shared.** Two parts of the editor asking the same thing about the same version of a
+  document (the breadcrumb and the structure view both want the outline) send one request.
+- **Completion keeps the server's ranking**, by `sortText`. Among items the server ranked equal, an exact match
+  of what was typed comes first, then case-sensitive prefix matches, shorter labels before longer.
+- **`initializationOptions` and `workspace/configuration`** are answered from `initializationOptions(context)`
+  and `configuration(section, context)`, as JSON text.
+- **A backend of your own wins.** If the plugin also registers a `LanguageBackend` for the language, the server
+  only serves what the engine asks separately (diagnostics, completion, code actions, navigation, usages,
+  rename), and your backend keeps the rest.
+
+On Android the usual rule for native programs applies: an app may only execute files inside an installed
+package's native library directory, so ship the server's executable in `jniLibs` with
+`packaging { jniLibs.useLegacyPackaging = true }` and find it with `PluginRegistration.nativeLibrary`.
+
+### Find Usages, Rename and Go to Implementation for your language
+
+The language-server client is built on three extension points any plugin can use directly, for a language
+whose intelligence is not a server (since SPI 3.3.0, in `analysis-api`):
+
+- `REFERENCE_PROVIDER_EP` (`ReferenceProvider`): Find Usages and Find References, plus highlight usages at
+  the caret (`highlights`; null keeps the editor's whole-word scan).
+- `RENAME_PROVIDER_EP` (`RenameProvider`): `prepare` names what is under the caret, `rename` returns a
+  `RenameResult` holding a `WorkspaceEdit` the host applies to disk and every open editor, or a message.
+- `NAVIGATION_PROVIDER_EP` (`NavigationProvider`): Go to Implementation and Go to Type Declaration.
+
+They are asked only for files of the languages they name, and never for `.java` or Kotlin files, which the
+built-in backends answer.
+
+### Run your language's tests
+
+`TEST_PROVIDER_EP` (`TestProvider`, in `build-api`, since SPI 3.3.0) gives a plugin language what JUnit has:
+a run mark beside every test, a "<name> · <module>" row in the Run picker, and the Run screen's Tests tab
+with re-run and re-run failed.
+
+```kotlin
+reg.register(TEST_PROVIDER_EP, object : TestProvider {
+    override val id = "dartTest"                       // also the run's kind: tasks are dartTest:<module>[:targets]
+    override val displayName = "Dart tests"
+    override val languages = setOf(LanguageId("dart"))
+    override fun appliesTo(module: Module) = File(module.dir.path, "test").isDirectory
+    override fun tests(module: Module, path: String, text: String) =
+        Regex("(?m)^\\s*test\\('([^']+)'").findAll(text)
+            .map { TestDeclaration(it.groupValues[1], it.range.first, "$path#${it.groupValues[1]}") }.toList()
+    override fun run(module: Module, targets: List<String>, project: Project, ctx: BuildContext): RunAction =
+        dartTestRun(module, targets)                   // a RunAction with a RunConsole, see below
+})
+```
+
+The run reports through the console: print `TestReport.run(id)` first (it is what makes a re-run come back to
+your provider), then `queued` / `started` / `passed` / `failed` / `skipped` per test and `finished()` at the
+end, to the console's `ProgramIo.stdout`. Everything else the run prints stays in the console as output. A
+re-run hands `run` the targets as `suite#test` (or a bare suite), in the names your records used. The Calc
+sample (`samples/lsp-plugin`, `CalcTestProvider`) is a complete one; the Dart plugin's `DartTestProvider`
+(`samples/dart-plugin`) is one for a real test framework.
+
+### Language servers without a plugin
+
+On the desktop, users can also add a language server themselves, in **Settings > Language Servers** (Code
+Intelligence):
+a name, the command, the file extensions and the protocol's language id, with presets for gopls,
+rust-analyzer, Pyright, typescript-language-server, clangd, Dart, Lua, zls and bash-language-server. They are
+stored in `language-servers.json` in the IDE's home folder and registered exactly like a plugin's definition,
+so everything above applies to them. The command is looked up on PATH and in the folders toolchains install
+into (`~/go/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, ...), since an app started from the Dock or Start menu
+does not see the terminal's PATH. The page is not offered on Android: an app there may only execute what an
+installed package ships, so a server the user installed could never start. On Android a language server comes
+with a plugin, as above.
+
 ### Put composables and pixels in the editor
 
 The decoration tier above covers everything expressible as data. Two things are not, and each has a UI-facet
@@ -2867,6 +3018,11 @@ Every published extension point, its id, the type it carries, and what contribut
 | `dev.ide.analysis.DIAGNOSTIC_PROVIDER_EP` | `platform.diagnosticProvider` | `DiagnosticProvider` | A diagnostic source |
 | `dev.ide.analysis.QUICK_FIX_PROVIDER_EP` | `platform.quickFixProvider` | `QuickFixProvider` | A fix for a diagnostic |
 | `dev.ide.analysis.ACTION_PROVIDER_EP` | `platform.actionProvider` | `ActionProvider` | A caret intention |
+| `dev.ide.analysis.DECLARATION_PROVIDER_EP` | `platform.declarationProvider` | `DeclarationProvider` | Go to Declaration targets the backends do not know |
+| `dev.ide.analysis.NAVIGATION_PROVIDER_EP` | `platform.navigationProvider` | `NavigationProvider` | Go to Implementation / Type Declaration for a language |
+| `dev.ide.analysis.REFERENCE_PROVIDER_EP` | `platform.referenceProvider` | `ReferenceProvider` | Find Usages and highlight usages for a language |
+| `dev.ide.analysis.RENAME_PROVIDER_EP` | `platform.renameProvider` | `RenameProvider` | Rename for a language |
+| `dev.ide.lsp.LANGUAGE_SERVER_EP` | `platform.languageServer` | `LanguageServerDefinition` | A whole language, served by a Language Server Protocol server |
 | `dev.ide.plugin.editor.EDITOR_DECORATION_EP` | `platform.editorDecoration` | `EditorDecorationProvider` | Tinted ranges, gutter glyphs and inlays on any file |
 | `dev.ide.plugin.keymap.KEY_BINDING_EP` | `platform.keyBinding` | `KeyBinding` | A keyboard shortcut for an action |
 | `dev.ide.block.BLOCK_MAPPING_EP` | `platform.blockMapping` | `BlockMapping` | Block-editor projection for a language |
@@ -2883,6 +3039,7 @@ Step-by-step guide: [custom-build-plugins.md](custom-build-plugins.md).
 | `dev.ide.build.BUILD_PLUGIN_EP` | `platform.buildPlugin` | `BuildPlugin` | Tasks applied to every build graph |
 | `dev.ide.build.RUN_TASK_PROVIDER_EP` | `platform.runTaskProvider` | `RunTaskProvider` | Entries in the Run picker |
 | `dev.ide.build.SOURCE_GENERATOR_EP` | `platform.sourceGenerator` | `SourceGenerator` | Generated sources before compilation |
+| `dev.ide.build.TEST_PROVIDER_EP` | `platform.testProvider` | `TestProvider` | Tests for a language: gutter marks, a Run row, the Tests tab |
 
 ### Actions, VCS, Android
 

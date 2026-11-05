@@ -128,6 +128,14 @@ interface EditorService {
     val diagnosticsInvalidated: kotlinx.coroutines.flow.Flow<Set<String>>
         get() = kotlinx.coroutines.flow.emptyFlow()
 
+    /**
+     * Edits something outside the editor asked to make, by absolute path: a language server's
+     * `workspace/applyEdit` sent on its own. The editor applies each batch like a multi-file quick fix (an open
+     * file through its tab, so the edit is undoable). Empty on a backend with no such source.
+     */
+    val externalEdits: kotlinx.coroutines.flow.Flow<Map<String, List<UiTextEdit>>>
+        get() = kotlinx.coroutines.flow.emptyFlow()
+
     /** Inlay hints for `[startOffset, endOffset)`. May throw [AnalysisPreempted]. */
     suspend fun hintsAt(path: String, text: String, startOffset: Int, endOffset: Int): List<UiInlayHint> = emptyList()
 
@@ -1745,6 +1753,55 @@ data class UiPluginInfo(
      * than from anything the plugin declares. Null when it could not be read.
      */
     val signature: String? = null,
+    /** The oldest IDE this plugin loads in, from its manifest. */
+    val minHostVersion: String? = null,
+    /** The plugin API it was built for, from its manifest. */
+    val apiVersion: Int? = null,
+    /** What the package manager says about the installed plugin app, or null for a built-in (or no host support). */
+    val app: UiPluginApp? = null,
+)
+
+/** An installed plugin app's facts, read from the package manager rather than from anything it declares. */
+data class UiPluginApp(
+    val packageName: String,
+    val appVersion: String?,
+    val firstInstalledAt: Long,
+    val lastUpdatedAt: Long,
+    val sizeBytes: Long,
+    /** Signed with the same certificate as this IDE: published by CodeAssist itself. */
+    val signedLikeIde: Boolean,
+    /** Who installed it: a store's package, or null for a direct (browser or adb) install. */
+    val installer: String?,
+    /** The app has a screen of its own to open (its about page and licenses). */
+    val canOpen: Boolean = true,
+)
+
+/** The "Get plugins" page: [plugins], or why there are none ([unavailable]); [cached] when shown from the last fetch. */
+data class UiPluginDownloads(
+    val plugins: List<UiPluginDownload>,
+    val unavailable: String? = null,
+    val cached: Boolean = false,
+)
+
+/** One downloadable plugin, and where this device stands with it. */
+data class UiPluginDownload(
+    val id: String,
+    val name: String,
+    val tagline: String,
+    val description: String,
+    val publisher: String,
+    val version: String,
+    val sizeBytes: Long?,
+    val downloadUrl: String,
+    val pageUrl: String?,
+    val capabilities: List<String>,
+    val languages: String,
+    /** The version installed on this device, or null when it is not. */
+    val installedVersion: String? = null,
+    /** Installed, and older than [version]. */
+    val updateAvailable: Boolean = false,
+    /** The oldest CodeAssist it loads in, when this one is older; null when this IDE is new enough. */
+    val needsHost: String? = null,
 )
 
 /** What happened to a plugin that the IDE running now has not taken up. */
@@ -1831,13 +1888,68 @@ interface SettingsService {
      */
     fun pendingPluginChanges(): List<UiPluginChange> = emptyList()
 
+    /**
+     * The plugins on the "Get plugins" page, each with what this device already has of it. Network-bound (it is
+     * read from the store backend), so call it off the main thread; falls back to the last list fetched.
+     */
+    suspend fun pluginDownloads(): UiPluginDownloads = UiPluginDownloads(emptyList(), unavailable = "Not available in this build")
+
+    /** Open the system page of the installed plugin app [id] (where it is also uninstalled). */
+    fun openPluginAppInfo(id: String): Boolean = false
+
+    /** Launch installed plugin app [id]'s own screen: what it is, and the licenses of what it carries. */
+    fun openPluginApp(id: String): Boolean = false
+
     /** True when this host can restart itself, so the Plugins screen can offer it as a button. */
     fun canRestartApplication(): Boolean = false
 
     /** Restart the app to apply [pendingPluginChanges]. The caller saves anything unsaved first: on a host
      *  that really restarts, this does not return. */
     fun restartApplication() {}
+
+    /**
+     * Whether this host can run language servers the user configures (Settings > Language Servers): the
+     * desktop. Not Android, where an app may only execute what an installed package ships, so a server the
+     * user installed could never start; there a language server comes with a plugin.
+     */
+    fun languageServersSupported(): Boolean = false
+
+    /** The language servers the user configured, in the order they were added. */
+    fun languageServers(): List<UiLanguageServer> = emptyList()
+
+    /** Ready-made entries for servers people commonly have installed (blank [UiLanguageServer.id]). */
+    fun languageServerPresets(): List<UiLanguageServer> = emptyList()
+
+    /**
+     * Add [server] (blank id) or replace the one with its id. Returns why it was refused, or null once saved.
+     * A server whose command changed is restarted; a new language applies to a project opened afterwards.
+     */
+    fun saveLanguageServer(server: UiLanguageServer): String? = "Language servers are not supported here."
+
+    fun deleteLanguageServer(id: String) {}
+
+    /** Whether [command]'s executable can be found, and a sentence saying where (or why not). */
+    fun checkLanguageServerCommand(command: String): UiCommandCheck = UiCommandCheck(false, "Not supported here.")
 }
+
+/**
+ * A language server the user configured: the [command] that starts it, the file [extensions] it serves
+ * (`.go`), and the protocol's [languageId]. [status] is how it is doing in the open project ("Running",
+ * "Not started", "Stopped: ..."), read when the list is.
+ */
+data class UiLanguageServer(
+    val id: String,
+    val name: String,
+    val command: String,
+    val extensions: List<String>,
+    val languageId: String,
+    val enabled: Boolean = true,
+    val initializationOptions: String = "",
+    val status: String = "",
+)
+
+/** The answer to [SettingsService.checkLanguageServerCommand]. */
+data class UiCommandCheck(val found: Boolean, val message: String)
 
 // ---------------------------------------------------------------------------
 // Editor customizations: the keyboard symbol bar (+ macros, recorded macros)
