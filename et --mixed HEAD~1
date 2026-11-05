@@ -1,0 +1,39 @@
+[35mandroid/android-support/src/main/kotlin/dev/ide/android/support/templates/ComposeTemplate.kt[m[36m:[m[32m150[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mandroid/android-support/src/main/kotlin/dev/ide/android/support/templates/ComposeTemplate.kt[m[36m:[m[32m165[m[36m:[m[1;31m<<<<<<<[m HEAD
+Binary file [35mapp/ide-android/src/main/jniLibs/arm64-v8a/libaapt2.so[m matches
+Binary file [35mapp/ide-android/src/main/jniLibs/armeabi-v7a/libaapt2.so[m matches
+Binary file [35mapp/ide-android/src/main/jniLibs/x86/libaapt2.so[m matches
+[35mapp/ide-core/src/main/kotlin/dev/ide/core/backend/StoreBackend.kt[m[36m:[m[32m854[m[36m:[m            val caret = f.readText().indexOf("[1;31m<<<<<<<[m").coerceAtLeast(0)
+[35mapp/ide-ui-components/src/commonMain/kotlin/dev/ide/ui/markdown/Markdown.kt[m[36m:[m[32m4[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapp/ide-ui-core/src/commonMain/kotlin/dev/ide/ui/editor/core/MergeConflicts.kt[m[36m:[m[32m7[m[36m:[m * [1;31m<<<<<<<[m Your version        (startLine)
+[35mapp/ide-ui-core/src/commonMain/kotlin/dev/ide/ui/editor/core/MergeConflicts.kt[m[36m:[m[32m16[m[36m:[m * Offsets are into the text it was found in: [start] is the `[1;31m<<<<<<<[m` line's first character and [end] is just
+[35mapp/ide-ui-core/src/commonMain/kotlin/dev/ide/ui/editor/core/MergeConflicts.kt[m[36m:[m[32m31[m[36m:[m    /** What follows `[1;31m<<<<<<<[m`: the current side's name (`HEAD`, `Your version`). */
+[35mapp/ide-ui-core/src/commonMain/kotlin/dev/ide/ui/editor/core/MergeConflicts.kt[m[36m:[m[32m57[m[36m:[m    if (text.indexOf("[1;31m<<<<<<<[m") < 0) return emptyList() // the common case: one scan, no line walk
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m13[m[36m:[m        [1;31m<<<<<<<[m Your version
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m45[m[36m:[m        assertTrue("[1;31m<<<<<<<[m" !in both && "=======" !in both && ">>>>>>>" !in both)
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m50[m[36m:[m        val text = "[1;31m<<<<<<<[m HEAD\nours\n||||||| base\nancestor\n=======\ntheirs\n>>>>>>> feature\n"
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m59[m[36m:[m        val text = "[1;31m<<<<<<<[m a\none\n=======\n>>>>>>> b\nmiddle\n[1;31m<<<<<<<[m a\n=======\ntwo\n>>>>>>> b"
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m68[m[36m:[m        assertEquals(emptyList(), findMergeConflicts("[1;31m<<<<<<<[m a\nhalf deleted\n=======\nno end marker\n"))
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m69[m[36m:[m        assertEquals(emptyList(), findMergeConflicts("// [1;31m<<<<<<<[m not at the line start\n=======\n>>>>>>> x\n"))
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m70[m[36m:[m        assertEquals(emptyList(), findMergeConflicts("[1;31m<<<<<<<[m<< eight\n========\n>>>>>>>> eight\n"))
+[35mapp/ide-ui-core/src/desktopTest/kotlin/dev/ide/ui/editor/core/MergeConflictsTest.kt[m[36m:[m[32m76[m[36m:[m        val text = "[1;31m<<<<<<<[m a\r\nmine\r\n=======\r\ntheirs\r\n>>>>>>> b\r\n"
+[35mapp/ide-ui-editor/src/commonMain/kotlin/dev/ide/ui/editor/EditorRendering.kt[m[36m:[m[32m58[m[36m:[m    /** Merge-conflict sides: the current one (`[1;31m<<<<<<<[m` to `=======`) and the incoming one, as opaque roles the
+[35mapp/ide-ui-editor/src/commonMain/kotlin/dev/ide/ui/editor/MergeConflictLayer.kt[m[36m:[m[32m71[m[36m:[m * [diagnostics] without the ones inside a conflict block. A parser reads `[1;31m<<<<<<<[m` as code and reports it
+[35mapp/ide-ui-editor/src/commonMain/kotlin/dev/ide/ui/editor/MergeConflictLayer.kt[m[36m:[m[32m89[m[36m:[m * The resolve row on each conflict's `[1;31m<<<<<<<[m` line: keep the Current side, the Incoming one, or Both. Each button
+[35mapp/ide-ui-editor/src/commonMain/kotlin/dev/ide/ui/editor/MergeConflictLayer.kt[m[36m:[m[32m111[m[36m:[m            // Where the marker line's text ends: `[1;31m<<<<<<<[m ` and the label, then a gap.
+[35mapp/ide-ui-editor/src/desktopTest/kotlin/dev/ide/ui/editor/MergeConflictSnapshot.kt[m[36m:[m[32m36[m[36m:[m        [1;31m<<<<<<<[m Your version
+[35mapp/ide-ui-editor/src/desktopTest/kotlin/dev/ide/ui/editor/MergeConflictSnapshot.kt[m[36m:[m[32m47[m[36m:[m        val marker = sample.indexOf("[1;31m<<<<<<<[m")
+[35mapp/ide-ui-editor/src/desktopTest/kotlin/dev/ide/ui/editor/MergeConflictSnapshot.kt[m[36m:[m[32m57[m[36m:[m            sample.replace("[1;31m<<<<<<<[m Your version\n    <string name=\"app_name\">My XML Tool</string>\n=======\n", "")
+[35mapp/ide-ui-editor/src/desktopTest/kotlin/dev/ide/ui/editor/MergeConflictSnapshot.kt[m[36m:[m[32m98[m[36m:[m                    // Tap "Incoming", the middle of the three buttons at the right end of the `[1;31m<<<<<<<[m` line (line 3).
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_bold.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_bold_italic.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_italic.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_medium.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_medium_italic.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_regular.ttf[m matches
+Binary file [35mapp/ide-ui-resources/src/commonMain/composeResources/font/jetbrains_mono_semibold.ttf[m matches
+[35mservices/store-bridge/src/commonMain/kotlin/dev/ide/store/bridge/TextMerge.kt[m[36m:[m[32m74[m[36m:[m                        out.append("[1;31m<<<<<<<[m ").append(oursLabel).append('\n')
+[35mservices/store-bridge/src/jvmTest/kotlin/dev/ide/store/bridge/StoreUpdatesTest.kt[m[36m:[m[32m274[m[36m:[m            "[1;31m<<<<<<<[m Your version\nval primary = 0xFFE91E63\n=======\nval primary = 0xFF3F51B5\n>>>>>>> New version (1.1.0)\nval secondary = 0xFF03DAC5\n",
+[35mservices/store-bridge/src/jvmTest/kotlin/dev/ide/store/bridge/TextMergeTest.kt[m[36m:[m[32m38[m[36m:[m        assertTrue(merged.text.contains("[1;31m<<<<<<<[m Your version\n    println(\"Hi, \$name\")\n=======\n    println(\"Welcome, \$name\")\n>>>>>>> New version (1.1.0)\n"), merged.text)
+[35mservices/store-bridge/src/jvmTest/kotlin/dev/ide/store/bridge/TextMergeTest.kt[m[36m:[m[32m62[m[36m:[m        assertTrue(merged.text.endsWith("[1;31m<<<<<<<[m Your version\n// mine\n=======\n// theirs\n>>>>>>> New version\n"))
+[35mservices/store-bridge/src/jvmTest/kotlin/dev/ide/store/bridge/TextMergeTest.kt[m[36m:[m[32m69[m[36m:[m        assertTrue(merged.text.startsWith("a\n[1;31m<<<<<<<[m Your version\nb\n=======\nc\n>>>>>>> New version\n"), merged.text)
