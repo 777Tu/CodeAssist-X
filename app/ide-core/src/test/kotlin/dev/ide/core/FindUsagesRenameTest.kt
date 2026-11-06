@@ -81,6 +81,89 @@ class FindUsagesRenameTest {
     } }
 
     /** A Java class overriding a Kotlin member: listed as an implementation, and renamed with the member. */
+    /**
+     * A second rename straight after the first must still find the Kotlin references the first one rewrote. The
+     * rewritten files are not open in the editor, and the Kotlin model takes disk as stable for the session, so it
+     * sees their new text only through the overlay the rename writes them into.
+     */
+    @Test
+    fun aSecondRenameRightAfterTheFirstFindsWhatTheFirstRewrote() { withTempDir("rename-twice") { dir ->
+        IdeServices.bootstrapJavaDemo(dir).use { ide ->
+            val (circle, use, _) = setUp(ide)
+            val src = ide.coreSrc().resolve("com/example/core")
+            val other = src.resolve("Other.kt")
+            ide.save(other, "package com.example.core\n\nfun other(c: Circle): Double = c.area() + 1.0\n")
+            eventually("area resolves from Use.kt and Other.kt") { usages(ide, circle, "area").size == 2 }
+
+            val first = runBlocking {
+                val text = Files.readString(circle)
+                ide.rename(circle, text, text.indexOf("area"), "size")
+            }
+            assertTrue(first.success, first.message)
+            // No waiting for the re-index: this is the user renaming again at once.
+            val second = runBlocking {
+                val text = Files.readString(circle)
+                ide.rename(circle, text, text.indexOf("size"), "area")
+            }
+            assertTrue(second.success, second.message)
+            assertEquals(first.occurrences, second.occurrences, "the second rename found what the first one wrote")
+            assertTrue(Files.readString(use).contains("c.area()"), Files.readString(use))
+            assertTrue(Files.readString(other).contains("c.area()"), Files.readString(other))
+        }
+    } }
+
+    /**
+     * The Java side skips a file that cannot name the symbol (no facade for a top-level function, no import or
+     * same package for a top-level class) without resolving it. Every way Java does name them must still be found:
+     * the facade call, a static import, an `@file:JvmName` facade, and a class imported from another package.
+     */
+    @Test
+    fun javaReferencesThroughFacadesStaticImportsAndImportsAreRenamed() { withTempDir("rename-java-gates") { dir ->
+        IdeServices.bootstrapJavaDemo(dir).use { ide ->
+            val src = ide.coreSrc()
+            val core = src.resolve("com/example/core")
+            val other = src.resolve("com/example/other")
+            val util = core.resolve("Util.kt")
+            val named = core.resolve("Named.kt")
+            val box = core.resolve("Box.kt")
+            ide.save(util, "package com.example.core\n\nfun helper(): Int = 1\n")
+            ide.save(named, "@file:JvmName(\"Helpers\")\npackage com.example.core\n\nfun named(): Int = 2\n")
+            ide.save(box, "package com.example.core\n\nclass Box(val size: Int)\n")
+            val viaFacade = core.resolve("ViaFacade.java")
+            val viaStatic = other.resolve("ViaStatic.java")
+            val viaJvmName = core.resolve("ViaJvmName.java")
+            val viaImport = other.resolve("ViaImport.java")
+            val unrelated = other.resolve("Unrelated.java")
+            ide.save(viaFacade, "package com.example.core;\n\nclass ViaFacade { int f() { return UtilKt.helper(); } }\n")
+            ide.save(viaStatic, "package com.example.other;\n\nimport static com.example.core.UtilKt.helper;\n\nclass ViaStatic { int f() { return helper(); } }\n")
+            ide.save(viaJvmName, "package com.example.core;\n\nclass ViaJvmName { int f() { return Helpers.named(); } }\n")
+            ide.save(viaImport, "package com.example.other;\n\nimport com.example.core.Box;\n\nclass ViaImport { Box b = new Box(1); }\n")
+            ide.save(unrelated, "package com.example.other;\n\nclass Unrelated { int helper() { return 0; } class Box {} }\n")
+            val deadline = System.currentTimeMillis() + 180_000
+            while (ide.indexStatus.value.message != "Indexed" && System.currentTimeMillis() < deadline) Thread.sleep(50)
+
+            fun rename(file: java.nio.file.Path, needle: String, to: String) {
+                val text = Files.readString(file)
+                val outcome = runBlocking { ide.rename(file, text, text.indexOf(needle), to) }
+                assertTrue(outcome.success, outcome.message)
+            }
+            eventually("Java sees UtilKt.helper") {
+                ide.findReferences(util, Files.readString(util), Files.readString(util).indexOf("helper")).any { it.first.toString().endsWith("ViaFacade.java") }
+            }
+            rename(util, "helper", "assist")
+            assertTrue(Files.readString(viaFacade).contains("UtilKt.assist()"), Files.readString(viaFacade))
+            assertTrue(Files.readString(viaStatic).contains("return assist();"), Files.readString(viaStatic))
+            assertTrue(Files.readString(unrelated).contains("int helper()"), "an unrelated Java method keeps its name")
+
+            rename(named, "named", "titled")
+            assertTrue(Files.readString(viaJvmName).contains("Helpers.titled()"), Files.readString(viaJvmName))
+
+            rename(box, "Box", "Crate")
+            assertTrue(Files.readString(viaImport).contains("new Crate(1)"), Files.readString(viaImport))
+            assertTrue(Files.readString(unrelated).contains("class Box {}"), "an unrelated Java Box keeps its name")
+        }
+    } }
+
     @Test
     fun aJavaOverrideOfAKotlinMemberIsAnImplementationAndIsRenamedWithIt() { withTempDir("impl-java") { dir ->
         IdeServices.bootstrapJavaDemo(dir).use { ide ->

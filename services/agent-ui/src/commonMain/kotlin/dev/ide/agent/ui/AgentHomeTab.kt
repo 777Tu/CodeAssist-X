@@ -1,6 +1,11 @@
 package dev.ide.agent.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import dev.ide.ui.theme.Motion
+import dev.ide.ui.platform.isMobilePlatform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -38,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -98,6 +104,7 @@ import dev.ide.ui.backend.ProjectInfo
 import dev.ide.ui.backend.UiAgentRecentChat
 import dev.ide.ui.backend.UiAgentRole
 import dev.ide.ui.components.BottomSheet
+import dev.ide.ui.components.entranceReveal
 import dev.ide.ui.components.CircularProgressIndicator
 import dev.ide.ui.components.IconButtonCa
 import dev.ide.ui.ext.HomeTabContext
@@ -138,12 +145,31 @@ internal object AgentHomeState {
 internal fun AgentHomeTab(ctx: HomeTabContext) {
     val backend = ctx.backend
     val state = AgentHomeState
-    if (state.inChat) {
-        AgentHomeChat(ctx) { state.inChat = false }
-    } else {
-        AgentHomeLanding(ctx)
+    // Into a chat and back out move like the app's screens do (ScreenHost): on a phone the chat slides in
+    // from the right while the start page slides away, and Back reverses it; on desktop a quick fade.
+    AnimatedContent(
+        targetState = state.inChat,
+        transitionSpec = {
+            if (isMobilePlatform) {
+                val dir = if (targetState) 1 else -1
+                (slideInHorizontally(tween(Motion.BASE, easing = Motion.quiet)) { w -> dir * w / 4 } +
+                    fadeIn(tween(Motion.BASE, easing = Motion.soft))) togetherWith
+                    (slideOutHorizontally(tween(Motion.BASE, easing = Motion.quiet)) { w -> -dir * w / 4 } +
+                        fadeOut(tween(Motion.BASE, easing = Motion.soft)))
+            } else {
+                fadeIn(tween(Motion.FAST, easing = Motion.soft)) togetherWith fadeOut(tween(Motion.FAST, easing = Motion.soft))
+            }
+        },
+        label = "aiHome",
+    ) { inChat ->
+        if (inChat) AgentHomeChat(ctx) { state.inChat = false } else AgentHomeLanding(ctx)
     }
-    state.opening?.let { OpeningOverlay(it) }
+    AnimatedVisibility(state.opening != null, enter = fadeIn(tween(Motion.FAST)), exit = fadeOut(tween(Motion.FAST))) {
+        // Kept while fading out: `opening` is already null by then.
+        var shown by remember { mutableStateOf("") }
+        state.opening?.let { shown = it }
+        OpeningOverlay(shown)
+    }
     // Signed out of Free AI (or no key for the chosen provider): ask before starting rather than failing the turn.
     when (gate.value) {
         Gate.SignIn -> if (backend.agent.config().selectedProvider == FREE_AI_PROVIDER) {
@@ -262,18 +288,22 @@ private fun AgentHomeLanding(ctx: HomeTabContext) {
                         Modifier.align(Alignment.CenterHorizontally).widthIn(max = CONTENT_WIDTH).fillMaxWidth().padding(horizontal = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        // The landing comes in top to bottom (greeting, question, ideas, composer), replayed each
+                        // time the tab is opened or a chat is left, so the tab reads as arriving rather than cut in.
                         Text(
                             if (firstName != null) stringResource(Res.string.aihome_greeting_name, firstName) else stringResource(Res.string.aihome_greeting),
                             style = MaterialTheme.typography.headlineMedium.copy(
                                 brush = Brush.linearGradient(listOf(scheme.primary, scheme.tertiary)),
                                 fontWeight = FontWeight.SemiBold,
                             ),
+                            modifier = Modifier.entranceReveal(order = 0, rise = 18.dp),
                         )
                         Text(
                             if (target != null) stringResource(Res.string.aihome_headline_project, target.name) else stringResource(Res.string.aihome_headline),
                             color = scheme.onSurfaceVariant.copy(alpha = 0.75f),
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Medium,
+                            modifier = Modifier.entranceReveal(order = 1, rise = 18.dp),
                         )
                         state.error?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                     }
@@ -284,7 +314,10 @@ private fun AgentHomeLanding(ctx: HomeTabContext) {
                             .horizontalScroll(rememberScrollState()).padding(horizontal = 24.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        suggestions.forEach { SuggestionCard(it) }
+                        // Keyed by text: picking a project swaps the ideas for actions, and the new cards come in.
+                        suggestions.forEachIndexed { i, s ->
+                            key(s.text) { SuggestionCard(s, Modifier.entranceReveal(order = 2 + i)) }
+                        }
                 }
             }
             Composer(
@@ -293,6 +326,7 @@ private fun AgentHomeLanding(ctx: HomeTabContext) {
                 placeholder = if (target != null) stringResource(Res.string.aihome_placeholder_project, target.name) else stringResource(Res.string.aihome_placeholder),
                 contextChip = { ContextChip(target) { state.pickerOpen = true } },
                 onSubmit = ::submit,
+                modifier = Modifier.entranceReveal(order = 3),
             )
         }
         ProjectPickerSheet(
@@ -343,10 +377,10 @@ private fun TopBar(onMenu: () -> Unit) {
 }
 
 @Composable
-private fun SuggestionCard(s: Suggestion) {
+private fun SuggestionCard(s: Suggestion, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
     Column(
-        Modifier.width(150.dp).height(112.dp).clip(RoundedCornerShape(20.dp)).background(scheme.surfaceContainerHigh)
+        modifier.width(150.dp).height(112.dp).clip(RoundedCornerShape(20.dp)).background(scheme.surfaceContainerHigh)
             .clickable(onClick = s.onClick).padding(14.dp),
     ) {
         Text(
@@ -370,10 +404,11 @@ private fun Composer(
     placeholder: String,
     contextChip: @Composable () -> Unit,
     onSubmit: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     val canSend = value.isNotBlank()
-    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+    Box(modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
         Column(
             Modifier.widthIn(max = CONTENT_WIDTH).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(scheme.surfaceContainerHigh)
                 .padding(start = 18.dp, end = 8.dp, top = 14.dp, bottom = 8.dp),

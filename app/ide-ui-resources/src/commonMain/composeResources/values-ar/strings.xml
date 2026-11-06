@@ -374,6 +374,56 @@
     <string name="filetree_move">نقل</string>
     <string name="filetree_copy">نسخ</string>
     <string name="filetree_delete">حذف</string>
+    <string name="filetree_cut">قص</string>
+    <string name="filetree_paste">لصق</string>
+    <string name="filetree_duplicate">تكرار</string>
+    <string name="filetree_copy_path">نسخ المسار</string>
+    <string name="filetree_copy_path_absolute">المسار المطلق</string>
+    <string name="filetree_copy_path_relative">المسار من جذر المشروع</string>
+    <string name="filetree_copy_name">الاسم</string>
+    <string name="filetree_copy_paths">نسخ المسارات</string>
+    <string name="filetree_move_to">نقل إلى…</string>
+    <string name="filetree_copy_to">نسخ إلى…</string>
+    <string name="filetree_select_all">تحديد الكل</string>
+    <string name="filetree_clear_selection">مسح التحديد</string>
+    <string name="filetree_more_selection">المزيد من الإجراءات للعناصر المحددة</string>
+    <string name="filetree_paste_into">لصق في %1$s</string>
+    <string name="filetree_clear_clipboard">مسح الحافظة</string>
+    <string name="filetree_drop_move">نقل إلى %1$s</string>
+    <string name="filetree_drop_copy">نسخ إلى %1$s</string>
+    <string name="filetree_drop_nowhere">لا يمكن الإفلات هنا</string>
+    <plurals name="filetree_selected_count">
+        <item quantity="zero">المحدد: %1$d</item>
+        <item quantity="one">المحدد: %1$d</item>
+        <item quantity="two">المحدد: %1$d</item>
+        <item quantity="few">المحدد: %1$d</item>
+        <item quantity="many">المحدد: %1$d</item>
+        <item quantity="other">المحدد: %1$d</item>
+    </plurals>
+    <plurals name="filetree_clip_cut">
+        <item quantity="zero">%1$d عنصر للنقل</item>
+        <item quantity="one">عنصر واحد للنقل</item>
+        <item quantity="two">عنصران للنقل</item>
+        <item quantity="few">%1$d عناصر للنقل</item>
+        <item quantity="many">%1$d عنصرًا للنقل</item>
+        <item quantity="other">%1$d عنصر للنقل</item>
+    </plurals>
+    <plurals name="filetree_clip_copy">
+        <item quantity="zero">%1$d عنصر للنسخ</item>
+        <item quantity="one">عنصر واحد للنسخ</item>
+        <item quantity="two">عنصران للنسخ</item>
+        <item quantity="few">%1$d عناصر للنسخ</item>
+        <item quantity="many">%1$d عنصرًا للنسخ</item>
+        <item quantity="other">%1$d عنصر للنسخ</item>
+    </plurals>
+    <plurals name="filetree_drag_items">
+        <item quantity="zero">%1$d عنصر</item>
+        <item quantity="one">عنصر واحد</item>
+        <item quantity="two">عنصران</item>
+        <item quantity="few">%1$d عناصر</item>
+        <item quantity="many">%1$d عنصرًا</item>
+        <item quantity="other">%1$d عنصر</item>
+    </plurals>
     <string name="filetree_java_class">صنف Java</string>
     <string name="filetree_kotlin_file">ملف Kotlin</string>
     <string name="filetree_aidl_file">ملف AIDL</string>
@@ -965,6 +1015,19 @@
     <string name="notif_clear">مسح</string>
     <string name="notif_open">فتح</string>
     <string name="notif_dismiss">تجاهل</string>
+    <string name="notif_section_new">الجديدة</string>
+    <string name="notif_view">عرض</string>
+    <string name="notif_more_row_desc">ما حدث أثناء عملك</string>
+    <string name="notif_section_earlier">السابقة</string>
+    <string name="notif_show_more">عرض المزيد</string>
+    <string name="notif_show_less">عرض أقل</string>
+    <string name="notif_repeat_count">×%1$d</string>
+    <string name="notif_kind_store">المتجر</string>
+    <string name="notif_kind_update">تحديث من المتجر</string>
+    <string name="notif_kind_build">البناء</string>
+    <string name="notif_kind_agent">وكيل الذكاء الاصطناعي</string>
+    <string name="notif_kind_learn">تعلّم</string>
+    <string name="notif_kind_system">CodeAssist</string>
     <string name="notif_just_now">قبل قليل</string>
     <string name="notif_minutes">قبل %1$d د</string>
     <string name="notif_hours">قبل %1$d س</string>
@@ -1022,6 +1085,17 @@
     <string name="notify_launch_failed">تعذّر حفظ ذلك الآن.</string>
     <string name="review_actions">إجراءات المراجعة</string>
     <string name="review_report">إبلاغ</string>
+    <string name="review_copy">نسخ النص</string>
+    <string name="link_open_title">فتح هذا الرابط؟</string>
+    <string name="link_mail_title">مراسلة هذا العنوان؟</string>
+    <string name="link_from_user">أضاف أحد أفراد المجتمع هذا الرابط. لم يتحقق CodeAssist من وجهته.</string>
+    <string name="link_mail_from_user">أضاف أحد أفراد المجتمع هذا العنوان. سيفتح تطبيق البريد برسالة جديدة إليه.</string>
+    <string name="link_warn_http">غير مشفّر (http): يمكن للآخرين على شبكتك رؤية الصفحة أو تغييرها.</string>
+    <string name="link_warn_userinfo">الجزء الذي قبل @ ليس هو الموقع. هذا الرابط يذهب إلى %1$s.</string>
+    <string name="link_warn_ip">يذهب إلى عنوان IP مجرد، لا إلى موقع باسم.</string>
+    <string name="link_warn_lookalike">يستخدم العنوان أحرفًا قد تقلّد اسم موقع معروف.</string>
+    <string name="link_open">فتح</string>
+    <string name="link_copy">نسخ الرابط</string>
     <string name="review_reply">رد</string>
     <string name="review_reply_edit">تحرير الرد</string>
     <string name="review_reply_delete">حذف الرد</string>
@@ -1267,6 +1341,10 @@
     <string name="edoverlay_rename_kind">إعادة تسمية %1$s</string>
     <string name="edoverlay_renaming">جاري إعادة التسمية…</string>
     <string name="edoverlay_rename_hint">اضغط Enter لإعادة تسمية "%1$s"، وEsc للإلغاء</string>
+    <string name="edoverlay_inline_rename_hint">إعادة تسمية %1$s · Enter للتطبيق، Esc للإلغاء</string>
+    <string name="edoverlay_inline_rename_apply">تطبيق</string>
+    <string name="edoverlay_renaming_elsewhere">جارٍ إعادة التسمية في الملفات الأخرى…</string>
+    <string name="edoverlay_rename_invalid">'%1$s' ليس اسمًا صالحًا</string>
     <string name="edoverlay_go_to_line">الانتقال إلى سطر</string>
     <string name="edoverlay_go_to_line_hint">السطر 1–%1$d  (سطر أو سطر:عمود)</string>
     <string name="edoverlay_no_documentation">لا يوجد توثيق</string>
@@ -1363,6 +1441,89 @@
     <string name="fileop_empty_folder">هذا المجلد فارغ.</string>
     <string name="fileop_move_here">النقل هنا</string>
     <string name="fileop_copy_here">النسخ هنا</string>
+    <plurals name="fileop_move_items_title">
+        <item quantity="zero">نقل %1$d عنصر إلى…</item>
+        <item quantity="one">نقل عنصر واحد إلى…</item>
+        <item quantity="two">نقل عنصرين إلى…</item>
+        <item quantity="few">نقل %1$d عناصر إلى…</item>
+        <item quantity="many">نقل %1$d عنصرًا إلى…</item>
+        <item quantity="other">نقل %1$d عنصر إلى…</item>
+    </plurals>
+    <plurals name="fileop_copy_items_title">
+        <item quantity="zero">نسخ %1$d عنصر إلى…</item>
+        <item quantity="one">نسخ عنصر واحد إلى…</item>
+        <item quantity="two">نسخ عنصرين إلى…</item>
+        <item quantity="few">نسخ %1$d عناصر إلى…</item>
+        <item quantity="many">نسخ %1$d عنصرًا إلى…</item>
+        <item quantity="other">نسخ %1$d عنصر إلى…</item>
+    </plurals>
+    <plurals name="fileop_delete_items_title">
+        <item quantity="zero">حذف %1$d عنصر؟</item>
+        <item quantity="one">حذف عنصر واحد؟</item>
+        <item quantity="two">حذف عنصرين؟</item>
+        <item quantity="few">حذف %1$d عناصر؟</item>
+        <item quantity="many">حذف %1$d عنصرًا؟</item>
+        <item quantity="other">حذف %1$d عنصر؟</item>
+    </plurals>
+    <string name="fileop_delete_items_body">يؤدي هذا إلى إزالتها نهائيًا، وإزالة المجلدات مع كل ما بداخلها. لا يمكن التراجع عن هذا.</string>
+    <string name="fileop_delete_items_body_undo">تُحذف المجلدات مع كل ما بداخلها. يمكنك التراجع عن هذا بعد ذلك مباشرةً.</string>
+    <string name="fileop_delete_dir_body_undo">يؤدي هذا إلى حذف المجلد وكل ما بداخله. يمكنك التراجع عن هذا بعد ذلك مباشرةً.</string>
+    <string name="fileop_delete_file_body_undo">يمكنك التراجع عن هذا بعد ذلك مباشرةً.</string>
+    <string name="fileop_conflict_title">"%1$s" موجود بالفعل في %2$s</string>
+    <string name="fileop_conflict_body">استبدل العنصر الموجود، أو احتفظ بكليهما (يحصل هذا العنصر على اسم جديد)، أو تخطَّه.</string>
+    <string name="fileop_conflict_replace">استبدال</string>
+    <string name="fileop_conflict_keep_both">الاحتفاظ بكليهما</string>
+    <string name="fileop_conflict_skip">تخطي</string>
+    <string name="fileop_conflict_progress">التعارض %1$d من %2$d</string>
+    <plurals name="fileop_conflict_apply_all">
+        <item quantity="zero">تطبيق الإجراء نفسه على التعارضات الأخرى (%1$d)</item>
+        <item quantity="one">تطبيق الإجراء نفسه على التعارض الآخر</item>
+        <item quantity="two">تطبيق الإجراء نفسه على التعارضين الآخرين</item>
+        <item quantity="few">تطبيق الإجراء نفسه على التعارضات الأخرى (%1$d)</item>
+        <item quantity="many">تطبيق الإجراء نفسه على التعارضات الأخرى (%1$d)</item>
+        <item quantity="other">تطبيق الإجراء نفسه على التعارضات الأخرى (%1$d)</item>
+    </plurals>
+    <plurals name="fileop_notice_moved">
+        <item quantity="zero">تم نقل %1$d عنصر إلى %2$s</item>
+        <item quantity="one">تم نقل عنصر واحد إلى %2$s</item>
+        <item quantity="two">تم نقل عنصرين إلى %2$s</item>
+        <item quantity="few">تم نقل %1$d عناصر إلى %2$s</item>
+        <item quantity="many">تم نقل %1$d عنصرًا إلى %2$s</item>
+        <item quantity="other">تم نقل %1$d عنصر إلى %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_copied">
+        <item quantity="zero">تم نسخ %1$d عنصر إلى %2$s</item>
+        <item quantity="one">تم نسخ عنصر واحد إلى %2$s</item>
+        <item quantity="two">تم نسخ عنصرين إلى %2$s</item>
+        <item quantity="few">تم نسخ %1$d عناصر إلى %2$s</item>
+        <item quantity="many">تم نسخ %1$d عنصرًا إلى %2$s</item>
+        <item quantity="other">تم نسخ %1$d عنصر إلى %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_duplicated">
+        <item quantity="zero">تم تكرار %1$d عنصر</item>
+        <item quantity="one">تم تكرار عنصر واحد</item>
+        <item quantity="two">تم تكرار عنصرين</item>
+        <item quantity="few">تم تكرار %1$d عناصر</item>
+        <item quantity="many">تم تكرار %1$d عنصرًا</item>
+        <item quantity="other">تم تكرار %1$d عنصر</item>
+    </plurals>
+    <plurals name="fileop_notice_deleted">
+        <item quantity="zero">تم حذف %1$d عنصر</item>
+        <item quantity="one">تم حذف عنصر واحد</item>
+        <item quantity="two">تم حذف عنصرين</item>
+        <item quantity="few">تم حذف %1$d عناصر</item>
+        <item quantity="many">تم حذف %1$d عنصرًا</item>
+        <item quantity="other">تم حذف %1$d عنصر</item>
+    </plurals>
+    <plurals name="fileop_notice_failed">
+        <item quantity="zero">فشل %1$d عنصر: %2$s</item>
+        <item quantity="one">فشل عنصر واحد: %2$s</item>
+        <item quantity="two">فشل عنصران: %2$s</item>
+        <item quantity="few">فشلت %1$d عناصر: %2$s</item>
+        <item quantity="many">فشل %1$d عنصرًا: %2$s</item>
+        <item quantity="other">فشل %1$d عنصر: %2$s</item>
+    </plurals>
+    <string name="fileop_notice_undone">تم التراجع</string>
 
     <!-- dialogs: ErrorDialog -->
     <string name="errdlg_unexpected">حدث خطأ غير متوقع. ظل التطبيق يعمل.</string>
@@ -1485,6 +1646,17 @@
     <string name="storage_cat_projects_desc">شفرتك المصدرية وإعدادات مشاريعك</string>
     <string name="storage_cat_leftovers_title">مجلدات مشاريع متبقية</string>
     <string name="storage_cat_leftovers_desc">تركتها المشاريع المحذوفة، ويمكن إزالتها بأمان</string>
+    <string name="plugins_leftovers_title">بقايا الإضافات المحذوفة</string>
+    <string name="plugins_leftovers_body">إلغاء تثبيت إضافة يترك بياناتها خلفه. احذفها لتحرير المساحة، أو احتفظ بها إن كنت ستعيد تثبيتها.</string>
+    <string name="plugins_leftover_delete">حذف</string>
+    <string name="plugins_leftovers_delete_all">حذف الكل (%1$s)</string>
+    <string name="plugins_leftover_confirm_title">حذف بيانات %1$s؟</string>
+    <string name="plugins_leftovers_confirm_all_title">حذف بيانات كل الإضافات المحذوفة؟</string>
+    <string name="plugins_leftover_confirm_body">سيحرر هذا %1$s. الإضافة التي تعيد تثبيتها لاحقًا تبدأ من جديد.</string>
+    <string name="storage_cat_plugin_leftovers_title">بيانات الإضافات المحذوفة</string>
+    <string name="storage_cat_plugin_leftovers_desc">تركتها إضافات ألغيت تثبيتها</string>
+    <string name="storage_clear_plugin_leftovers_title">حذف بيانات الإضافات المحذوفة؟</string>
+    <string name="storage_clear_plugin_leftovers_body">سيحذف هذا %1$s تركتها إضافات ألغي تثبيتها. الإضافة التي تعيد تثبيتها لاحقًا تبدأ من جديد.</string>
     <string name="storage_cat_other_title">أخرى</string>
     <string name="storage_cat_other_desc">ملفات المفاتيح والنسخ الاحتياطية وبيانات التطبيق</string>
     <string name="plugins_restart_hint">أعد التشغيل لتطبيق تغييرات الإضافات.</string>
@@ -1513,7 +1685,8 @@
     <string name="keystore_empty">لا توجد مخازن مفاتيح بعد. أنشئ أو استورد واحدًا لتوقيع إصدارات النشر.</string>
     <string name="keystore_deleted">تم حذف %1$s</string>
     <string name="keystore_row_subtitle">%1$s · المفتاح: %2$s</string>
-    <string name="keystore_sha256">SHA-256 %1$s</string>
+    <string name="keystore_copy_fingerprint">نسخ بصمة %1$s</string>
+    <string name="keystore_fingerprint_copied">تم نسخ %1$s</string>
     <string name="keystore_expires">تنتهي الصلاحية ~%1$s</string>
     <string name="keystore_cert_unreadable"><![CDATA[تعذّر قراءة الشهادة (ربما تغيّرت كلمة المرور).]]></string>
     <string name="keystore_create_title">مخزن مفاتيح جديد</string>
@@ -2405,6 +2578,7 @@
     <string name="colors_preview">معاينة</string>
     <string name="colors_preview_hint">اضغط على أي جزء في المثال للانتقال إلى الإدخال الذي يلوّنه.</string>
     <string name="colors_builtin_notice">%1$s مدمج. تُحفظ تغييراتك في نسخة منه.</string>
+    <string name="colors_plugin_notice">%1$s يأتي مع إضافة. تُحفظ تغييراتك في نسخة منه.</string>
     <string name="colors_editing_copy">تعديل نسخة: %1$s</string>
     <string name="colors_duplicate">تكرار</string>
     <string name="colors_rename">إعادة تسمية</string>
@@ -2514,11 +2688,14 @@
     <string name="plugin_consent_cap_ui_editor_painter">الرسم داخل المحرر</string>
     <string name="plugin_consent_cap_ui_editor_language">تلوين لغة في المحرر وتحديد صيغة تعليقاتها، بما في ذلك اللغات التي تعرفها بيئة التطوير مسبقًا</string>
     <string name="plugin_consent_cap_ui_color_attribute">إضافة إدخالات إلى النظام اللوني للمحرر، وتغيير مظهر الإدخالات المدمجة</string>
+    <string name="plugin_consent_cap_ui_color_scheme">إضافة أنظمة ألوان يمكنك اختيارها للمحرر</string>
+    <string name="plugin_consent_cap_ui_app_theme">إضافة سمات للتطبيق يمكنك اختيارها من المظهر</string>
     <string name="plugin_consent_cap_ui_new_file_template">إضافة أنواع ملفات إلى قائمة «جديد»</string>
     <string name="plugin_consent_cap_lang_backend">تعليم المحرر لغةً: التحليل والإكمال والأخطاء</string>
     <string name="plugin_consent_cap_lang_server">تشغيل خادم لغة: برنامج منفصل يفحص لغةً ويكملها ويتنقل فيها</string>
     <string name="plugin_consent_cap_model_module_type">إضافة نوع من الوحدات، وقوالب لإنشائه</string>
     <string name="plugin_consent_cap_model_facet">حفظ إعدادات خاصة بها في وحداتك</string>
+    <string name="plugin_consent_cap_model_dependencies">إضافة مكتبات ومستودعات Maven إلى مشاريعك</string>
     <string name="plugin_consent_cap_interp_run">تشغيل كود مشروعك داخل بيئة التطوير لمعاينته أو تشغيله</string>
     <string name="plugin_consent_cap_build_task">إضافة خطوات إلى عمليات البناء</string>
     <string name="plugin_consent_cap_build_source_generator">توليد كود مصدري داخل وحداتك</string>

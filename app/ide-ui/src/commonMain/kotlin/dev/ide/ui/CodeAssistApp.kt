@@ -94,6 +94,8 @@ fun CodeAssistApp(
     // noinspection RememberReturnType
     remember(Unit) {
         backend.uiPlugins().forEach { UiPluginHost.register(it) }
+        // The shell's own tool window: the notification center, readable from inside a project.
+        UiPluginHost.register(dev.ide.ui.screens.NotificationsUiPlugin)
         UiPluginHost.ensureLoaded()
     }
 
@@ -155,6 +157,9 @@ fun CodeAssistApp(
         uiFont = uiFont,
         codeFont = resolvedCodeFont,
         editorColorScheme = app.editorColorScheme,
+        // A plugin's app theme, while its plugin is loaded; once it is not, the id resolves to nothing and the
+        // default accent applies, without the user's choice being forgotten.
+        appTheme = app.settings.appTheme?.let { dev.ide.ui.theme.colors.ContributedAppThemes.byId(it) },
     ) {
         // Route the system back gesture through in-app navigation instead of letting it close the app (#997).
         // Registered above the editor's own overlay handler, so an open sheet/dialog is closed first (the
@@ -170,6 +175,7 @@ fun CodeAssistApp(
             LocalAds provides app.adController,
             LocalHostFileActions provides fileActions,
             LocalPluginNavigator provides app::openPluginScreen,
+            dev.ide.ui.screens.LocalNotificationOpener provides { n -> app.openNotificationTarget(n) },
             LocalSettingsPageOpener provides { id -> app.openSettingsPageFrom(app.screen, id) },
             // A contributed panel can open a file the same way an action's OpenFile effect does, and lands the
             // user on the editor to see it. Guarded on a project being open, since a tab over nothing is not a

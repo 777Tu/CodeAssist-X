@@ -35,10 +35,13 @@ import dev.ide.ui.generated.resources.plugin_consent_cap_interp_run
 import dev.ide.ui.generated.resources.plugin_consent_cap_lang_backend
 import dev.ide.ui.generated.resources.plugin_consent_cap_lang_server
 import dev.ide.ui.generated.resources.plugin_consent_cap_model_facet
+import dev.ide.ui.generated.resources.plugin_consent_cap_model_dependencies
 import dev.ide.ui.generated.resources.plugin_consent_cap_model_module_type
 import dev.ide.ui.generated.resources.plugin_consent_cap_net
 import dev.ide.ui.generated.resources.plugin_consent_cap_ui_action
 import dev.ide.ui.generated.resources.plugin_consent_cap_ui_color_attribute
+import dev.ide.ui.generated.resources.plugin_consent_cap_ui_color_scheme
+import dev.ide.ui.generated.resources.plugin_consent_cap_ui_app_theme
 import dev.ide.ui.generated.resources.plugin_consent_cap_ui_editor_action
 import dev.ide.ui.generated.resources.plugin_consent_cap_ui_editor_decoration
 import dev.ide.ui.generated.resources.plugin_consent_cap_ui_editor_language
@@ -231,11 +234,14 @@ internal fun capabilityDescription(capability: String): StringResource? = when (
     "ui.editorPainter" -> Res.string.plugin_consent_cap_ui_editor_painter
     "ui.editorLanguage" -> Res.string.plugin_consent_cap_ui_editor_language
     "ui.colorAttribute" -> Res.string.plugin_consent_cap_ui_color_attribute
+    "ui.colorScheme" -> Res.string.plugin_consent_cap_ui_color_scheme
+    "ui.appTheme" -> Res.string.plugin_consent_cap_ui_app_theme
     "ui.newFileTemplate" -> Res.string.plugin_consent_cap_ui_new_file_template
     "lang.backend" -> Res.string.plugin_consent_cap_lang_backend
     "lang.server" -> Res.string.plugin_consent_cap_lang_server
     "model.moduleType" -> Res.string.plugin_consent_cap_model_module_type
     "model.facet" -> Res.string.plugin_consent_cap_model_facet
+    "model.dependencies" -> Res.string.plugin_consent_cap_model_dependencies
     // Phrased as what it does to the user's own code, since that is the part worth deciding about.
     "interp.run" -> Res.string.plugin_consent_cap_interp_run
     "build.task" -> Res.string.plugin_consent_cap_build_task

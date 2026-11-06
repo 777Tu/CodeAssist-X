@@ -220,6 +220,36 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <string name="filetree_move">Pindahkan</string>
     <string name="filetree_copy">Salin</string>
     <string name="filetree_delete">Hapus</string>
+    <string name="filetree_cut">Potong</string>
+    <string name="filetree_paste">Tempel</string>
+    <string name="filetree_duplicate">Duplikat</string>
+    <string name="filetree_copy_path">Salin path</string>
+    <string name="filetree_copy_path_absolute">Path absolut</string>
+    <string name="filetree_copy_path_relative">Path dari root proyek</string>
+    <string name="filetree_copy_name">Nama</string>
+    <string name="filetree_copy_paths">Salin semua path</string>
+    <string name="filetree_move_to">Pindahkan ke…</string>
+    <string name="filetree_copy_to">Salin ke…</string>
+    <string name="filetree_select_all">Pilih semua</string>
+    <string name="filetree_clear_selection">Hapus pilihan</string>
+    <string name="filetree_more_selection">Tindakan lainnya untuk pilihan</string>
+    <string name="filetree_paste_into">Tempel ke %1$s</string>
+    <string name="filetree_clear_clipboard">Kosongkan papan klip</string>
+    <string name="filetree_drop_move">Pindahkan ke %1$s</string>
+    <string name="filetree_drop_copy">Salin ke %1$s</string>
+    <string name="filetree_drop_nowhere">Tidak dapat dilepas di sini</string>
+    <plurals name="filetree_selected_count">
+        <item quantity="other">%1$d dipilih</item>
+    </plurals>
+    <plurals name="filetree_clip_cut">
+        <item quantity="other">%1$d item akan dipindahkan</item>
+    </plurals>
+    <plurals name="filetree_clip_copy">
+        <item quantity="other">%1$d item akan disalin</item>
+    </plurals>
+    <plurals name="filetree_drag_items">
+        <item quantity="other">%1$d item</item>
+    </plurals>
     <string name="filetree_java_class">Kelas Java</string>
     <string name="filetree_kotlin_file">File Kotlin</string>
     <string name="filetree_resource_file">File Resource</string>
@@ -623,6 +653,10 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <string name="edoverlay_rename_kind">Ganti nama %1$s</string>
     <string name="edoverlay_renaming">Mengganti nama…</string>
     <string name="edoverlay_rename_hint">Enter untuk mengganti nama '%1$s', Esc untuk batal</string>
+    <string name="edoverlay_inline_rename_hint">Ganti nama %1$s · Enter untuk menerapkan, Esc untuk batal</string>
+    <string name="edoverlay_inline_rename_apply">Terapkan</string>
+    <string name="edoverlay_renaming_elsewhere">Mengganti nama di file lain…</string>
+    <string name="edoverlay_rename_invalid">'%1$s' bukan nama yang valid</string>
     <string name="edoverlay_go_to_line">Ke baris</string>
     <string name="edoverlay_go_to_line_hint">Baris 1-%1$d  (baris atau baris:kolom)</string>
     <string name="edoverlay_no_documentation">Tidak ada dokumentasi</string>
@@ -700,6 +734,44 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <string name="fileop_empty_folder">Folder ini kosong.</string>
     <string name="fileop_move_here">Pindahkan ke sini</string>
     <string name="fileop_copy_here">Salin ke sini</string>
+    <plurals name="fileop_move_items_title">
+        <item quantity="other">Pindahkan %1$d item ke…</item>
+    </plurals>
+    <plurals name="fileop_copy_items_title">
+        <item quantity="other">Salin %1$d item ke…</item>
+    </plurals>
+    <plurals name="fileop_delete_items_title">
+        <item quantity="other">Hapus %1$d item?</item>
+    </plurals>
+    <string name="fileop_delete_items_body">Ini menghapusnya secara permanen, termasuk folder beserta semua isinya. Tindakan ini tidak dapat dibatalkan.</string>
+    <string name="fileop_delete_items_body_undo">Folder dihapus beserta semua isinya. Anda dapat mengurungkannya segera setelahnya.</string>
+    <string name="fileop_delete_dir_body_undo">Ini menghapus folder dan semua yang ada di dalamnya. Anda dapat mengurungkannya segera setelahnya.</string>
+    <string name="fileop_delete_file_body_undo">Anda dapat mengurungkannya segera setelahnya.</string>
+    <string name="fileop_conflict_title">'%1$s' sudah ada di %2$s</string>
+    <string name="fileop_conflict_body">Ganti item yang sudah ada, simpan keduanya (item ini mendapat nama baru), atau lewati.</string>
+    <string name="fileop_conflict_replace">Ganti</string>
+    <string name="fileop_conflict_keep_both">Simpan keduanya</string>
+    <string name="fileop_conflict_skip">Lewati</string>
+    <string name="fileop_conflict_progress">Konflik %1$d dari %2$d</string>
+    <plurals name="fileop_conflict_apply_all">
+        <item quantity="other">Lakukan hal yang sama untuk %1$d konflik lainnya</item>
+    </plurals>
+    <plurals name="fileop_notice_moved">
+        <item quantity="other">%1$d item dipindahkan ke %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_copied">
+        <item quantity="other">%1$d item disalin ke %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_duplicated">
+        <item quantity="other">%1$d item diduplikat</item>
+    </plurals>
+    <plurals name="fileop_notice_deleted">
+        <item quantity="other">%1$d item dihapus</item>
+    </plurals>
+    <plurals name="fileop_notice_failed">
+        <item quantity="other">%1$d item gagal: %2$s</item>
+    </plurals>
+    <string name="fileop_notice_undone">Diurungkan</string>
     <string name="errdlg_unexpected">Terjadi kesalahan yang tidak terduga. Aplikasi tetap berjalan.</string>
     <string name="errdlg_hide_details">Sembunyikan detail</string>
     <string name="errdlg_show_details">Tampilkan detail</string>
@@ -788,7 +860,8 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <string name="keystore_empty">Belum ada keystore. Buat atau impor satu untuk menandatangani build rilis.</string>
     <string name="keystore_deleted">Menghapus %1$s</string>
     <string name="keystore_row_subtitle">%1$s · kunci: %2$s</string>
-    <string name="keystore_sha256">SHA-256 %1$s</string>
+    <string name="keystore_copy_fingerprint">Salin sidik jari %1$s</string>
+    <string name="keystore_fingerprint_copied">%1$s disalin</string>
     <string name="keystore_expires">kedaluwarsa ~%1$s</string>
     <string name="keystore_cert_unreadable"><![CDATA[Tidak dapat membaca sertifikat (kata sandi mungkin telah berubah).]]></string>
     <string name="keystore_create_title">Keystore Baru</string>
@@ -1313,6 +1386,30 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <plurals name="you_releases">
         <item quantity="other">%1$d rilis</item>
     </plurals>
+    <string name="notif_title">Notifikasi</string>
+    <string name="notif_empty">Tidak ada yang perlu dilihat.</string>
+    <string name="notif_empty_body">Ulasan, pembaruan, dan build yang selesai muncul di sini.</string>
+    <string name="notif_mark_all">Tandai semua dibaca</string>
+    <string name="notif_clear">Hapus</string>
+    <string name="notif_open">Buka</string>
+    <string name="notif_dismiss">Tutup</string>
+    <string name="notif_section_new">Baru</string>
+    <string name="notif_view">Lihat</string>
+    <string name="notif_more_row_desc">Yang terjadi saat Anda bekerja</string>
+    <string name="notif_section_earlier">Sebelumnya</string>
+    <string name="notif_show_more">Tampilkan lebih banyak</string>
+    <string name="notif_show_less">Tampilkan lebih sedikit</string>
+    <string name="notif_repeat_count">×%1$d</string>
+    <string name="notif_kind_store">Toko</string>
+    <string name="notif_kind_update">Pembaruan toko</string>
+    <string name="notif_kind_build">Build</string>
+    <string name="notif_kind_agent">Agen AI</string>
+    <string name="notif_kind_learn">Belajar</string>
+    <string name="notif_kind_system">CodeAssist</string>
+    <string name="notif_just_now">baru saja</string>
+    <string name="notif_minutes">%1$d mnt lalu</string>
+    <string name="notif_hours">%1$d jam lalu</string>
+    <string name="notif_days">%1$d hari lalu</string>
     <string name="settings_language_servers">Server Bahasa</string>
     <string name="settings_language_servers_subtitle">Galat, pelengkapan, dan navigasi dari server yang sudah Anda pasang</string>
     <string name="lsp_intro">Tambahkan server Language Server Protocol yang sudah Anda pasang. File dengan ekstensinya mendapatkan galat, pelengkapan, navigasi, ganti nama, dan pemformatan dari server itu. Bahasa baru berlaku pada proyek berikutnya yang Anda buka.</string>
@@ -1335,4 +1432,27 @@ Kami tidak pernah mengumpulkan kode, nama file atau proyek, apa yang Anda ketik,
     <string name="lsp_status_running">Berjalan</string>
     <string name="lsp_status_starting">Memulai</string>
     <string name="lsp_status_not_started">Belum dimulai</string>
+    <string name="review_copy">Salin teks</string>
+    <string name="link_open_title">Buka tautan ini?</string>
+    <string name="link_mail_title">Tulis ke alamat ini?</string>
+    <string name="link_from_user">Seseorang di komunitas menambahkan tautan ini. CodeAssist belum memeriksa ke mana tujuannya.</string>
+    <string name="link_mail_from_user">Seseorang di komunitas menambahkan alamat ini. Aplikasi email Anda akan terbuka dengan pesan baru untuknya.</string>
+    <string name="link_warn_http">Tidak terenkripsi (http): orang lain di jaringan Anda dapat melihat atau mengubah halaman.</string>
+    <string name="link_warn_userinfo">Bagian sebelum @ bukan situsnya. Tautan ini menuju %1$s.</string>
+    <string name="link_warn_ip">Tautan ini menuju alamat IP, bukan situs bernama.</string>
+    <string name="link_warn_lookalike">Alamat ini memakai karakter yang dapat meniru nama situs terkenal.</string>
+    <string name="link_open">Buka</string>
+    <string name="link_copy">Salin tautan</string>
+    <string name="plugins_leftovers_title">Sisa dari plugin yang dihapus</string>
+    <string name="plugins_leftovers_body">Mencopot plugin meninggalkan datanya. Hapus untuk mengosongkan ruang, atau simpan jika Anda akan memasangnya lagi.</string>
+    <string name="plugins_leftover_delete">Hapus</string>
+    <string name="plugins_leftovers_delete_all">Hapus semua (%1$s)</string>
+    <string name="plugins_leftover_confirm_title">Hapus data %1$s?</string>
+    <string name="plugins_leftovers_confirm_all_title">Hapus data semua plugin yang dihapus?</string>
+    <string name="plugins_leftover_confirm_body">Ini mengosongkan %1$s. Plugin yang Anda pasang lagi nanti akan mulai dari awal.</string>
+    <string name="storage_cat_plugin_leftovers_title">Data plugin yang dihapus</string>
+    <string name="storage_cat_plugin_leftovers_desc">Ditinggalkan oleh plugin yang Anda copot</string>
+    <string name="storage_clear_plugin_leftovers_title">Hapus data plugin yang dihapus?</string>
+    <string name="storage_clear_plugin_leftovers_body">Ini menghapus %1$s yang ditinggalkan plugin yang dicopot. Plugin yang Anda pasang lagi nanti akan mulai dari awal.</string>
+    <string name="colors_plugin_notice">%1$s berasal dari sebuah plugin. Perubahan Anda disimpan ke salinan.</string>
 </resources>

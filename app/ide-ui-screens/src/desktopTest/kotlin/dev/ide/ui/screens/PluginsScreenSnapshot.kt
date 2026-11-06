@@ -1,5 +1,6 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.backend.UiPluginLeftover
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -113,6 +114,15 @@ class PluginsScreenSnapshot {
         override fun canRestartApplication(): Boolean = true
     }
 
+    /** Two plugins uninstalled from Android's settings left their data behind; one was seen installed before. */
+    private class LeftoversBackend : StubBackend() {
+        override fun pluginCatalog(): List<UiPluginInfo> = NoInstalledBackend().pluginCatalog() + FakeBackend().pluginCatalog().filterNot { it.builtIn }.take(1)
+        override suspend fun pluginLeftovers(): List<UiPluginLeftover> = listOf(
+            UiPluginLeftover("dev.codeassist.dart", "Dart & Flutter", 300_000_000L),
+            UiPluginLeftover("kz.codingOnTheMoon.dartpluginv1", null, 17_400_000L),
+        )
+    }
+
     /** With nothing installed, the Installed tab still exists and shows its empty state. */
     private class NoInstalledBackend : StubBackend() {
         override fun pluginCatalog(): List<UiPluginInfo> = listOf(
@@ -135,6 +145,11 @@ class PluginsScreenSnapshot {
     @Test
     fun renderInstalledTabWithNothingInstalled() {
         snapshot("plugins-installed-empty.png", NoInstalledBackend(), startTab = PluginsTab.Installed)
+    }
+
+    @Test
+    fun renderLeftoversOfRemovedPlugins() {
+        snapshot("plugins-leftovers.png", LeftoversBackend(), startTab = PluginsTab.Installed)
     }
 
     @Test
@@ -171,14 +186,16 @@ class PluginsScreenSnapshot {
         }
         try {
             scene.render()
-            scene.render(16_000_000L)
+            // The screen staggers in; step the clock until it has settled (and before a click, so the click
+            // lands where the settled layout puts its target).
+            for (frame in 1..20) scene.render(frame * 50_000_000L)
             if (click != null) {
                 scene.sendPointerEvent(PointerEventType.Press, click)
                 scene.sendPointerEvent(PointerEventType.Release, click)
-                // The tab indicator animates across; step the clock until it has settled.
-                for (frame in 2..40) scene.render(frame * 50_000_000L)
+                // The tab indicator animates across and the new list staggers in; step until both settle.
+                for (frame in 21..60) scene.render(frame * 50_000_000L)
             }
-            val img = scene.render(2_400_000_000L)
+            val img = scene.render(3_200_000_000L)
             val png = img.encodeToData(EncodedImageFormat.PNG)!!.bytes
             File("$OUT_DIR/$name").apply { parentFile?.mkdirs() }.writeBytes(png)
             println("wrote snapshot: $OUT_DIR/$name (${png.size} bytes)")

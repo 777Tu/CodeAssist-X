@@ -783,7 +783,13 @@ class KotlinEditorFeatures(
         val ktFile = parsed.ktFile
         val resolver = KotlinResolver(ktFile, parsed, service)
         val out = ArrayList<Pair<TextRange, KtNameReferenceExpression?>>()
-        for (ref in ktFile.collectDescendantsOfType<KtNameReferenceExpression>()) {
+        // Only where the name is written: walking every reference in the file forced the lazy parse to build
+        // every function body in it, for the handful that can mention the name at all.
+        val visited = HashSet<Int>()
+        for (at in identifierOccurrences(text, target.name)) {
+            val leaf = ktFile.findElementAt(at) ?: continue
+            val ref = leaf as? KtNameReferenceExpression ?: leaf.getParentOfType<KtNameReferenceExpression>() ?: continue
+            if (!visited.add(ref.textRange.startOffset)) continue
             if (ref.getReferencedName() != target.name) continue
             val r = ref.textRange
             if (scope != null && (r.startOffset < scope.second.start || r.endOffset > scope.second.end)) continue
@@ -880,8 +886,27 @@ class KotlinEditorFeatures(
         val fileNamed = path.takeIf {
             decl is KtClassOrObject && decl.parent is KtFile && path.substringAfterLast('/').substringBeforeLast('.') == name
         }
-        return KotlinUsageTarget(name, kindOf(decl, scope != null), ids, decls, scope?.let { path to it }, importFqnsOf(decl, kt), fileNamed)
+        val topLevel = decl.parent is KtFile && scope == null
+        return KotlinUsageTarget(
+            name, kindOf(decl, scope != null), ids, decls, scope?.let { path to it }, importFqnsOf(decl, kt), fileNamed,
+            javaFacade = if (topLevel && (decl is KtNamedFunction || decl is KtProperty)) facadeClassName(kt, path) else null,
+            topLevelTypePackage = if (topLevel && decl is KtClassOrObject) kt.packageFqName.asString() else null,
+        )
     }
+
+    /**
+     * The JVM class a file's top-level functions and properties compile into: its `@file:JvmName`, or the file
+     * name capitalized with `Kt` added. Null when the file name is not a plain identifier (the compiler mangles
+     * those, and a guess would wrongly skip Java files that do call it).
+     */
+    private fun facadeClassName(kt: KtFile, path: String): String? {
+        JVM_NAME.find(kt.text)?.let { return it.groupValues[1] }
+        val base = path.substringAfterLast('/').substringBeforeLast('.')
+        if (base.isEmpty() || !base[0].isJavaIdentifierStartCompat() || !base.all { it.isLetterOrDigit() || it == '_' }) return null
+        return base.replaceFirstChar { it.uppercaseChar() } + "Kt"
+    }
+
+    private fun Char.isJavaIdentifierStartCompat(): Boolean = isLetter() || this == '_'
 
     private fun kindOf(decl: KtNamedDeclaration, local: Boolean): String = when (decl) {
         is KtClassOrObject -> "class"
@@ -1404,3 +1429,6 @@ private val ASSIGN_OPS = setOf(
 
 /** `++` / `--`: their operand is written. */
 private val INC_DEC = setOf(KtTokens.PLUSPLUS, KtTokens.MINUSMINUS)
+
+/** A file's `@file:JvmName("…")`, which names the class its top-level declarations compile into. */
+private val JVM_NAME = Regex("""@file\s*:\s*JvmName\s*\(\s*"([^"]+)"\s*\)""")

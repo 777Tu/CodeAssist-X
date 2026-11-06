@@ -1333,6 +1333,8 @@ data class UiKeystore(
     val certSubject: String?,
     val sha256: String?,
     val validUntilEpochMs: Long?,
+    /** The key certificate's SHA-1, colon-separated like [sha256]: Firebase and Google sign-in ask for both. */
+    val sha1: String? = null,
 )
 
 /** One certificate inside a keystore (owner/issuer, validity window, fingerprints). */
@@ -2193,6 +2195,8 @@ data class UiSettings(
     val accent: UiAccent = UiAccent.Lime,
     /** The seed color for [UiAccent.Custom], as an `0xAARRGGBB` ARGB long. Ignored unless accent is Custom. */
     val customAccentColor: Long = 0xFF8B5CF6L,
+    /** The id of the plugin app theme the accent setting names (`ContributedAppThemes`), else null. */
+    val appTheme: String? = null,
     /** Keep tool window header actions always visible (off = only while the tool window is hovered or active). */
     val alwaysShowToolWindowActions: Boolean = false,
     /** Open a run's terminal full screen instead of docking it in the wide layout. */

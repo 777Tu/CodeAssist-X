@@ -66,6 +66,66 @@ interface FileService {
     /** Copy a file/dir into [destDir]; returns the new path or null. Bumps [fileSystemEpoch]. */
     fun copyPath(path: String, destDir: String): String? = null
 
+    /**
+     * The [paths] whose names are already taken in [destDir], so the UI can ask what to do before
+     * [transferPaths]. A move into the folder an item is already in is no conflict (it is skipped); a copy there
+     * is (it lands next to itself).
+     */
+    fun conflictsIn(kind: UiTransferKind, paths: List<String>, destDir: String): List<String> {
+        val existing = listDirectory(destDir).map { it.path }.toSet()
+        val names = existing.map(::pathLeafName).toSet()
+        return paths.filter { p ->
+            pathLeafName(p) in names && !(kind == UiTransferKind.Move && p in existing)
+        }
+    }
+
+    /**
+     * Move or copy every item into [destDir] in one call: one reindex, one import sweep for the moved sources,
+     * and one undo step for the lot. Each item's [UiTransferItem.onConflict] says what happens when its name is
+     * taken. Bumps [fileSystemEpoch] once when anything changed.
+     *
+     * The default goes item by item through [movePath]/[copyPath]: Replace deletes the existing item for good,
+     * and Keep both is not available.
+     */
+    fun transferPaths(kind: UiTransferKind, items: List<UiTransferItem>, destDir: String): UiTransferResult {
+        val done = LinkedHashMap<String, String>()
+        val skipped = ArrayList<String>()
+        val failed = LinkedHashMap<String, String>()
+        for (item in items) {
+            val existing = listDirectory(destDir).firstOrNull { it.name == pathLeafName(item.path) }
+            if (existing != null && existing.path == item.path && kind == UiTransferKind.Move) {
+                skipped += item.path; continue
+            }
+            if (existing != null) when (item.onConflict) {
+                UiConflictChoice.Skip -> { skipped += item.path; continue }
+                UiConflictChoice.KeepBoth -> { failed[item.path] = "Keep both is not supported here."; continue }
+                UiConflictChoice.Replace -> if (existing.path == item.path || !deletePath(existing.path)) {
+                    failed[item.path] = "Could not replace '${existing.name}'."; continue
+                }
+            }
+            val landed = if (kind == UiTransferKind.Move) movePath(item.path, destDir) else copyPath(item.path, destDir)
+            if (landed != null) done[item.path] = landed else failed[item.path] = "Could not transfer it."
+        }
+        return UiTransferResult(done, skipped, failed)
+    }
+
+    /**
+     * Delete every path, recoverably where the backend can (the result's undo token restores them). Bumps
+     * [fileSystemEpoch] once. The default deletes each one for good through [deletePath].
+     */
+    fun deletePaths(paths: List<String>): UiDeleteResult {
+        val deleted = ArrayList<String>()
+        val failed = LinkedHashMap<String, String>()
+        for (p in paths) if (deletePath(p)) deleted += p else failed[p] = "Could not delete it."
+        return UiDeleteResult(deleted, failed)
+    }
+
+    /** True when [deletePaths] keeps what it deletes in a trash, so [undoFileOperation] can bring it back. */
+    val supportsUndo: Boolean get() = false
+
+    /** Reverse the [transferPaths] or [deletePaths] call that returned [token]. A token undoes once. */
+    fun undoFileOperation(token: String): UiUndoResult = UiUndoResult(false, "Undo is not supported here.")
+
     /** Bumps whenever a file is created/imported/removed, so the UI re-reads [fileTree]. */
     val fileSystemEpoch: StateFlow<Int> get() = MutableStateFlow(0)
 }
@@ -1722,6 +1782,9 @@ interface SdkService {
  * One built-in plugin in the Plugins settings screen. [essential] plugins are shown locked (the IDE can't run
  * without them). [enabled] is the user's persisted choice; changes apply on the next launch (restart-apply).
  */
+/** What one uninstalled plugin left behind: [id] is its folder name, [name] its name when it was seen installed. */
+data class UiPluginLeftover(val id: String, val name: String?, val sizeBytes: Long)
+
 data class UiPluginInfo(
     val id: String,
     val name: String,
@@ -1896,6 +1959,17 @@ interface SettingsService {
 
     /** Open the system page of the installed plugin app [id] (where it is also uninstalled). */
     fun openPluginAppInfo(id: String): Boolean = false
+
+    /**
+     * The data uninstalled plugins left behind (their data folders, public and private), largest first. Nothing
+     * is deleted unasked: Android uninstalls a plugin from its own settings, so this is where the user decides.
+     * Empty when the IDE could not tell which plugins are installed this launch. Walks the folders: call it off
+     * the main thread.
+     */
+    suspend fun pluginLeftovers(): List<UiPluginLeftover> = emptyList()
+
+    /** Deletes what the uninstalled plugin [id] left (an id from [pluginLeftovers]); true when anything went. */
+    suspend fun deletePluginLeftover(id: String): Boolean = false
 
     /** Launch installed plugin app [id]'s own screen: what it is, and the licenses of what it carries. */
     fun openPluginApp(id: String): Boolean = false

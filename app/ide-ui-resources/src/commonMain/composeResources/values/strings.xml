@@ -336,6 +336,40 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="filetree_move">Move</string>
     <string name="filetree_copy">Copy</string>
     <string name="filetree_delete">Delete</string>
+    <string name="filetree_cut">Cut</string>
+    <string name="filetree_paste">Paste</string>
+    <string name="filetree_duplicate">Duplicate</string>
+    <string name="filetree_copy_path">Copy Path</string>
+    <string name="filetree_copy_path_absolute">Absolute Path</string>
+    <string name="filetree_copy_path_relative">Path From Project Root</string>
+    <string name="filetree_copy_name">Name</string>
+    <string name="filetree_copy_paths">Copy Paths</string>
+    <string name="filetree_move_to">Move To…</string>
+    <string name="filetree_copy_to">Copy To…</string>
+    <string name="filetree_select_all">Select All</string>
+    <string name="filetree_clear_selection">Clear selection</string>
+    <string name="filetree_more_selection">More actions for the selection</string>
+    <string name="filetree_paste_into">Paste into %1$s</string>
+    <string name="filetree_clear_clipboard">Clear clipboard</string>
+    <string name="filetree_drop_move">Move to %1$s</string>
+    <string name="filetree_drop_copy">Copy to %1$s</string>
+    <string name="filetree_drop_nowhere">Can't drop here</string>
+    <plurals name="filetree_selected_count">
+        <item quantity="one">%1$d selected</item>
+        <item quantity="other">%1$d selected</item>
+    </plurals>
+    <plurals name="filetree_clip_cut">
+        <item quantity="one">%1$d item to move</item>
+        <item quantity="other">%1$d items to move</item>
+    </plurals>
+    <plurals name="filetree_clip_copy">
+        <item quantity="one">%1$d item to copy</item>
+        <item quantity="other">%1$d items to copy</item>
+    </plurals>
+    <plurals name="filetree_drag_items">
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
+    </plurals>
     <string name="filetree_java_class">Java Class</string>
     <string name="filetree_kotlin_file">Kotlin File</string>
     <string name="filetree_aidl_file">AIDL File</string>
@@ -914,6 +948,19 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="notif_clear">Clear</string>
     <string name="notif_open">Open</string>
     <string name="notif_dismiss">Dismiss</string>
+    <string name="notif_section_new">New</string>
+    <string name="notif_view">View</string>
+    <string name="notif_more_row_desc">What happened while you worked</string>
+    <string name="notif_section_earlier">Earlier</string>
+    <string name="notif_show_more">Show more</string>
+    <string name="notif_show_less">Show less</string>
+    <string name="notif_repeat_count">×%1$d</string>
+    <string name="notif_kind_store">Store</string>
+    <string name="notif_kind_update">Store update</string>
+    <string name="notif_kind_build">Build</string>
+    <string name="notif_kind_agent">AI agent</string>
+    <string name="notif_kind_learn">Learn</string>
+    <string name="notif_kind_system">CodeAssist</string>
     <string name="notif_just_now">just now</string>
     <string name="notif_minutes">%1$d min ago</string>
     <string name="notif_hours">%1$d h ago</string>
@@ -973,6 +1020,17 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="notify_launch_failed">Could not save that just now.</string>
     <string name="review_actions">Review actions</string>
     <string name="review_report">Report</string>
+    <string name="review_copy">Copy text</string>
+    <string name="link_open_title">Open this link?</string>
+    <string name="link_mail_title">Write to this address?</string>
+    <string name="link_from_user">Someone in the community added this link. CodeAssist hasn't checked where it goes.</string>
+    <string name="link_mail_from_user">Someone in the community added this address. Your email app opens with a new message to it.</string>
+    <string name="link_warn_http">Not encrypted (http): others on your network can see or change the page.</string>
+    <string name="link_warn_userinfo">The part before the @ is not the site. This link goes to %1$s.</string>
+    <string name="link_warn_ip">It goes to a bare IP address, not a named site.</string>
+    <string name="link_warn_lookalike">The address uses characters that can imitate a well-known site's name.</string>
+    <string name="link_open">Open</string>
+    <string name="link_copy">Copy link</string>
     <string name="review_reply">Reply</string>
     <string name="review_reply_edit">Edit reply</string>
     <string name="review_reply_delete">Delete reply</string>
@@ -1207,6 +1265,10 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="edoverlay_rename_kind">Rename %1$s</string>
     <string name="edoverlay_renaming">Renaming…</string>
     <string name="edoverlay_rename_hint">Enter to rename '%1$s', Esc to cancel</string>
+    <string name="edoverlay_inline_rename_hint">Rename %1$s · Enter to apply, Esc to cancel</string>
+    <string name="edoverlay_inline_rename_apply">Apply</string>
+    <string name="edoverlay_renaming_elsewhere">Renaming in other files…</string>
+    <string name="edoverlay_rename_invalid">'%1$s' is not a valid name</string>
     <string name="edoverlay_go_to_line">Go to line</string>
     <string name="edoverlay_go_to_line_hint">Line 1–%1$d  (line or line:column)</string>
     <string name="edoverlay_no_documentation">No documentation</string>
@@ -1303,6 +1365,53 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="fileop_empty_folder">This folder is empty.</string>
     <string name="fileop_move_here">Move here</string>
     <string name="fileop_copy_here">Copy here</string>
+    <plurals name="fileop_move_items_title">
+        <item quantity="one">Move %1$d item to…</item>
+        <item quantity="other">Move %1$d items to…</item>
+    </plurals>
+    <plurals name="fileop_copy_items_title">
+        <item quantity="one">Copy %1$d item to…</item>
+        <item quantity="other">Copy %1$d items to…</item>
+    </plurals>
+    <plurals name="fileop_delete_items_title">
+        <item quantity="one">Delete %1$d item?</item>
+        <item quantity="other">Delete %1$d items?</item>
+    </plurals>
+    <string name="fileop_delete_items_body">This permanently removes them, and folders with everything inside them. This can't be undone.</string>
+    <string name="fileop_delete_items_body_undo">Folders are deleted with everything inside them. You can undo this right after.</string>
+    <string name="fileop_delete_dir_body_undo">This deletes the folder and everything inside it. You can undo this right after.</string>
+    <string name="fileop_delete_file_body_undo">You can undo this right after.</string>
+    <string name="fileop_conflict_title">'%1$s' already exists in %2$s</string>
+    <string name="fileop_conflict_body">Replace the item that is there, keep both (this one gets a new name), or skip it.</string>
+    <string name="fileop_conflict_replace">Replace</string>
+    <string name="fileop_conflict_keep_both">Keep Both</string>
+    <string name="fileop_conflict_skip">Skip</string>
+    <string name="fileop_conflict_progress">Conflict %1$d of %2$d</string>
+    <plurals name="fileop_conflict_apply_all">
+        <item quantity="one">Do the same for the other conflict</item>
+        <item quantity="other">Do the same for the other %1$d conflicts</item>
+    </plurals>
+    <plurals name="fileop_notice_moved">
+        <item quantity="one">Moved %1$d item to %2$s</item>
+        <item quantity="other">Moved %1$d items to %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_copied">
+        <item quantity="one">Copied %1$d item to %2$s</item>
+        <item quantity="other">Copied %1$d items to %2$s</item>
+    </plurals>
+    <plurals name="fileop_notice_duplicated">
+        <item quantity="one">Duplicated %1$d item</item>
+        <item quantity="other">Duplicated %1$d items</item>
+    </plurals>
+    <plurals name="fileop_notice_deleted">
+        <item quantity="one">Deleted %1$d item</item>
+        <item quantity="other">Deleted %1$d items</item>
+    </plurals>
+    <plurals name="fileop_notice_failed">
+        <item quantity="one">%1$d item failed: %2$s</item>
+        <item quantity="other">%1$d items failed: %2$s</item>
+    </plurals>
+    <string name="fileop_notice_undone">Undone</string>
 
     <!-- dialogs: ErrorDialog -->
     <string name="errdlg_unexpected">An unexpected error occurred. The app has kept running.</string>
@@ -1421,6 +1530,17 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="storage_cat_projects_desc">Your source code and project settings</string>
     <string name="storage_cat_leftovers_title">Leftover project folders</string>
     <string name="storage_cat_leftovers_desc">Left behind by deleted projects, safe to remove</string>
+    <string name="plugins_leftovers_title">Left by removed plugins</string>
+    <string name="plugins_leftovers_body">Uninstalling a plugin leaves its data behind. Delete it to free the space, or keep it in case you reinstall.</string>
+    <string name="plugins_leftover_delete">Delete</string>
+    <string name="plugins_leftovers_delete_all">Delete all (%1$s)</string>
+    <string name="plugins_leftover_confirm_title">Delete %1$s's data?</string>
+    <string name="plugins_leftovers_confirm_all_title">Delete all removed plugins' data?</string>
+    <string name="plugins_leftover_confirm_body">This frees %1$s. A plugin you reinstall later starts fresh.</string>
+    <string name="storage_cat_plugin_leftovers_title">Removed plugins' data</string>
+    <string name="storage_cat_plugin_leftovers_desc">Left by plugins you uninstalled</string>
+    <string name="storage_clear_plugin_leftovers_title">Delete removed plugins' data?</string>
+    <string name="storage_clear_plugin_leftovers_body">This deletes %1$s that uninstalled plugins left behind. A plugin you reinstall later starts fresh.</string>
     <string name="storage_cat_other_title">Other</string>
     <string name="storage_cat_other_desc">Keystores, backups, and app data</string>
     <string name="plugins_restart_hint">Restart to apply your plugin changes.</string>
@@ -1508,7 +1628,8 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="keystore_empty">No keystores yet. Create or import one to sign release builds.</string>
     <string name="keystore_deleted">Deleted %1$s</string>
     <string name="keystore_row_subtitle">%1$s · key: %2$s</string>
-    <string name="keystore_sha256">SHA-256 %1$s</string>
+    <string name="keystore_copy_fingerprint">Copy %1$s fingerprint</string>
+    <string name="keystore_fingerprint_copied">%1$s copied</string>
     <string name="keystore_expires">expires ~%1$s</string>
     <string name="keystore_cert_unreadable"><![CDATA[Couldn't read the certificate (password may have changed).]]></string>
     <string name="keystore_create_title">New Keystore</string>
@@ -2397,6 +2518,7 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="colors_preview">Preview</string>
     <string name="colors_preview_hint">Tap anything in the sample to jump to the entry that colors it.</string>
     <string name="colors_builtin_notice">%1$s is built in. Your changes are saved to a copy.</string>
+    <string name="colors_plugin_notice">%1$s comes with a plugin. Your changes are saved to a copy.</string>
     <string name="colors_editing_copy">Editing a copy: %1$s</string>
     <string name="colors_duplicate">Duplicate</string>
     <string name="colors_rename">Rename</string>
@@ -2571,11 +2693,14 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="plugin_consent_cap_ui_editor_painter">Draw into the editor</string>
     <string name="plugin_consent_cap_ui_editor_language">Color and comment a language in the editor, including ones the IDE already knows</string>
     <string name="plugin_consent_cap_ui_color_attribute">Add entries to your editor color scheme, and change what the built-in ones look like</string>
+    <string name="plugin_consent_cap_ui_color_scheme">Add color schemes you can pick for the editor</string>
+    <string name="plugin_consent_cap_ui_app_theme">Add app themes you can pick under Appearance</string>
     <string name="plugin_consent_cap_ui_new_file_template">Add kinds of file to the New menu</string>
     <string name="plugin_consent_cap_lang_backend">Teach the editor a language: parsing, completion and errors</string>
     <string name="plugin_consent_cap_lang_server">Run a language server: a separate program that checks, completes and navigates a language</string>
     <string name="plugin_consent_cap_model_module_type">Add a kind of module, and templates that create one</string>
     <string name="plugin_consent_cap_model_facet">Keep configuration of its own in your modules</string>
+    <string name="plugin_consent_cap_model_dependencies">Add libraries and Maven repositories to your projects</string>
     <string name="plugin_consent_cap_interp_run">Run your project's code inside the IDE, to preview or run it</string>
     <string name="plugin_consent_cap_build_task">Add steps to your builds</string>
     <string name="plugin_consent_cap_build_source_generator">Generate source code into your modules</string>

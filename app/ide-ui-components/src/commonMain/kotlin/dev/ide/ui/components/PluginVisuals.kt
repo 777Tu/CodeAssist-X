@@ -83,7 +83,7 @@ enum class CapabilityGroup(val label: StringResource, val glyph: Char) {
 }
 
 fun capabilityGroup(capability: String): CapabilityGroup = when {
-    capability.startsWith("ui.editor") || capability == "ui.colorAttribute" || capability == "ui.keyBinding" -> CapabilityGroup.Editor
+    capability.startsWith("ui.editor") || capability == "ui.colorAttribute" || capability == "ui.colorScheme" || capability == "ui.appTheme" || capability == "ui.keyBinding" -> CapabilityGroup.Editor
     capability.startsWith("ui.") -> CapabilityGroup.Screens
     capability.startsWith("lang.") -> CapabilityGroup.Languages
     capability.startsWith("model.") || capability.startsWith("build.") || capability == "interp.run" -> CapabilityGroup.Projects
@@ -98,7 +98,7 @@ fun capabilityGroup(capability: String): CapabilityGroup = when {
  */
 fun isSensitiveCapability(capability: String): Boolean = capability in SENSITIVE
 
-private val SENSITIVE = setOf("fs.write", "net", "interp.run", "build.task", "build.runTask", "build.sourceGenerator", "lang.server")
+private val SENSITIVE = setOf("fs.write", "model.dependencies", "net", "interp.run", "build.task", "build.runTask", "build.sourceGenerator", "lang.server")
 
 /** [capabilities] grouped in [CapabilityGroup] order; an unknown one lands in Other, verbatim. */
 fun groupCapabilities(capabilities: List<String>): List<Pair<CapabilityGroup, List<String>>> =

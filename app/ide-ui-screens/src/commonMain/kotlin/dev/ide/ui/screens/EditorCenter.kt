@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -182,10 +183,18 @@ internal fun EditorCenter(
     // (derived from the run-task ids), so a non-Android project leaves it null and the chip is hidden. A
     // `variantEpoch` bump recomputes the label + re-analyzes open files after a switch.
     var variantEpoch by remember { mutableStateOf(0) }
-    val variantModule = remember(project.name, variantEpoch) {
-        state.backend.build.runTasks().firstNotNullOfOrNull { t ->
-            listOf("androidRun:", "assemble:", "bundle:").firstOrNull { t.id.startsWith(it) }
-                ?.let { p -> t.id.removePrefix(p).substringBefore(":") }
+    // Off the main thread: runTasks() looks for runnable mains, and while the index is still building (exactly
+    // when the editor first opens) that is a direct scan of every source file that also waits on the Kotlin
+    // parser lock the indexer holds. Read in composition it froze the UI: a Play ANR on 3.39.0
+    // (KotlinMainScan.parse under EditorCenter). The chip appears once the answer lands.
+    val variantModule by produceState<String?>(null, project.name, variantEpoch) {
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                state.backend.build.runTasks().firstNotNullOfOrNull { t ->
+                    listOf("androidRun:", "assemble:", "bundle:").firstOrNull { t.id.startsWith(it) }
+                        ?.let { p -> t.id.removePrefix(p).substringBefore(":") }
+                }
+            }.getOrNull()
         }
     }
     val activeVariant = remember(project.name, variantEpoch, variantModule) {
@@ -695,8 +704,14 @@ private fun EditorDaemonEffect(
     LaunchedEffect(
         active.path, active.session.textRevision,
         state.inlayHintsEnabled, state.semanticHighlightingEnabled, state.codeFoldingEnabled,
-        state.analyzeOnTheFly, state.reparseDelayMs, state.analysisEpoch,
+        state.analyzeOnTheFly, state.reparseDelayMs, state.analysisEpoch, active.session.engineSyncHeld,
     ) {
+        // An in-place rename holds the engine's view of this buffer at its pre-rename text (see
+        // EditorSession.engineSyncHeld): stop any run that would push it, and run again once released.
+        if (active.session.engineSyncHeld) {
+            daemon.close()
+            return@LaunchedEffect
+        }
         // Apply the user's editor/analysis prefs (Settings) to the daemon before each run. Above the large-file
         // threshold the four heavy passes are forced off regardless of the prefs: parsing + resolving a very
         // large file builds an AST and symbol index many times the source size, which OOMs a low-heap device
@@ -722,7 +737,7 @@ private fun EditorDaemonEffect(
     // was edited and may report on any other, so nothing else would bring its results into an open tab.
     LaunchedEffect(daemon) {
         state.backend.editor.diagnosticsInvalidated.collect { paths ->
-            if (active.path in paths) {
+            if (active.path in paths && !active.session.engineSyncHeld) {
                 val doc = active.session.doc
                 daemon.restart { doc.awaitText() }
             }
@@ -732,7 +747,7 @@ private fun EditorDaemonEffect(
     LaunchedEffect(active.path, indexStatus.building) {
         val prev = wasIndexing
         wasIndexing = indexStatus.building
-        if (prev == true && !indexStatus.building) {
+        if (prev == true && !indexStatus.building && !active.session.engineSyncHeld) {
             val doc = active.session.doc
             daemon.restart { doc.awaitText() }
         }

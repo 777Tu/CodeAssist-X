@@ -68,6 +68,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -387,7 +388,7 @@ class IdeServicesBackend(
     /** Turns engine ERROR logs (caught failures) into the non-fatal dialog. Registered on [Log] in [init]. */
     private val errorDialogSink = LogSink { record ->
         val t = record.throwable
-        if (record.level == LogLevel.ERROR && t != null) {
+        if (record.level == LogLevel.ERROR && t != null && !PluginSandbox.isRelayed(record)) {
             showError(t.javaClass.simpleName.ifEmpty { "Error" }, record.message, stackTraceString(t))
         }
     }
@@ -433,10 +434,19 @@ class IdeServicesBackend(
      */
     private val userMessageRelay: dev.ide.platform.Disposable? = manager?.userMessages?.onMessage { posted ->
         runCatching {
+            val (title, body) = dev.ide.core.backend.splitMessage(posted.message.text)
             notificationCenter.post(
                 kind = dev.ide.ui.backend.UiNotificationKind.SYSTEM,
-                title = posted.message.text,
-                body = null,
+                title = title,
+                body = body,
+                // The plugin whose code posted it, so the entry says who is talking.
+                source = runCatching { blamePlugin(posted.origin)?.name }.getOrNull(),
+                foldRepeats = true,
+                level = when (posted.message.severity) {
+                    dev.ide.platform.notify.MessageSeverity.ERROR -> dev.ide.ui.backend.UiNotificationLevel.ERROR
+                    dev.ide.platform.notify.MessageSeverity.WARNING -> dev.ide.ui.backend.UiNotificationLevel.WARNING
+                    else -> dev.ide.ui.backend.UiNotificationLevel.INFO
+                },
             )
         }
     }
@@ -787,12 +797,33 @@ class IdeServicesBackend(
      * there does not end the process either: main returns, the VM waits forever on the non-daemon threads still
      * running, and the frozen window is reported as an ANR ("Input dispatching timed out") instead of a crash.
      */
-    fun installCrashReporting(isFatal: (Thread) -> Boolean = { false }) {
+    fun installCrashReporting(
+        isFatal: (Thread) -> Boolean = { false },
+        /** How long this process has run, for counting crashes that come right after a launch. */
+        processUptimeMs: () -> Long = { Long.MAX_VALUE },
+        /** Turn an installed plugin off when it crashes the process (see PluginCrashGuard). Off in the plugin
+         *  sandbox, whose whole purpose is running a plugin that may crash. */
+        guardAgainstPluginCrashes: Boolean = true,
+    ) {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, t ->
             val fatal = runCatching { isFatal(thread) }.getOrDefault(false)
+            // Whose code it was. An installed plugin runs in this process, so its throw lands here like ours.
+            val plugin = runCatching { blamePlugin(t.stackTrace.asList(), t) }.getOrNull()
             runCatching { Log.logger("uncaught").warn("Uncaught exception on ${thread.name}", t) } // ring/console only
-            if (!fatal) runCatching { showError("Application error", t.message ?: t.javaClass.simpleName, stackTraceString(t)) }
+            // In the plugin's own log too, which its page in Plugins opens: where its author looks.
+            if (plugin != null) runCatching { Log.logger("CodeAssist", plugin.id).error("Uncaught exception on ${thread.name}", t) }
+            if (!fatal) runCatching {
+                val title = if (plugin != null) "${plugin.name} (plugin) failed" else "Application error"
+                showError(title, t.message ?: t.javaClass.simpleName, stackTraceString(t))
+            }
+            if (fatal && guardAgainstPluginCrashes) runCatching {
+                manager?.pluginCrashGuard?.onFatalCrash(
+                    plugin?.let { dev.ide.core.plugins.PluginCrashGuard.Blamed(it.id, it.version, it.name) },
+                    processUptimeMs(),
+                    manager.disabledPlugins(),
+                )
+            }
             runCatching {
                 analytics.track(
                     dev.ide.analytics.AnalyticsEvent(
@@ -800,7 +831,10 @@ class IdeServicesBackend(
                         dev.ide.analytics.EventCategory.CRASH,
                         // Heap state at the crash: lets OOM-adjacent crashes (the 43 OutOfMemoryErrors, plus
                         // any that fail from memory pressure without saying so) be told apart from logic bugs.
-                        dev.ide.analytics.CrashScrub.scrub(t) + ("thread" to thread.name) + MemSample.now().props(),
+                        // `in_plugin` keeps a plugin's crash out of the IDE's own crash-free rate; the plugin's
+                        // id is not sent (an unpublished plugin's id is its developer's package name).
+                        dev.ide.analytics.CrashScrub.scrub(t) + ("thread" to thread.name) + MemSample.now().props() +
+                            (if (plugin != null) mapOf("in_plugin" to "1") else emptyMap()),
                     )
                 )
                 analytics.flush()
@@ -809,6 +843,131 @@ class IdeServicesBackend(
                 // `track` has already persisted the event to disk, so the next launch sends it if this flush could not.
                 if (previous != null) previous.uncaughtException(thread, t) else kotlin.system.exitProcess(10)
             }
+        }
+    }
+
+    /** An installed plugin a stack was blamed on. */
+    data class BlamedPlugin(val id: String, val name: String, val version: String)
+
+    /** The blame built for one set of plugin loaders; rebuilt when a reload replaces the set (plugin sandbox). */
+    @Volatile
+    private var blameCache: Pair<Map<String, ClassLoader>, dev.ide.core.plugins.PluginBlame?>? = null
+
+    private val pluginBlame: dev.ide.core.plugins.PluginBlame?
+        get() {
+            val loaders = manager?.env?.externalPluginLoaders ?: return null
+            blameCache?.let { (forLoaders, blame) -> if (forLoaders === loaders) return blame }
+            val blame = loaders.takeIf { it.isNotEmpty() }?.let { dev.ide.core.plugins.PluginBlame.ofLoaders(it) }
+            blameCache = loaders to blame
+            return blame
+        }
+
+    /** The installed plugin whose code is topmost in [frames] (or, given [t], anywhere in its cause chain). */
+    fun blamePlugin(frames: List<StackTraceElement>, t: Throwable? = null): BlamedPlugin? {
+        val blame = pluginBlame ?: return null
+        val id = (if (t != null) blame.blame(t) else blame.blame(frames)) ?: return null
+        val manifest = manager?.env?.installedPlugins?.firstOrNull { it.manifest.id == id }?.manifest
+        return BlamedPlugin(id, manifest?.name ?: id, manifest?.version ?: "?")
+    }
+
+    /**
+     * The UI process's half of the plugin crash safety net, called once at startup: settle what the load did
+     * (an update lifted a crash suspension, safe mode ran), post what an earlier launch could not say before
+     * it died, and after [dev.ide.core.plugins.PluginCrashGuard.STABLE_AFTER_MS] count this launch as a good one.
+     */
+    fun startPluginCrashSafety() {
+        val m = manager ?: return
+        val guard = m.pluginCrashGuard
+        runCatching { guard.afterLoad(m.env.liftedCrashSuspensions, m.env.safeModeApplied) }
+        runCatching {
+            guard.takeNotice()?.let { n ->
+                notificationCenter.post(
+                    kind = dev.ide.ui.backend.UiNotificationKind.SYSTEM,
+                    title = n.title,
+                    body = n.body,
+                    target = dev.ide.ui.backend.UiNotificationTarget.Screen(PLUGINS_ROUTE),
+                    key = "plugin-crash:${n.pluginId ?: "safe-mode"}",
+                )
+            }
+        }
+        analyticsScope.launch {
+            delay(dev.ide.core.plugins.PluginCrashGuard.STABLE_AFTER_MS)
+            runCatching { guard.markStable() }
+        }
+    }
+
+    /**
+     * An installed plugin crashed one of the app's helper processes ([where], e.g. "the build process"), which
+     * died of it and named it on the way down. Turn it off exactly as a crash of this process would (see
+     * [dev.ide.core.plugins.PluginCrashGuard]), and say so now: unlike a crash of this process, the IDE is
+     * still here to tell the user.
+     */
+    fun suspendPluginAfterProcessCrash(blamed: dev.ide.core.plugins.PluginCrashGuard.Blamed, where: String) {
+        val m = manager ?: return
+        if (blamed.id in m.disabledPlugins()) return
+        runCatching {
+            m.pluginCrashGuard.onFatalCrash(blamed, Long.MAX_VALUE, m.disabledPlugins())
+            // Said below, now; the next launch has nothing left to say about it.
+            m.pluginCrashGuard.takeNotice()
+        }
+        runCatching {
+            Log.logger("CodeAssist", blamed.id).error("${blamed.name} ${blamed.version} crashed $where and was turned off")
+        }
+        runCatching {
+            notificationCenter.post(
+                kind = dev.ide.ui.backend.UiNotificationKind.SYSTEM,
+                title = "${blamed.name} was turned off",
+                body = "It crashed $where. It stays off until a new version is installed, or until you turn it back " +
+                    "on in Plugins.",
+                target = dev.ide.ui.backend.UiNotificationTarget.Screen(PLUGINS_ROUTE),
+                key = "plugin-crash:${blamed.id}",
+            )
+        }
+    }
+
+    /** Per plugin id: how many times this session it stalled the main thread, and the longest stall. */
+    private val pluginStalls = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+
+    /**
+     * The main thread was blocked for [durationMs] and has recovered; [frames] is its stack sampled while it was
+     * stuck. Sent as [dev.ide.analytics.Events.MAIN_STALL] (scrubbed like a crash), and when an installed plugin's
+     * code was on that stack, said in the plugin's log and in one notification per plugin that keeps count,
+     * so a plugin that freezes the IDE is named rather than leaving the IDE to look slow.
+     */
+    fun reportMainStall(frames: List<StackTraceElement>, durationMs: Long, uptimeMs: Long, foreground: Boolean) {
+        val plugin = runCatching { blamePlugin(frames) }.getOrNull()
+        runCatching {
+            val sample = Throwable("main thread stalled").apply { stackTrace = frames.toTypedArray() }
+            analytics.track(
+                dev.ide.analytics.AnalyticsEvent(
+                    dev.ide.analytics.Events.MAIN_STALL,
+                    dev.ide.analytics.EventCategory.CRASH,
+                    mapOf(
+                        "duration_ms" to durationMs.toString(),
+                        "uptime_ms" to uptimeMs.toString(),
+                        "fg" to if (foreground) "1" else "0",
+                        "frames" to dev.ide.analytics.CrashScrub.ownFrames(sample),
+                    ) + (if (plugin != null) mapOf("in_plugin" to "1") else emptyMap()) + MemSample.now().props(),
+                ),
+            )
+        }
+        if (plugin == null) return
+        runCatching {
+            Log.logger("CodeAssist", plugin.id).warn(
+                "Blocked the main thread for ${durationMs} ms; CodeAssist stopped responding meanwhile. " +
+                    "Move this work off the main thread:\n" + frames.take(25).joinToString("\n") { "    at $it" },
+            )
+        }
+        val (count, longest) = pluginStalls.merge(plugin.id, 1 to durationMs) { a, b -> (a.first + b.first) to maxOf(a.second, b.second) }!!
+        runCatching {
+            notificationCenter.post(
+                kind = dev.ide.ui.backend.UiNotificationKind.SYSTEM,
+                title = "${plugin.name} is slowing CodeAssist down",
+                body = "It froze the app ${if (count == 1) "once" else "$count times"} this session " +
+                    "(longest ${(longest + 500) / 1000} s). If it keeps happening, turn it off in Plugins.",
+                target = dev.ide.ui.backend.UiNotificationTarget.Screen(PLUGINS_ROUTE),
+                key = "plugin-stall:${plugin.id}",
+            )
         }
     }
 
@@ -870,6 +1029,8 @@ class IdeServicesBackend(
         const val ANALYTICS_CONSENT_PREF = "analytics.consent"
         const val ANALYTICS_SCOPE_PREF = "analytics.consent.scope"
         const val ANALYTICS_SCOPE_USAGE = "usage"
+        /** The notification route that opens Settings > Plugins on its Installed tab. */
+        const val PLUGINS_ROUTE = "plugins"
     }
 
     /** Make [next] the active project: swap it in, bump the epoch (re-keys UI state), and close the old one. */

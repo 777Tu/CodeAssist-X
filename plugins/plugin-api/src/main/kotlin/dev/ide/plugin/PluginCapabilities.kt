@@ -78,6 +78,12 @@ object PluginCapabilities {
      */
     const val MODEL_FACET = "model.facet"
 
+    /**
+     * Adds libraries, BOMs and Maven repositories to the user's modules (`dev.ide.model.ModuleDependencies`),
+     * which changes their build files and what their code compiles against. Engine facet. Since SPI 3.4.0.
+     */
+    const val MODEL_DEPENDENCIES = "model.dependencies"
+
     /** Reads the files in the user's projects. */
     const val FS_READ = "fs.read"
 
@@ -130,6 +136,18 @@ object PluginCapabilities {
      * unmodified appearance of a built-in language is something a plugin can change. UI facet.
      */
     const val UI_COLOR_ATTRIBUTE = "ui.colorAttribute"
+
+    /**
+     * Ships whole editor color schemes (`dev.ide.plugin.ui.ColorScheme`), listed beside the presets. Read-only
+     * and applied only when the user picks one, so it changes nothing by itself. UI facet. Since SPI 3.4.0.
+     */
+    const val UI_COLOR_SCHEME = "ui.colorScheme"
+
+    /**
+     * Ships whole app themes (`dev.ide.plugin.ui.AppTheme`), the Material colors of the IDE's interface,
+     * offered as Accent choices. Applied only when the user picks one. UI facet. Since SPI 3.4.0.
+     */
+    const val UI_APP_THEME = "ui.appTheme"
 
     /**
      * Adds kinds of file to the file tree's New menu (`dev.ide.plugin.ui.NewFileTemplate`), whose content the

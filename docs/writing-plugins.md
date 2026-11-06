@@ -819,6 +819,47 @@ layer, and a `LanguageBackend` reaches the same attribute by emitting a highligh
 before being dropped, so the two halves need nothing wired between them. See
 [editor-color-schemes.md](editor-color-schemes.md) for the model.
 
+#### A whole color scheme
+
+A theme plugin ships complete schemes instead (since SPI 3.4.0). Design the scheme in the IDE itself
+(Settings → Editor Colors), export it, put the file in your plugin, and hand its text over:
+
+```kotlin
+override fun contribute(ui: UiRegistration) {
+    val json = javaClass.getResourceAsStream("/schemes/midnight.json")!!.reader().readText()
+    ui.colorScheme(ColorScheme(id = "midnight", name = "Midnight", json = json))
+}
+```
+
+Declare `PluginCapabilities.UI_COLOR_SCHEME`. The scheme is listed beside the presets and is read-only like
+them: picking it applies it, editing it gives the user a copy of their own. It is only there while your
+plugin is loaded, so a user who had it active goes back to the default when the plugin is turned off or
+uninstalled; a copy they made stays. `id` is what the user's choice is remembered by, so keep it stable. A
+document the IDE cannot read is skipped and logged rather than failing your plugin's UI.
+
+The document is sparse, the same as a user's scheme: it names what it overrides, and everything else,
+including entries the IDE adds later and other plugins' attributes, falls back through the usual chain. On a
+host older than 3.4.0 `colorScheme` throws `NoSuchMethodError`; call it inside `catch (e: LinkageError)` if
+you support one.
+
+#### A whole app theme
+
+The editor scheme colors code; an app theme colors everything around it: the Material roles of every screen,
+dark and light (since SPI 3.4.0). Design it in Material Theme Builder (m3.material.io/theme-builder), export
+"Material Theme (JSON)", and ship `material-theme.json` as it comes:
+
+```kotlin
+val json = javaClass.getResourceAsStream("/themes/dune.json")!!.reader().readText()
+ui.appTheme(AppTheme(id = "dune", name = "Dune", json = json))
+```
+
+Declare `PluginCapabilities.UI_APP_THEME`. The theme is offered under Settings → Appearance → Accent, after the
+IDE's own accents, and applies only when the user picks it. The builder's `schemes.light` and `schemes.dark`
+are what apply (its contrast variants are ignored), every role it names replaces the IDE's, and its `seed`
+generates any role it leaves out. A theme written by hand may name only a few roles, or only
+`{ "seed": "#RRGGBB" }`. Turned off or uninstalled, your plugin takes the theme with it and the IDE falls back to
+its default accent; the user's choice is kept, so the theme comes back with the plugin.
+
 ---
 
 ### Mark up the editor without owning a language
@@ -1007,6 +1048,30 @@ whose intelligence is not a server (since SPI 3.3.0, in `analysis-api`):
 
 They are asked only for files of the languages they name, and never for `.java` or Kotlin files, which the
 built-in backends answer.
+
+### Members a Kotlin compiler plugin generates
+
+The Kotlin editor builds its symbols from source without running compiler plugins, so a member a compiler
+plugin generates (`Foo.serializer()`, `Foo.CREATOR`, a builder your plugin adds) is unknown to it: uses of it are
+flagged unresolved and it never completes. If your plugin ships or supports a compiler plugin, register its
+editor half on `KOTLIN_GENERATED_MEMBER_EP` (`language-api`, since SPI 3.4.0):
+
+```kotlin
+object AutoCreateMembers : KotlinGeneratedMemberProvider {
+    override val id = "com.example.autocreate"
+
+    override fun staticMembers(cls: KotlinSourceClass, ctx: KotlinGeneratedMemberContext) =
+        if ("AutoCreate" in cls.annotations && ctx.hasType("com.example.autocreate.AutoCreate"))
+            listOf(KotlinGeneratedMember.function("create", cls.constructorParameters.map { (n, t) -> n to t!! }, cls.fqName))
+        else emptyList()
+}
+reg.register(KOTLIN_GENERATED_MEMBER_EP, AutoCreateMembers)
+```
+
+It is asked about every project-source class the editor enumerates, so gate it on your annotation and on your
+runtime being on the classpath, and return an empty list otherwise. Types are Kotlin type text, fully qualified
+where the user's file would not import them. Library classes are not asked: they were compiled with the plugin
+and their real members are in the bytecode. A provider that throws contributes nothing for that class.
 
 ### Run your language's tests
 
@@ -1284,10 +1349,17 @@ selection as plain strings and offsets, with no model object, so it can resolve 
 services fits better on `ACTION_PROVIDER_EP`, which is given an `AnalysisTarget`.
 
 **From the registrar**, for an APPLICATION-scoped service with no scope object in sight.
-`reg.dataDir` is a directory this plugin owns, created on first read and removed when the plugin is
-uninstalled: for a cache, a downloaded index, a small database, anything that is state rather than a setting.
-It is application-scoped, so it survives a project switch; per-project content belongs in the project, through
-`MODULE_RESOURCES` or the file system.
+`reg.dataDir` is a directory this plugin owns, created on first read: for a cache, a downloaded index, a small
+database, anything that is state rather than a setting. It is application-scoped, so it survives a project
+switch; per-project content belongs in the project, through `MODULE_RESOURCES` or the file system.
+
+On a device `dataDir` is on shared storage, which cannot hold a symbolic link and which a file manager can
+read. `reg.privateDataDir` (SPI 3.4.0) is its counterpart on the IDE's private internal storage: use it for an
+unpacked toolchain that links into your native library directory, a package cache with links, or anything no
+other app should see. Do not pick a path of your own under the app's data instead; the IDE does not know it is
+yours. When your plugin is uninstalled, the IDE lists what it left in both directories (on the Plugins screen
+and under Storage) and deletes it when the user asks, never on its own, so a reinstall finds its data again.
+On an older host, reading `privateDataDir` throws `NoSuchMethodError`, which you can catch to fall back.
 
 `reg.nativeLibraryDir` and `reg.nativeLibrary(name)` find the native libraries your plugin **packaged**, which
 the installer unpacked when the plugin app was installed. Package one the way an Android app does, as
@@ -1343,12 +1415,14 @@ A key is usable only if you can name its type, and that differs by tier:
 Resolution itself is available to both tiers: `reg.appServices` for APPLICATION scope, and
 `Module.service` / `Workspace.service` from the callbacks above. What differs is what you can *name*.
 
-Seven engine capabilities are nameable from the published SPI. `WORKSPACE_SERVICE` is the bound `Workspace`.
+Nine engine capabilities are nameable from the published SPI. `WORKSPACE_SERVICE` is the bound `Workspace`.
 Five are the promoted services (`BUILD_CONTROL`, `SYMBOL_SEARCH`, `MODULE_SOURCES`, `MODULE_ANALYSIS`,
 `MODULE_RESOURCES`), each declared in the api module whose types it already speaks, and each typed to a
 *narrowed* interface rather than to the engine class behind it. The seventh is `CODE_INTERPRETER`
 (`interp-api`), the only one at APPLICATION scope: it runs the code in the user's project, and it follows whichever project is open rather
-than being scoped to one (see section 14b). `:ide-core` registers the narrow key
+than being scoped to one (see section 14b). The eighth, `ANDROID_MODULES` (`project-model-api`), is a
+read-only view over the Android module settings with no engine service behind it (section 14d), and the ninth,
+`MODULE_DEPENDENCIES`, an adapter over the engine's dependency service, which speaks the UI's types (section 14e). `:ide-core` registers the narrow key
 alongside its own and resolves both to one instance, so a plugin and the IDE act on the same build, the same
 index, and the same module model.
 
@@ -2704,6 +2778,59 @@ file rather than through it. When the target is a file the user is looking at, u
 an `ActionEffect.ApplyWorkspaceEdit` from a `UI_ACTION_EP` action, or a `WorkspaceEdit` from a `QuickFix`,
 both of which go through the editor's own text path and land in the same undo step as typing.
 
+## 14d. Read an Android module's settings
+
+`ANDROID_MODULES` (`dev.ide.model.AndroidModules`, WORKSPACE, since SPI 3.4.0) is the read half of each
+module's `android { … }` block: what a lint rule needs to know the API level, what a manifest tool needs to
+know the application id, what a Compose-only feature checks before it offers itself.
+
+```kotlin
+val android = workspace.service(ANDROID_MODULES)
+val app = android.info(module) ?: return            // null: not an Android module
+if (app.minSdk < 26 && usesJavaTime && !app.coreLibraryDesugaring) warn("java.time needs API 26 or desugaring")
+val id = app.variants.first { it.name == app.activeVariant }.applicationId   // e.g. com.example.app.debug
+if (app.buildFeatures.compose) offerComposePreview()
+```
+
+The values are the ones the build uses, not the raw DSL. `applicationId` is the namespace when the build file
+sets none; each variant's `applicationId` already has its flavor's id and the flavor and build-type suffixes
+applied; a `versionCode` or `versionName` left at AGP's default reads as null, since the manifest's value then
+wins. `activeVariant` is the variant the editor analyses the module as, the one the user picked under Build
+Variants. A library module has no application id, so it and its variants answer null there.
+
+Every call reads the model as it stands, so the answer follows a settings edit or a sync; there is nothing to
+subscribe to. The view is read-only: the configuration is the user's, edited in the module settings or by the
+Gradle importer. The types are interfaces the IDE implements, so a fact added later is a new member rather
+than a change your compiled plugin would trip on.
+
+## 14e. Find and add Maven dependencies
+
+`MODULE_DEPENDENCIES` (`dev.ide.model.ModuleDependencies`, WORKSPACE, since SPI 3.4.0) is what the
+Dependencies screen does, for a plugin: search, list versions, read a module's resolved graph, and add a
+library, a BOM or a repository. It is what an "add the library for this" quick fix needs: check that the
+coordinate exists and which version is current before offering, instead of writing a guess into the build file.
+
+```kotlin
+val deps = workspace.service(MODULE_DEPENDENCIES)
+val latest = deps.versions("com.squareup.retrofit2:retrofit").firstOrNull() ?: return   // empty: could not tell
+val change = deps.add(module, "com.squareup.retrofit2:retrofit:$latest")
+if (!change.added) reportToUser(change.message)
+
+val graph = deps.resolved(module)
+graph?.conflicts?.forEach { log("${it.artifact}: asked for ${it.requested}, using ${it.chosen}") }
+```
+
+Everything that reaches a repository suspends; call it off the main thread. An unreachable repository answers
+empty or with a failed change rather than throwing, so treat "no versions" as "could not tell", and
+`ArtifactSearch.indexUnavailable` as "could not search". `add` takes the same path as the screen: it resolves
+first, refuses what the module cannot take (an `.aar` on a plain Java module), writes the build file and
+re-indexes, and the user sees the progress. A coordinate without a version is fine when a BOM pins it, and
+`resolved` then reports the version the BOM chose. Only Maven artifacts are listed; module dependencies, the
+SDK and local jars are in the model already.
+
+Declare `PluginCapabilities.MODEL_DEPENDENCIES` (`model.dependencies`) if you add anything: it changes the
+user's build files and what their code compiles against, and the consent screen says so.
+
 ## 15. Ship your plugin as its own app
 
 Everything above is the internal tier, where a plugin is a module inside the IDE. A plugin can instead be a
@@ -2735,6 +2862,45 @@ exactly as written, and so is one whose facet the plugin does not declare (`ui.t
 **Watching your plugin run.** Anything your plugin logs through `reg.logger(...)` is attributed to its plugin
 id, and **Settings > Plugins** offers **Logs** on an installed plugin's row, which opens the Logs viewer
 filtered to that plugin. That is the difference between reading your own output and reading the whole IDE's.
+
+**Trying a build in the plugin sandbox.** A plugin project's Run picker offers **Run plugin in sandbox** first
+(on device). It builds the APK and opens a second copy of CodeAssist, in its own process and with its own
+projects and settings, that loads this build straight from the output: nothing is installed, nothing asks for
+consent, and the IDE you are working in is untouched. The sandbox's status bar is amber and names the plugin, so
+the two windows are never confused.
+
+Run again while the sandbox is open and the new build is swapped into it in place, usually in well under a
+second: the old build is unloaded (its contributions withdrawn and its `dispose` called), the new one registers,
+and the sandbox comes to the front on the project and screen it was showing. Two things do not carry over, so
+close the sandbox from Recents for a fresh start when they matter: work the old build started and did not stop
+in `dispose` (a thread, a posted callback) keeps running the old code, and what an open project took from the
+plugin when it opened stays as it was until that project is opened again. A build that cannot be swapped in
+(it fails to load, or it now depends on another plugin) starts a fresh sandbox instead.
+
+What makes it worth using is what happens when the plugin misbehaves there:
+
+- A throw on the sandbox's main thread ends the sandbox, and the stack trace appears in the IDE you ran it from
+  ("Plugin crashed the sandbox").
+- A main thread blocked for about 3.5 seconds ends the sandbox too, with where it was stuck ("Plugin froze the
+  sandbox"). That is the same work that would make the real IDE stop responding, so move it off the main thread.
+- A shorter freeze (from about 2.5 seconds) is reported inside the sandbox, as a notification naming the plugin.
+
+What the plugin logs in the sandbox through `reg.logger(...)` also shows in the Logs viewer of the IDE you ran it
+from, under the source `sandbox:<plugin id>`, so you can read it without switching windows. A crash report from
+the sandbox ends with the plugin's last few log lines.
+
+The sandbox ends itself before Android records either one, so testing a broken build never counts against the
+IDE's crash or ANR rate on Google Play. A native crash in your plugin's own `.so` is the exception: it goes
+straight to the system.
+
+**What happens to an installed plugin that crashes the IDE.** CodeAssist names a crash after the topmost frame
+whose class came from a plugin's own APK. A crash that takes the IDE down turns that plugin off for the next
+launch, and the user is told which plugin it was and why. It turns back on when a new version is installed
+(any reinstall while the IDE runs counts, so your next build is tried again), or when the user switches it back
+on. The same goes for a crash in the build process, which loads installed plugins too: the plugin is turned
+off, the user is told right away, and the build log says which plugin it was. A plugin that keeps the main
+thread blocked for seconds is named in a notification, and its log gets the stack. If the IDE dies right after starting twice in a row and no plugin can be blamed, the next launch starts
+without any installed plugin and says so; the one after that tries them again.
 
 Three things go into the plugin app, and a fourth if it has UI.
 
@@ -3027,6 +3193,7 @@ Every published extension point, its id, the type it carries, and what contribut
 | `dev.ide.plugin.keymap.KEY_BINDING_EP` | `platform.keyBinding` | `KeyBinding` | A keyboard shortcut for an action |
 | `dev.ide.block.BLOCK_MAPPING_EP` | `platform.blockMapping` | `BlockMapping` | Block-editor projection for a language |
 | `dev.ide.lang.kotlin.compile.KOTLIN_COMPILER_PLUGIN_EP` | `platform.kotlinCompilerPlugin` | `KotlinCompilerPlugin` | A Kotlin compiler plugin |
+| `dev.ide.lang.KOTLIN_GENERATED_MEMBER_EP` | `platform.kotlinGeneratedMembers` | `KotlinGeneratedMemberProvider` | **Published (3.4.0).** The editor half of a compiler plugin: the members it generates |
 | `dev.ide.lang.kotlin.symbols.KOTLIN_SYNTHETIC_MEMBER_EP` | `platform.kotlinSyntheticMember` | `KotlinSyntheticMemberProvider` | Editor visibility of compiler-generated members |
 
 ### Build
@@ -3191,6 +3358,8 @@ with `Module.service(key)` / `Workspace.service(key)` from an extension point ca
 | `dev.ide.build.BUILD_CONTROL` | WORKSPACE | `BuildControl` | Start or stop the build; compile and run a module's `main` and capture its output |
 | `dev.ide.index.SYMBOL_SEARCH` | WORKSPACE | `SymbolSearch` | Symbol and member lookup over the workspace indexes |
 | `dev.ide.model.MODULE_SOURCES` | WORKSPACE | `ModuleSources` | A module's source sets and source roots, including adding one |
+| `dev.ide.model.MODULE_DEPENDENCIES` | WORKSPACE | `ModuleDependencies` | Maven dependencies as the Dependencies screen sees them: search, versions, a module's resolved graph with conflicts, and adding a library, a BOM or a repository (section 14e) |
+| `dev.ide.model.ANDROID_MODULES` | WORKSPACE | `AndroidModules` | Each Android module's configuration as the build resolves it: SDK levels, namespace and application id, build features, build types, flavors, variants with their application ids, and the active variant (section 14d) |
 | `dev.ide.model.MODULE_RESOURCES` | WORKSPACE | `ModuleResources` | A module's resources: generate a file into a content root of any `ContentRole` and have the IDE see it, plus the Android resource model (query `@type/name`, write `res/values` entries and file resources) |
 | `dev.ide.analysis.MODULE_ANALYSIS` | MODULE | `ModuleAnalysis` | The module's `SourceAnalyzer` per language: resolution and diagnostics for code the plugin did not parse |
 | `dev.ide.interp.api.CODE_INTERPRETER` | APPLICATION | `CodeInterpreter` | Run the code in the user's project: lower its Kotlin with no compile step, or run its compiled classes on the bytecode VM (section 14b) |
