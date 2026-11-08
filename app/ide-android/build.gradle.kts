@@ -521,8 +521,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // versionCode must exceed the last published release (the previous-codebase app reached ~29).
-        versionCode = 128
-        versionName = "3.41.0"
+        versionCode = 131
+        versionName = "3.43.0"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -803,7 +803,16 @@ android {
         // (when an NDK is present) would corrupt it.
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += setOf("**/libaapt2.so")
+            // libsandboxexec.so (tools/sandbox-exec) is a static program too: the plugin sandbox's program launcher.
+            keepDebugSymbols += setOf("**/libaapt2.so", "**/libsandboxexec.so")
+        }
+        // Store dex UNCOMPRESSED (and page-aligned) so ART maps it straight from the APK: file-backed pages that
+        // every app process (the IDE, :preview, :build, :sandbox) shares and the kernel can reclaim. Deflated —
+        // AGP's default at minSdk < 28 — ART inflates the ~188 MB of dex into private memory in EACH process
+        // (measured: IDE 346 -> 203 MB PSS, :preview 227 -> 60 MB). Play already ships Android 10+ split APKs
+        // this way; this covers the GitHub release APK and Android 8-9. Costs APK size, not download size on Play.
+        dex {
+            useLegacyPackaging = false
         }
     }
 
@@ -896,6 +905,8 @@ val bundleComposeStringAsset = tasks.register<Copy>("bundleComposeStringAsset") 
     dependsOn(":ide-ui-resources:desktopProcessResources")
     from(project(":ide-ui-resources").layout.buildDirectory.dir("processedResources/desktop/main/composeResources/dev.ide.ui.generated.resources")) {
         include("values*/**/*.cvr")
+        // The backend-text translation tables (Learn, templates, settings), read with Res.readBytes.
+        include("files/**")
     }
     into(layout.buildDirectory.dir("compose-strings-asset/composeResources/dev.ide.ui.generated.resources"))
 }

@@ -315,6 +315,7 @@ import kotlin.io.path.writeText
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -374,6 +375,20 @@ class IdeServices private constructor(
      *  backend points at this engine on project swap. */
     private val env: ApplicationEnvironment,
 ) : AutoCloseable {
+
+    // Declared first, ahead of every init block and initializer below: a stored property declared later is
+    // still null while those run, and these are read by [sourceRoots] / [apiLevelContext], which construction
+    // can reach. (Moving a lazily computed value into a stored property declared mid-class is how
+    // ProjectManager once lost its preferences.)
+    private class CachedRoots(val generation: Int, val roots: List<Path>)
+
+    /** [sourceRoots] per module, with the model revision each was read at. */
+    private val sourceRootsMemo = ConcurrentHashMap<ModuleId, CachedRoots>()
+
+    private class CachedApiLevelContext(val generation: Int, val at: Long, val value: ApiLevelContext?)
+
+    /** The last [apiLevelContext] per module, with the model revision and time it was read at. */
+    private val apiLevelContexts = ConcurrentHashMap<ModuleId, CachedApiLevelContext>()
     // The project-settings cache (see [cachedProjectSettings]), declared first: initializers below read settings.
     private val projectSettingsLock = Any()
     private var projectSettingsCache: java.util.Properties? = null
@@ -491,10 +506,11 @@ class IdeServices private constructor(
     // On a 32-bit ARM process, serialize ALL background index-scope work (the initial build launch, per-save
     // reindex, warm-ups) onto ONE thread so it never fans across the shared pool alongside the editor — part of
     // collapsing concurrent heap churn away from the `ide-engine` thread to stop provoking the 32-bit-ART
-    // torn-reference SIGSEGV (see [dev.ide.platform.RuntimeInfo]). 64-bit / desktop keep the full Default pool.
+    // torn-reference SIGSEGV (see [dev.ide.platform.RuntimeInfo]). 64-bit / desktop keep one thread per core.
+    // Either way they are lowered-priority threads ([BackgroundThreads]), not the shared Default pool, so the
+    // index build yields the CPU to the UI thread and the GC on a slow phone instead of competing with them.
     private val indexDispatcher: CoroutineDispatcher =
-        if (dev.ide.platform.RuntimeInfo.is32Bit) Dispatchers.Default.limitedParallelism(1)
-        else Dispatchers.Default
+        if (dev.ide.platform.RuntimeInfo.is32Bit) sharedIndexDispatcher1 else sharedIndexDispatcher
     private val indexScope = CoroutineScope(SupervisorJob() + indexDispatcher)
 
     /** The project-open index build, so work that must not overlap its memory peak can wait for it. */
@@ -2264,9 +2280,19 @@ class IdeServices private constructor(
     /** Restore a converted project's Gradle build files and re-enter compatibility mode. */
     internal fun revertToGradle(): GradleImport.ConvertOutcome = GradleImport.revertToGradle(workspaceRoot)
 
-    fun sourceRoots(module: Module): List<Path> = module.sourceSets.flatMap { it.contentRoots }
-        .filter { ContentRole.SOURCE in it.roles || ContentRole.GENERATED in it.roles }
-        .map { Paths.get(it.dir.path) }
+    fun sourceRoots(module: Module): List<Path> {
+        // [moduleForFile] asks for every module's roots on each call, and the editor asks that per pass and per
+        // lookup; resolving each content root re-normalized its path every time (~7 MB per 30 s of typing on a
+        // device profile). Kept per module for the model revision it was read at, so a new root shows at once.
+        val generation = store.generation
+        sourceRootsMemo[module.id]?.let { if (it.generation == generation) return it.roots }
+        val roots = module.sourceSets.flatMap { it.contentRoots }
+            .filter { ContentRole.SOURCE in it.roles || ContentRole.GENERATED in it.roles }
+            .map { Paths.get(it.dir.path) }
+        sourceRootsMemo[module.id] = CachedRoots(generation, roots)
+        return roots
+    }
+
 
     /** Content roots to surface in the project tree — code, resources, and assets (so `res/` is editable). */
     fun treeRoots(module: Module): List<Path> {
@@ -2404,6 +2430,20 @@ class IdeServices private constructor(
      * a desktop JDK) and as a warning on the device, whose build compiles against `android.jar`'s `java.*`.
      */
     private fun apiLevelContext(id: ModuleId): ApiLevelContext? {
+        // The checks ask once per call they look at, so a pass asks hundreds of times. Rebuilding meant walking
+        // the workspace for the module and mapping (and normalizing) every boot-classpath path each time, so
+        // keep the answer for the model revision it was read at, re-reading at most every couple of seconds
+        // (a platform installed under the same model revision still turns up).
+        val now = System.nanoTime()
+        val generation = store.generation
+        apiLevelContexts[id]?.let { c -> if (c.generation == generation && now - c.at < PERMISSION_CONTEXT_TTL_NANOS) return c.value }
+        val value = readApiLevelContext(id)
+        apiLevelContexts[id] = CachedApiLevelContext(generation, now, value)
+        return value
+    }
+
+
+    private fun readApiLevelContext(id: ModuleId): ApiLevelContext? {
         val module = store.workspace.projects.firstNotNullOfOrNull { p -> p.modules.firstOrNull { it.id == id } }
             ?: return null
         val facet = module.facets.get(AndroidFacet.KEY)
@@ -6261,4 +6301,15 @@ internal fun <T> runSync(block: suspend () -> T): T {
     block.startCoroutine(Continuation(EmptyCoroutineContext) { result.set(it); done.countDown() })
     if (result.get() == null) done.await()
     return result.get()!!.getOrThrow()
+}
+
+/** Shared by every [IdeServices]: index threads idle out after 30s, so one pool serves every open project. */
+private val sharedIndexDispatcher: CoroutineDispatcher by lazy {
+    BackgroundThreads.pool("ide-index", Runtime.getRuntime().availableProcessors().coerceAtLeast(2))
+        .asCoroutineDispatcher()
+}
+
+/** The 32-bit ART variant: every index-scope task on one thread (see [dev.ide.platform.RuntimeInfo]). */
+private val sharedIndexDispatcher1: CoroutineDispatcher by lazy {
+    BackgroundThreads.single("ide-index").asCoroutineDispatcher()
 }
