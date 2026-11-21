@@ -195,6 +195,11 @@ object AndroidIde {
                 NotificationManagerCompat.from(appContext).areNotificationsEnabled()
             },
         )
+        // The owned layout renderer draws through Compose; the layout services hand its output to plugins as pixels.
+        val layoutFonts = androidx.compose.ui.text.font.createFontFamilyResolver(appContext)
+        backend.ownedLayoutRasterizer = dev.ide.core.backend.OwnedLayoutRasterizer { r, w, h ->
+            dev.ide.ui.editor.preview.rasterizeOwnedLayout(r, w, h, layoutFonts)
+        }
         // Process-wide uncaught-exception handler: report app_crash, keep the app alive behind the non-fatal
         // dialog for a worker-thread crash, and let the system kill the process for a main-thread one (its looper
         // is gone; swallowing it left a frozen process that Play counted as an ANR). See IdeServicesBackend.
@@ -274,12 +279,22 @@ object AndroidIde {
         // the backend is simply not push-reachable until the next one, and nothing the user is doing should
         // wait on it or fail because of it.
         if (!sandbox) registerForPush(appContext, manager, storeAccounts)
+        // Show the backend which build this is. Same terms as push: off the main thread, best-effort, silent.
+        if (!sandbox) startBuildAttestation(appContext, manager, storeAccounts)
         // cold_start: time the whole on-device bootstrap (asset copy + project load + engine init). Emitted
         // once per launch for users who consented; no-op otherwise. Also serves as the per-launch anchor.
         if (backend.diagnostics.analyticsConsent() == true) {
             backend.diagnostics.track(
                 dev.ide.analytics.Events.COLD_START,
                 mapOf("duration_ms" to ((System.nanoTime() - startNs) / 1_000_000).toString())
+            )
+        }
+
+        // The agent outlives the screen (a long turn, the Claude link): keep the process alive and say so.
+        if (!sandbox) {
+            AgentForeground.attach(
+                appContext, backend.agent,
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main),
             )
         }
 
@@ -361,6 +376,11 @@ object AndroidIde {
         val appLogRuntimeJar = runCatching {
             copyAsset(context, "applog-runtime.jar", File(home, "applog-runtime.jar"))
         }.getOrNull()
+        // The bundled jars above (and the bundled kotlin-stdlib), already dexed at app build time, so a user's first
+        // build installs their dex instead of running D8 on them (see BundledDex). Best-effort like the jar.
+        val predexedJars = listOf("kotlin-stdlib", "applog-runtime").mapNotNull { name ->
+            runCatching { name to copyAsset(context, "predexed/$name.dex.zip", File(home, "predexed/$name.dex.zip")).toPath() }.getOrNull()
+        }.toMap()
         val appLogChannel = AppLogChannelImpl()
         // The legacy dex-based custom-view seam is gone (it D8-dexed the user's classes onto a DexClassLoader,
         // which Google Play's Device-and-Network-Abuse "DDL" scorer flags). Custom library AND project views are
@@ -416,6 +436,25 @@ object AndroidIde {
         // "Forward app logs" (Build Runtime page), default on — read lazily like the R8/dex knobs.
         val injectAppLogKey = settingsPrefix + BuiltInSettingsPages.INJECT_APP_LOG
         val appLogEnabledProvider = { managerRef.get()?.preference(injectAppLogKey)?.trim() != "false" }
+        // Prebuilt (already-dexed) library downloads for debug builds: the "Download prebuilt libraries" setting
+        // (Automatically / Wi-Fi only / Off), read per build. A hidden `dexPackUrl` pref points them at a staging
+        // repository instead (how a repository is tried on a device before publishing; "off" also disables).
+        val prebuiltKey = settingsPrefix + BuiltInSettingsPages.PREBUILT_LIBRARIES
+        val dexPackUrlKey = settingsPrefix + "dexPackUrl"
+        val connectivity = context.applicationContext.getSystemService(android.net.ConnectivityManager::class.java)
+        val dexPackUrlProvider: () -> String? = provider@{
+            val manager = managerRef.get()
+            when (manager?.preference(prebuiltKey)?.trim()) {
+                BuiltInSettingsPages.PREBUILT_OFF -> return@provider null
+                BuiltInSettingsPages.PREBUILT_WIFI ->
+                    if (runCatching { connectivity?.isActiveNetworkMetered }.getOrNull() != false) return@provider null
+            }
+            when (val v = manager?.preference(dexPackUrlKey)?.trim()) {
+                null, "" -> dev.ide.android.support.pack.LibraryPack.DEFAULT_BASE_URL
+                "off" -> null
+                else -> v
+            }
+        }
         // Kotlin compilation runs in a PERSISTENT forked VM (`dev.ide.android.fork`): a compile then gets a
         // heap above the app cap and its working set stays off the editor's heap. Unlike the R8/D8 forks the VM
         // is not per invocation — kotlinc's cost is dominated by warm state (the compiler's class-loading and
@@ -484,6 +523,8 @@ object AndroidIde {
             appLogRuntimeJar = appLogRuntimeJar?.toPath(),
             appLogChannel = appLogChannel,
             appLogEnabledProvider = appLogEnabledProvider,
+            dexPackUrlProvider = dexPackUrlProvider,
+            predexedJars = predexedJars,
             customViewRuntime = previewRuntime,
             realViewRuntime = realViewRuntime,
             kotlinPluginLoader = kotlinPluginLoader,
@@ -708,6 +749,32 @@ object AndroidIde {
                     }, "push-register").apply { isDaemon = true }.start()
                 }
         }
+    }
+
+    /**
+     * Register the Play Integrity attestor and make the launch's attestation.
+     *
+     * Off unless the build names a cloud project (`BuildConfig.PLAY_INTEGRITY_PROJECT`) and has a backend to
+     * tell. A launch with a stored session attests when that session is restored (StoreBackend.adoptAccount
+     * calls the attestor with the account), so only a signed-out launch is attested from here.
+     */
+    private fun startBuildAttestation(
+        appContext: Context,
+        manager: ProjectManager,
+        accounts: dev.ide.store.StoreAccountService,
+    ) {
+        val project = BuildConfig.PLAY_INTEGRITY_PROJECT.toLongOrNull() ?: return
+        if (!accounts.authAvailable()) return
+        val attestor = PlayIntegrityAttestor(
+            context = appContext,
+            accounts = accounts,
+            cloudProjectNumber = project,
+            signer = signingCertSha256(appContext)?.let(dev.ide.analytics.Signers::short).orEmpty(),
+            preference = manager::preference,
+            setPreference = manager::setPreference,
+        )
+        manager.applicationContainer.registerServiceIfAbsent(dev.ide.core.BUILD_ATTESTOR) { attestor }
+        if (!accounts.hasStoredSession()) attestor.attest(null)
     }
 
     private fun buildStoreAccounts(context: Context): dev.ide.store.impl.SupabaseAccountService? {
@@ -1006,15 +1073,52 @@ object AndroidIde {
      * treats as a valid home — see `legacyInternalHome` / `importLegacyProjects`).
      */
     fun externalHome(context: Context): File {
+        resolvedExternalHome?.let { return it }
+        precreateExternalFilesDir(context)
         val external = context.getExternalFilesDir(null)
         if (external != null &&
             Environment.getExternalStorageState(external) == Environment.MEDIA_MOUNTED &&
             (external.isDirectory || external.mkdirs()) &&
             external.canWrite()
         ) {
+            resolvedExternalHome = external
             return external
         }
         return context.filesDir
+    }
+
+    /**
+     * The usable external home, once found. Every later caller (there are dozens, some on the main thread)
+     * would otherwise take the context's directory lock and stat the volume again for an answer that does not
+     * change while the process lives. The internal fallback is not kept: storage that was not ready at the
+     * first ask may be by the next.
+     */
+    @Volatile private var resolvedExternalHome: File? = null
+
+    /**
+     * Creates `Android/data/<pkg>/files` before the platform is asked for it.
+     *
+     * `Context.getExternalFilesDir` creates the directory itself when it is missing, and does so while holding
+     * the one lock every directory getter of the context shares. On slow external storage that `mkdir` takes
+     * seconds, so a first launch that resolved the home on a worker thread froze the main thread the moment it
+     * asked the context for any other directory: an ANR with the main thread blocked in `getNoBackupFilesDir`
+     * and the worker inside `mkdirs`. Created here first, outside that lock, the platform's call only finds the
+     * directory there. A failure is left for the platform's own creation, which can also ask the storage
+     * service to make it.
+     */
+    private fun precreateExternalFilesDir(context: Context) {
+        runCatching {
+            val dir = expectedExternalFilesDir(context) ?: return
+            if (!dir.isDirectory) dir.mkdirs()
+        }
+    }
+
+    /** Where `getExternalFilesDir(null)` puts the app's files on the primary volume, worked out without asking
+     *  the context (and so without its lock); null when that volume is not mounted. */
+    internal fun expectedExternalFilesDir(context: Context): File? {
+        if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) return null
+        @Suppress("DEPRECATION") val volume = Environment.getExternalStorageDirectory() ?: return null
+        return File(volume, "Android/data/${context.packageName}/files")
     }
 
     /** The whole CodeAssist app directory (`<external-files>/codeassist`): projects, the SDK `android.jar`,

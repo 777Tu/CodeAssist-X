@@ -2,6 +2,7 @@
 
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -399,7 +400,7 @@ private fun ListPaneHeader(onBack: () -> Unit, onNewModule: (() -> Unit)?) {
         Modifier.fillMaxWidth().height(64.dp).padding(start = 4.dp, end = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        IconButton(onClick = onBack) { Icon(CaIcons.chevronLeft, stringResource(Res.string.back)) }
+        IconButton(onClick = onBack) { Icon(CaIcons.arrowLeft, stringResource(Res.string.back)) }
         Text(
             stringResource(Res.string.modcfg_title_modules), color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -575,7 +576,7 @@ private fun ModuleDetailHeader(
             .padding(start = if (onBack != null) 4.dp else gutter, end = (gutter - 12.dp).coerceAtLeast(4.dp), top = 12.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (onBack != null) IconButton(onClick = onBack) { Icon(CaIcons.chevronLeft, stringResource(Res.string.back)) }
+        if (onBack != null) IconButton(onClick = onBack) { Icon(CaIcons.arrowLeft, stringResource(Res.string.back)) }
         ModuleTypeTile(typeDisplay, 44.dp)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(name, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -984,7 +985,7 @@ private fun NewModuleDialog(
 
                 Text(stringResource(Res.string.modcfg_new_module), color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 440.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 440.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { distinctKeys {
                     item("name") {
                         OutlinedTextField(
                             value = name,
@@ -1031,7 +1032,7 @@ private fun NewModuleDialog(
                         }
                     }
                     itemsKeyed(forms, key = { it.table }) { form -> FacetPanel(form, codeFont, twoColumn = false) }
-                }
+                } }
                 Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Spacer(Modifier.weight(1f))

@@ -2,10 +2,14 @@
 
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
+import dev.ide.ui.itemsKeyed
 import dev.ide.ui.backend.localized
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.hoverable
@@ -18,8 +22,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -36,12 +38,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -52,7 +54,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -64,8 +65,6 @@ import dev.ide.ui.components.PrimaryButton
 import dev.ide.ui.components.pressScale
 import dev.ide.ui.generated.resources.Res
 import dev.ide.ui.generated.resources.back
-import dev.ide.ui.generated.resources.toggle_off
-import dev.ide.ui.generated.resources.toggle_on
 import dev.ide.ui.generated.resources.choose_start_point
 import dev.ide.ui.generated.resources.create_project
 import dev.ide.ui.generated.resources.creating
@@ -79,6 +78,7 @@ import dev.ide.ui.icons.TreeIcons
 import dev.ide.ui.theme.resolveTint
 import dev.ide.ui.theme.Ca
 import org.jetbrains.compose.resources.stringResource
+import dev.ide.ui.theme.eyebrow
 
 /**
  * The Create-Project flow: a template gallery ([TemplateGallery], from [IdeBackend.projectTemplates]) followed
@@ -113,7 +113,8 @@ fun CreateProjectScreen(
             )
         } else {
             Column(
-                Modifier.widthIn(max = 640.dp).fillMaxSize().padding(horizontal = 24.dp, vertical = 32.dp),
+                // The gallery's own gutter and top inset, so the header does not jump between the two steps.
+                Modifier.widthIn(max = 640.dp).fillMaxSize().padding(horizontal = 16.dp).padding(top = 16.dp, bottom = 24.dp),
             ) {
                 Configure(
                     backend = backend,
@@ -238,10 +239,10 @@ private fun TemplateGrid(
                 item(key = "header:${cat.key}", span = { GridItemSpan(maxLineSpan) }) {
                     SectionLabel(LocalBackendText.current.tr(cat.label), Modifier.padding(top = if (i == 0) 0.dp else 12.dp))
                 }
-                items(cat.templates, key = { it.id }) { t -> TemplateCard(t, onClick = { onPick(t) }) }
+                itemsKeyed(cat.templates, key = { it.id }) { t -> TemplateCard(t, onClick = { onPick(t) }) }
             }
         } else {
-            items(templates, key = { it.id }) { t -> TemplateCard(t, onClick = { onPick(t) }) }
+            itemsKeyed(templates, key = { it.id }) { t -> TemplateCard(t, onClick = { onPick(t) }) }
         }
     }
 }
@@ -259,8 +260,8 @@ private fun TemplateCard(template: UiProjectTemplate, onClick: () -> Unit) {
             .fillMaxWidth()
             .pressScale(interaction)
             .clip(shape)
-            .background(if (hovered) c.surfaceContainerHigh else c.surface)
-            .border(1.dp, if (hovered) c.outline else c.outlineVariant, shape)
+            // A filled tonal card, as on Learn and in Settings, rather than an outline on the page colour.
+            .background(if (hovered) c.surfaceContainerHigh else c.surfaceContainer)
             .hoverable(interaction)
             .clickable(interaction, indication = null, onClick = onClick)
             .padding(14.dp),
@@ -295,7 +296,7 @@ private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text.uppercase(),
         color = MaterialTheme.colorScheme.outline,
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.eyebrow,
         fontWeight = FontWeight.SemiBold,
         modifier = modifier,
     )
@@ -365,12 +366,12 @@ private fun CategoryChips(
         Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = gutter),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    ) { distinctKeys {
         item("all") { Chip(stringResource(Res.string.templates_all), total, selected == null) { onSelect(null) } }
-        items(categories, key = { it.key }) { cat ->
+        itemsKeyed(categories, key = { it.key }) { cat ->
             Chip(LocalBackendText.current.tr(cat.label), cat.templates.size, selected == cat.key) { onSelect(cat.key) }
         }
-    }
+    } }
 }
 
 /** Below this the categories collapse from a rail into a row of chips. */
@@ -438,14 +439,7 @@ private fun ParamControl(param: UiTemplateParam, value: String, onChange: (Strin
         ) {
             Text(param.label, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.bodyLarge)
             val on = value.toBooleanStrictOrNull() ?: false
-            Box(
-                Modifier
-                    .background(if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(Ca.radius.pill))
-                    .clickable { onChange((!on).toString()) }
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
-            ) {
-                Text(if (on) stringResource(Res.string.toggle_on) else stringResource(Res.string.toggle_off), color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-            }
+            Switch(checked = on, onCheckedChange = { onChange(it.toString()) })
         }
     }
 }
@@ -454,54 +448,34 @@ private fun ParamControl(param: UiTemplateParam, value: String, onChange: (Strin
 
 @Composable
 private fun Header(title: String, subtitle: String, onBack: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        val interaction = remember { MutableInteractionSource() }
-        Box(
-            Modifier
-                .size(36.dp)
-                .pressScale(interaction)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Ca.radius.sm))
-                .clickable(interaction, indication = null, onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(CaIcons.chevronLeft, stringResource(Res.string.back), Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        // Pulled left by the button's own padding, so the arrow lines up with the fields below it.
+        IconButton(onClick = onBack, modifier = Modifier.offset(x = (-12).dp)) {
+            Icon(CaIcons.arrowLeft, stringResource(Res.string.back), Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
         }
         Column {
             Text(title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
 private fun FormField(label: String, value: String, placeholder: String, onChange: (String) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        FieldLabel(label)
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(44.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Ca.radius.control))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(Ca.radius.control))
-                .padding(horizontal = 12.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            if (value.isEmpty()) Text(placeholder, color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodyMedium)
-            BasicTextField(
-                value = value,
-                onValueChange = onChange,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        placeholder = { Text(placeholder) },
+        singleLine = true,
+        shape = RoundedCornerShape(Ca.radius.control),
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
 private fun FieldLabel(text: String) {
-    Text(text, color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
 }
 
 @Composable
@@ -529,7 +503,7 @@ private fun Chip(label: String, count: Int?, selected: Boolean, onClick: () -> U
 /** Render a template's icon id through the shared [TreeIcons] registry (same icons as the file tree). */
 @Composable
 private fun TemplateGlyph(iconId: String) {
-    Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Ca.radius.md)), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(Ca.radius.md)), contentAlignment = Alignment.Center) {
         when (val ic = TreeIcons.resolve(iconId)) {
             is TreeIcon.Glyph -> Icon(ic.image, null, Modifier.size(24.dp), tint = resolveTint(ic.tint))
             is TreeIcon.Folder -> Icon(ic.closed, null, Modifier.size(24.dp), tint = resolveTint(ic.tint))

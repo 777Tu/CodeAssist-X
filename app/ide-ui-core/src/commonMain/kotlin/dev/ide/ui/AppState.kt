@@ -321,6 +321,7 @@ class IdeUiState(
         launch { persistTreeExpansion() }
         launch { syncExternalWrites() }
         launch { reanalyzeWhenInspectionsReturn() }
+        launch { reanalyzeOnRequest() }
         launch { syncBookmarks() }
     }
 
@@ -403,6 +404,14 @@ class IdeUiState(
             if ((previous - ids).isNotEmpty()) reanalyzeOpenFiles()
             previous = ids
         }
+    }
+
+    // Something the engine cannot see a file change for asked for the open files to be analyzed again (a plugin
+    // whose findings hang off its own settings or tooling). One generation of [analysisEpoch] covers it: the
+    // focused tab's daemon and the background-tab sweep both run again. `drop(1)` skips the value collection
+    // starts on, which is not a request.
+    private suspend fun reanalyzeOnRequest() {
+        backend.editor.reanalysisRequests.drop(1).collect { analysisEpoch++ }
     }
 
     // Reopen the tabs from the last session with this project. A first open starts on the empty editor, which
@@ -911,6 +920,8 @@ class IdeUiState(
     var wrapIndentEnabled by mutableStateOf(true)
     /** Draggable bar along the editor's bottom edge while a line runs past the view; none while wrapping. */
     var horizontalScrollbarEnabled by mutableStateOf(true)
+    /** The line-number gutter scrolls sideways with the code instead of staying pinned at the left edge. */
+    var scrollGutterEnabled by mutableStateOf(false)
     /** How the editor draws its caret, as a `CaretStyle` id ("line", "block", "underline", "candle"). */
     var caretStyle by mutableStateOf("line")
     /** Free (two-axis) touch scrolling: a single drag pans both axes at once (off = orientation-locked). */
@@ -924,6 +935,8 @@ class IdeUiState(
     var localHistoryOpen by mutableStateOf(false)
     /** Allow the soft keyboard's autocorrect / suggestions / auto-space (off = raw code input). */
     var softKeyboardSuggestions by mutableStateOf(true)
+    /** The coding-symbol bar that sits on the soft keyboard while typing, on the phone and the wide layout alike. */
+    var symbolBarEnabled by mutableStateOf(true)
 
     /** The keyboard symbol-bar keys, from the effective customization set (project ▸ global ▸ shipped defaults).
      *  Seeded in [init]; re-read via [refreshSymbolKeys] after the Symbols editor saves. */
@@ -1001,12 +1014,14 @@ class IdeUiState(
         wordWrapEnabled = s.wordWrap
         wrapIndentEnabled = s.wrapIndent
         horizontalScrollbarEnabled = s.horizontalScrollbar
+        scrollGutterEnabled = s.scrollGutter
         caretStyle = s.caretStyle
         twoAxisScrollEnabled = s.twoAxisScroll
         pinchZoomEnabled = s.pinchZoom
         volumeKeysMoveCaret = s.volumeKeysMoveCaret
         inlineBlameEnabled = s.inlineBlame
         softKeyboardSuggestions = s.softKeyboardSuggestions
+        symbolBarEnabled = s.symbolBar
     }
 
     /**
@@ -1409,9 +1424,12 @@ class IdeUiState(
                 // Reapply the saved per-tab view state to the tab we just opened. setCaret + the scroll anchor
                 // coerce into the (possibly changed) buffer, so a shrunken file can't strand the caret/scroll.
                 openFiles.firstOrNull { it.path == tab.path }?.let { f ->
-                    // Drop a persisted Blocks mode if the block editor is disabled (plugin off) — restore as text.
+                    // Drop a persisted Blocks mode if the block editor is disabled (plugin off) or has no
+                    // blocks for this file's language: restore as text.
                     editorViewModeOf(tab.viewMode)
-                        ?.takeUnless { it == EditorViewMode.Blocks && !blocksEnabled }
+                        ?.takeUnless {
+                            it == EditorViewMode.Blocks && !(blocksEnabled && backend.blocks.blocksSupport(tab.path))
+                        }
                         ?.let { f.viewMode = it }
                     f.session.setCaret(tab.caret)
                     f.session.viewportTopLine = tab.scrollLine.coerceAtLeast(0)

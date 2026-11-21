@@ -250,6 +250,7 @@ import dev.ide.model.ResourceConflict
 import dev.ide.model.ResourceWrite
 import dev.ide.model.SdkResolution
 import dev.ide.model.contentRootsFor
+import dev.ide.model.derivedOutputDirs
 import dev.ide.model.impl.DefaultFileIconProvider
 import dev.ide.core.kmp.KmpShapes
 import dev.ide.core.kmp.KmpSwitch
@@ -328,6 +329,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -402,6 +404,7 @@ class IdeServices private constructor(
     internal var lastOpenPeak: MemSample? = null
     private val memLog = Log.logger("ide.mem")
     private val decorationLog by lazy { Log.logger("ide.editorDecorations") }
+    private val indexLog by lazy { Log.logger("index.repo") }
 
     // Platform ports resolved from the application service container the host ([ProjectManager]) registered
     // them on — not constructor-injected. Absent (desktop / a standalone test with no host) → null → the
@@ -520,6 +523,43 @@ class IdeServices private constructor(
     /** The shared library/SDK segment store (see [indexService]). */
     private val indexCacheRoot: Path = (sharedCachesRoot ?: store.rootPath).resolve("caches").resolve("index")
 
+    /** Each content-keyed library `res/` folder of the last index scope, by its segment key. Read when a library
+     *  resource declaration's portable path is turned into a file ([EngineContext.libraryResourceRoot]). */
+    @Volatile private var libraryResourceRootsByKey: Map<String, Path> = emptyMap()
+
+    /** The editor index's scope (library jars, library res folders and their content ids), for a publisher. */
+    internal fun libraryIndexScope(): IndexScope = buildIndexScope()
+
+    /** Each library jar and `res/` folder in [scope] that has a content id, to its segment key. */
+    internal fun librarySegmentKeys(scope: IndexScope): Map<Path, String> =
+        scope.stableJarIds.filterKeys { it in scope.libraryJars }.mapValues { dev.ide.core.index.LibraryIndexRepository.jarKey(it.value) } +
+            scope.stableJarIds.filterKeys { it in scope.libraryResourceRoots }.mapValues { dev.ide.core.index.LibraryIndexRepository.resKey(it.value) } +
+            scope.stableJarIds.filterKeys { it in scope.sourceArchives }.mapValues { dev.ide.core.index.LibraryIndexRepository.srcKey(it.value) }
+
+    /** The index extensions this workspace runs (built-in and plugin-contributed), each with its version. */
+    internal fun indexExtensions() = platform.extensions.extensions(INDEX_EP)
+
+    /** Library jars' content ids, the path-free key of their index segments (cached beside the segments). */
+    private val jarContentIds by lazy { dev.ide.core.index.JarContentIds(indexCacheRoot.resolve(".jar-ids")) }
+
+    /** One index repository client per repository URL, so each remembers what it found missing. */
+    private val indexRepositories = java.util.concurrent.ConcurrentHashMap<String, dev.ide.core.index.LibraryIndexRepository>()
+
+    /**
+     * Download the prebuilt index segments of [scope]'s library jars that this cache lacks, before the pass would
+     * build them on the device. Only where the host allows prebuilt downloads (the "Download prebuilt libraries"
+     * setting, on a device); a failure just leaves them to be built here.
+     */
+    private fun prefetchLibraryIndexes(scope: IndexScope) {
+        val url = runCatching { androidTools?.dexPackUrl?.invoke() }.getOrNull() ?: return
+        val indexes = platform.extensions.extensions(INDEX_EP).associate { it.id.value to it.version }
+        indexRepositories.computeIfAbsent(url) { dev.ide.core.index.LibraryIndexRepository(baseUrl = it) }
+            .fetch(librarySegmentKeys(scope), indexCacheRoot, indexes, log = { indexLog.info(it) },
+                // Downloading (and unpacking) competes with a running build for a small device's CPU and network;
+                // wait it out. The pass that needs the segments waits with it, capped (BuildActivity.MAX_WAIT_MS).
+                beforeDownload = { kotlinx.coroutines.runBlocking { dev.ide.platform.BuildActivity.awaitIdle() } })
+    }
+
     /** The workspace index (class names, packages, members, source symbols). Built in the background. The index
      *  extensions are contributed app-global (see [registerStaticPlugins]); this just queries them. */
     val indexService: IndexService = run {
@@ -549,6 +589,8 @@ class IdeServices private constructor(
             // Library source archives feed only parameter names and javadoc; build them after each pass so they
             // never hold up readiness or the next pass (they were the costliest artifacts in the field).
             deferSourceArchives = true,
+            // A source root that is its module's own directory holds the build output too; keep it out of the index.
+            excludedDirs = { excludedDirs() },
         )
     }
 
@@ -599,6 +641,7 @@ class IdeServices private constructor(
         override val workspaceRoot get() = this@IdeServices.workspaceRoot
         override val sharedCachesRoot get() = this@IdeServices.sharedCachesRoot
         override val indexService get() = this@IdeServices.indexService
+        override fun libraryResourceRoot(segmentKey: String) = libraryResourceRootsByKey[segmentKey]
         override val keystoreRegistry get() = this@IdeServices.keystoreRegistry
         override val sdkManager get() = this@IdeServices.sdkManager
         override val dependencies get() = this@IdeServices.dependencies
@@ -617,6 +660,7 @@ class IdeServices private constructor(
 
         override fun sourceRoots(module: Module) = this@IdeServices.sourceRoots(module)
         override fun treeRoots(module: Module) = this@IdeServices.treeRoots(module)
+        override fun contentFilesUnder(root: Path) = this@IdeServices.contentFilesUnder(root)
         override fun overlayText(path: Path) = this@IdeServices.openDocuments[path]
         override fun openDocumentPaths(): Set<Path> = this@IdeServices.openDocuments.keys.toSet()
         override fun flushOpenDocuments() = this@IdeServices.flushOpenDocuments()
@@ -672,6 +716,7 @@ class IdeServices private constructor(
 
         override fun invalidateAnalyzers() = this@IdeServices.invalidateAnalyzers()
         override fun resyncIndex() = this@IdeServices.resyncIndex(IndexPassTrigger.MODULE)
+        override fun requestReanalysis(paths: Collection<Path>?) = this@IdeServices.requestReanalysis(paths)
         override val events get() = this@IdeServices.events
     }
 
@@ -1000,10 +1045,7 @@ class IdeServices private constructor(
     /** Cheap check (bounded, short-circuiting) for any `.kt` under the project's source roots. */
     fun hasKotlinSources(): Boolean = runCatching {
         modules().any { m ->
-            sourceRoots(m).any { root ->
-                Files.exists(root) && Files.walk(root)
-                    .use { s -> s.anyMatch { it.fileName?.toString()?.endsWith(".kt") == true } }
-            }
+            sourceRoots(m).any { root -> contentFilesUnder(root).any { it.fileName?.toString()?.endsWith(".kt") == true } }
         }
     }.getOrDefault(false)
 
@@ -1035,23 +1077,44 @@ class IdeServices private constructor(
         val jdt = modules().map { analyzerFor(it) }.filterIsInstance<JvmIndexScopeProvider>()
         val libraryJars =
             (jdt.flatMap { it.classpathJarPaths } + listOfNotNull(BundledKotlinStdlib.jar())).distinct()
+        val sourceArchives = jdt.flatMap { it.librarySourceArchives }.distinct()
+        val libraryResourceRoots = modules().flatMap { m ->
+            if (m.facets.get(AndroidFacet.KEY) != null) runCatching {
+                AndroidResources.libraryResourceDirs(m, store.workspace)
+            }.getOrDefault(emptyList())
+            else emptyList()
+        }.distinct()
+        return buildScope(jdt, libraryJars, sourceArchives, libraryResourceRoots).also { scope ->
+            libraryResourceRootsByKey = scope.libraryResourceRoots.mapNotNull { root ->
+                scope.stableJarIds[root]?.let { dev.ide.core.index.LibraryIndexRepository.resKey(it) to root }
+            }.toMap()
+        }
+    }
+
+    private fun buildScope(
+        jdt: List<JvmIndexScopeProvider>, libraryJars: List<Path>, sourceArchives: List<Path>, libraryResourceRoots: List<Path>,
+    ): IndexScope {
         return IndexScope(
             sourceRoots = jdt.flatMap { it.sourceRootPaths }.distinct(),
             // The bundled kotlin-stdlib is always in scope (even for an editor-only Kotlin project that never
             // declared the dependency) so the Kotlin backend's callable/type-shape indexes carry `println`/
             // `listOf`/`String.trim`/… — the backend is a pure index consumer with no live stdlib jar scan.
             libraryJars = libraryJars,
-            // Bundled/SDK jars (android.jar + desugar stubs, the bundled kotlin-stdlib) are re-extracted from
-            // app assets, so their on-disk mtime is not stable across launches and the default path+size+mtime
-            // key re-indexes them every cold start (android.jar alone is ~90% of all index entries). Give them a
-            // PATH-free `<name>-<size>` key so the segment is reused across launches (and later matches a prebuilt
-            // segment shipped under the same id). Keyed by the same Path objects that appear in [libraryJars].
-            stableJarIds = libraryJars.mapNotNull { p -> bundledStableJarId(p)?.let { p to it } }
-                .toMap(),
+            // Every jar is keyed by its CONTENT ([JarContentIds]), not its path and modified time: the bundled jars
+            // are re-extracted from app assets (unstable mtime), the bundled kotlin-stdlib exists at more than one
+            // path, and a segment built for the same jar anywhere (another project, the APK's prebuilt segments,
+            // the index repository via [prefetchLibraryIndexes]) has to be the one looked up here.
+            stableJarIds = (libraryJars.mapNotNull { p -> jarContentIds.idOf(p)?.let { p to it } } +
+                // A Maven AAR's res/ folder is keyed by the AAR's content, like its jars (the same map keys both;
+                // see IndexScope), so its segments are shared and can be prebuilt. Other res roots keep their key.
+                libraryResourceRoots.mapNotNull { r -> aarOf(r)?.let { jarContentIds.idOf(it) }?.let { r to it } } +
+                // A library's -sources.jar likewise (the source-doc index: parameter names and javadoc).
+                sourceArchives.filter { Files.isRegularFile(it) }.mapNotNull { a -> jarContentIds.idOf(a)?.let { a to it } })
+                .toMap().also { jarContentIds.flush() },
             jdkHome = jdt.firstNotNullOfOrNull { it.jdkHome },
             // Attached library/SDK SOURCE archives (incl. the downloaded JDK src.zip, folded in by the JDT
             // branch of analyzerFor) → the source-doc index: real param names + javadoc/KDoc.
-            sourceArchives = jdt.flatMap { it.librarySourceArchives }.distinct(),
+            sourceArchives = sourceArchives,
             // Index res/ XML. The project's OWN + dependency-module res goes to the resident source side
             // (editable); immutable dependency/AAR res goes to disk segments ([libraryResourceRoots]) so a
             // Material/AndroidX resource set (a ~600 KB merged values.xml + hundreds of files) is parsed once
@@ -1064,15 +1127,15 @@ class IdeServices private constructor(
                 }.getOrDefault(emptyList())
                 else resourceRoots(m)
             }.distinct(),
-            libraryResourceRoots = modules().flatMap { m ->
-                if (m.facets.get(AndroidFacet.KEY) != null) runCatching {
-                    AndroidResources.libraryResourceDirs(
-                        m, store.workspace
-                    )
-                }.getOrDefault(emptyList())
-                else emptyList()
-            }.distinct(),
+            libraryResourceRoots = libraryResourceRoots,
         )
+    }
+
+    /** The `.aar` a dependency `res/` folder was exploded from (`<a>-<v>.aar` beside `<a>-<v>-exploded/res`). */
+    private fun aarOf(res: Path): Path? {
+        val exploded = res.parent ?: return null
+        val name = exploded.fileName?.toString()?.takeIf { it.endsWith("-exploded") } ?: return null
+        return exploded.resolveSibling(name.removeSuffix("-exploded") + ".aar").takeIf { Files.isRegularFile(it) }
     }
 
     /** How long a resync waits before starting, so a burst of commits (a reconcile loop) becomes one pass. */
@@ -1115,6 +1178,12 @@ class IdeServices private constructor(
             if (!DeviceMemory.isLow) prewarmResourceRepositories()
             runCatching {
                 if (invalidate) indexService.invalidate()
+                // Every pass, not only the project-open one, waits for the app's prebuilt segments to be fully
+                // unpacked (once per app version; a marker check after that). A pass that started while they were
+                // still being copied found some of android.jar's segments missing and rebuilt them on the phone
+                // (~100 s on a 2 GB device). Synchronized, so a second engine in the process waits for the first.
+                if (androidTools != null) PrebuiltIndexSegments.ensureInstalled(indexCacheRoot)
+                prefetchLibraryIndexes(scope)
                 indexService.ensureUpToDate(scope)
             }
             if (DeviceMemory.isLow) prewarmResourceRepositories()
@@ -1327,9 +1396,7 @@ class IdeServices private constructor(
             .filter { ContentRole.SOURCE in it.roles || ContentRole.GENERATED in it.roles }
             .map { Paths.get(it.dir.path) }
             .any { root ->
-                Files.isDirectory(root) && runCatching {
-                    Files.walk(root).use { s -> s.anyMatch { it.toString().endsWith(".kt") } }
-                }.getOrDefault(false)
+                contentFilesUnder(root).any { it.toString().endsWith(".kt") }
             }
 
     /**
@@ -1409,6 +1476,25 @@ class IdeServices private constructor(
         openDocuments[norm] = text
         diskBaselines[norm] = text
         overlayChanged(norm)
+    }
+
+    private val _reanalysisEpoch = MutableStateFlow(0)
+
+    /**
+     * Bumped each time something asked for the open files to be analyzed again ([requestReanalysis]). The editor
+     * collects it and runs a pass over its tabs. A flow rather than a call into the UI because the engine holds
+     * no reference to the editor, and a conflating one because several requests in a row need only one pass.
+     */
+    val reanalysisEpoch: StateFlow<Int> get() = _reanalysisEpoch
+
+    /**
+     * Ask the editor to re-analyze the open files among [paths], or all of them when [paths] is null. A request
+     * naming no open file does nothing: a closed file shows no diagnostics, and is analyzed when it opens.
+     * "Open" is what holds a live buffer here, which is every editor tab.
+     */
+    fun requestReanalysis(paths: Collection<Path>?) {
+        if (paths != null && paths.none { openDocuments.containsKey(it.toAbsolutePath().normalize()) }) return
+        _reanalysisEpoch.update { it + 1 }
     }
 
     /** Called by the editor on every change so cross-file analysis sees the latest text. */
@@ -1701,6 +1787,11 @@ class IdeServices private constructor(
     // the symbol service — which caches by list identity — picks up resource changes.
     private val kotlinSyntheticCache = ConcurrentHashMap<String, List<SyntheticClass>>()
 
+    /** The `R` classes [module]'s code can name: its own and one per library package, each holding what that
+     *  package declares. For the fix that points a resource read through the wrong `R` at the right one. */
+    internal fun rClassesFor(module: Module): List<SyntheticClass> =
+        runCatching { kotlinSyntheticClasses(module) }.getOrDefault(emptyList()).filter { it.fqName.endsWith(".R") }
+
     /**
      * The synthetic ("light") classes a Kotlin file in [module] should resolve — Android `R`/`BuildConfig`,
      * ViewBinding, etc. — but NOT the Kotlin `<File>Kt` facades: those are Java-visible shapes of this
@@ -1775,6 +1866,7 @@ class IdeServices private constructor(
         resDiskFingerprints.clear()
         resourceModel.clear()
         customViewCache.clear()
+        runtimeLibsCache.clear()
         frameworkResCache.clear()
     }
 
@@ -1918,16 +2010,6 @@ class IdeServices private constructor(
             isKotlinPath(path) -> kotlinLightGeneration.incrementAndGet()
             path.toString().endsWith(".java") -> javaBufferGeneration.incrementAndGet()
         }
-    }
-
-    /** The IDE's stable, path-free index-segment key for a BUNDLED jar (android.jar / desugar stubs / the
-     *  bundled kotlin-stdlib; re-extracted from assets, so mtime is unstable), or null for a normal jar. */
-    private fun bundledStableJarId(p: Path): String? {
-        val norm = p.toAbsolutePath().normalize().toString()
-        val bundled = (compileBootClasspath + listOfNotNull(BundledKotlinStdlib.jar()))
-            .map { it.toAbsolutePath().normalize().toString() }
-        if (norm !in bundled) return null
-        return PrebuiltIndexSegments.stableId(p)
     }
 
     private fun fqcnOf(path: Path, text: String): String? {
@@ -2280,6 +2362,25 @@ class IdeServices private constructor(
     /** Restore a converted project's Gradle build files and re-enter compatibility mode. */
     internal fun revertToGradle(): GradleImport.ConvertOutcome = GradleImport.revertToGradle(workspaceRoot)
 
+    @Volatile private var excludedDirsMemo: Pair<Int, Set<Path>>? = null
+
+    /**
+     * The directories that hold derived output and are not project content, absolute and normalized: every
+     * content root a module declares with [ContentRole.EXCLUDED] (`bin/`, `obj/`), and each module's own
+     * `build/` directory. They only matter where one sits inside a source root, which happens when a root is
+     * the module's own directory: a sweep then skips them ([contentFilesUnder]) and the tree draws them as output.
+     */
+    fun excludedDirs(): Set<Path> {
+        val generation = store.generation
+        excludedDirsMemo?.let { if (it.first == generation) return it.second }
+        val out = modules().flatMapTo(HashSet()) { it.derivedOutputDirs() }
+        excludedDirsMemo = generation to out
+        return out
+    }
+
+    /** Every file under [root] that is project content: the walk skips [excludedDirs]. */
+    fun contentFilesUnder(root: Path): List<Path> = dev.ide.model.contentFilesUnder(root, excludedDirs())
+
     fun sourceRoots(module: Module): List<Path> {
         // [moduleForFile] asks for every module's roots on each call, and the editor asks that per pass and per
         // lookup; resolving each content root re-normalized its path every time (~7 MB per 30 s of typing on a
@@ -2454,8 +2555,11 @@ class IdeServices private constructor(
         }
         val platformJar = SdkResolution.sdkFor(store.workspace, module)?.bootClasspath?.firstOrNull()?.let { Paths.get(it.path) }
         val levels = AndroidApiDatabase.forPlatform(platformJar) ?: return null
-        return ApiLevelContext.android(facet.minSdk, levels)
+        return ApiLevelContext.android(facet.minSdk, levels, jdkApiReference)
     }
+
+    /** The JDK's API table for an Android module's context (one instance, so equal contexts stay equal). */
+    private val jdkApiReference: () -> dev.ide.lang.resolve.PlatformApiLevels? = { JdkApiLevels.bundled() }
 
     /** The last [permissionContext] per module and when it was read, so a pass's many calls share one read. */
     private val permissionContexts = ConcurrentHashMap<ModuleId, Pair<Long, PermissionContext?>>()
@@ -2707,6 +2811,7 @@ class IdeServices private constructor(
         repoCache.clear()
         resDiskFingerprints.clear() // the res dir set itself can change with the dependencies
         customViewCache.clear()
+        runtimeLibsCache.clear()
         // A dependency/facet change can add or drop library View subclasses (and the seed hierarchy), so the
         // source-view snapshot must recompute on next use, not just on a source save.
         bumpSourceIndexGeneration()
@@ -4179,7 +4284,7 @@ class IdeServices private constructor(
                         original.parent?.let { Files.createDirectories(it) }
                         Files.move(aside, original)
                         restored.add(original)
-                        created += filesUnder(original)
+                        created += contentFilesUnder(original)
                     }.onFailure { problems += "could not restore '${original.fileName}'" }
                 }
             }
@@ -4208,12 +4313,7 @@ class IdeServices private constructor(
     private fun projectJavaFiles(): List<Path> {
         val out = ArrayList<Path>()
         for (m in modules()) for (root in sourceRoots(m)) {
-            if (!Files.isDirectory(root)) continue
-            runCatching {
-                Files.walk(root).use { s ->
-                    s.filter { it.toString().endsWith(".java") }.forEach { out.add(it) }
-                }
-            }
+            contentFilesUnder(root).filterTo(out) { it.toString().endsWith(".java") }
         }
         return out
     }
@@ -4222,10 +4322,7 @@ class IdeServices private constructor(
     private fun projectFilesEndingWith(suffix: String): List<Path> {
         val out = ArrayList<Path>()
         for (m in modules()) for (root in sourceRoots(m)) {
-            if (!Files.isDirectory(root)) continue
-            runCatching {
-                Files.walk(root).use { s -> s.filter { it.toString().endsWith(suffix) }.forEach { out.add(it) } }
-            }
+            contentFilesUnder(root).filterTo(out) { it.toString().endsWith(suffix) }
         }
         return out.distinct()
     }
@@ -4234,12 +4331,7 @@ class IdeServices private constructor(
     private fun projectSourceFiles(): List<Path> {
         val out = ArrayList<Path>()
         for (m in modules()) for (root in sourceRoots(m)) {
-            if (!Files.isDirectory(root)) continue
-            runCatching {
-                Files.walk(root).use { s ->
-                    s.filter { isRelocatableSource(it) }.forEach { out.add(it) }
-                }
-            }
+            contentFilesUnder(root).filterTo(out) { isRelocatableSource(it) }
         }
         return out
     }
@@ -4383,18 +4475,27 @@ class IdeServices private constructor(
         // repository is a fallback so a resource added/edited in an OPEN res buffer (not yet saved/indexed) is
         // seen live — otherwise `@string/justAdded` in a layout would be flagged unresolved until the next save.
         // The fallback only ADDS resolutions (never flags more), so it can't introduce a false positive.
+        // The repository is also what sees a NON-XML file resource: the index reads only `res/**.xml`, so a
+        // `drawable/ic_launcher.png` or a WebP mipmap is in the repository alone. Its module therefore has to be
+        // found for every file the check runs in, the manifest included (outside `res/`): looking it up as a
+        // resource file only left `android:icon="@drawable/ic_launcher"` flagged although the PNG was there.
         override fun typeHasAny(file: VirtualFile, rClass: String): Boolean {
             val type = ResourceType.byRClass(rClass) ?: return false
             if (indexTypeHasAny(type)) return true
-            val module = moduleForResourceFile(Paths.get(file.path)) ?: return false
+            val module = moduleForXmlFile(file) ?: return false
             return resourceRepo(module)?.types()?.contains(type) == true
         }
 
         override fun hasResource(file: VirtualFile, rClass: String, name: String): Boolean {
             val type = ResourceType.byRClass(rClass) ?: return true // unknown type → don't flag
             if (indexHasResource(type, name)) return true
-            val module = moduleForResourceFile(Paths.get(file.path)) ?: return false
+            val module = moduleForXmlFile(file) ?: return false
             return resourceRepo(module)?.has(type, name) == true
+        }
+
+        /** The Android module of a resource XML or a manifest. */
+        private fun moduleForXmlFile(file: VirtualFile): Module? = Paths.get(file.path).let { p ->
+            moduleForResourceFile(p) ?: moduleForManifestFile(p)?.takeIf { it.facets.get(AndroidFacet.KEY) != null }
         }
 
         override fun isValueType(rClass: String): Boolean = resources.isValueType(rClass)
@@ -4596,6 +4697,8 @@ class IdeServices private constructor(
         )
     }
 
+    @Volatile private var previewAapt2Daemon: dev.ide.android.support.tools.Aapt2Daemon? = null
+
     /** Relinks the build's compiled resources with the live editor buffer for the real-view preview, so the
      *  edited (or newly added) layout renders. Null when no Android tooling is wired (desktop). */
     private val previewResourceLinker: PreviewResourceLinker? by lazy {
@@ -4604,8 +4707,93 @@ class IdeServices private constructor(
             .takeIf { it.hasNativeTools() } ?: return@lazy null
         val cache = (sharedCachesRoot ?: store.rootPath).resolve("caches").resolve("preview-res")
         PreviewResourceLinker(
-            Aapt2Subprocess(sdk.aapt2), t.androidJar, cache,
+            // A long-lived aapt2: the preview relinks one layout per edit, and two process launches were most of that.
+            Aapt2Subprocess(sdk.aapt2, dev.ide.android.support.tools.Aapt2Daemon(sdk.aapt2).also { previewAapt2Daemon = it }), t.androidJar, cache,
         )
+    }
+
+    /**
+     * The shareable report for a diagnostic the user says is wrong: the diagnostic, the flagged file, and what
+     * the editor resolved it against (the module, its platform, its classpath and which entries declare the
+     * classes the file imports). See [FalseErrorReport].
+     */
+    fun falseErrorReport(file: Path, text: String, startOffset: Int, endOffset: Int, message: String, severity: String): String {
+        val module = moduleForFile(file) ?: moduleForEditableFile(file)
+        val language = languageFor(file)
+        val context = module?.let { m -> runCatching { compilationContext(m, language) }.getOrNull() }
+        val target = file.toAbsolutePath().normalize()
+        val sourceSet = module?.sourceSets?.firstOrNull { set ->
+            set.contentRoots.any { target.startsWith(Paths.get(it.dir.path).toAbsolutePath().normalize()) }
+        }
+        val sdk = module?.let { runCatching { dev.ide.model.SdkResolution.sdkFor(store.workspace, it) }.getOrNull() }
+        val facts = ArrayList<Pair<String, String>>()
+        module?.facets?.get(AndroidFacet.KEY)?.let { f ->
+            facts += "compileSdk" to f.compileSdk.toString()
+            facts += "minSdk" to f.minSdk.toString()
+            facts += "targetSdk" to f.targetSdk.toString()
+            facts += "Active variant" to runCatching { activeVariant(module) }.getOrDefault("unknown")
+        }
+        fun entries(list: List<dev.ide.model.ClasspathEntry>) =
+            list.map { FalseErrorReport.Entry(Paths.get(it.root.path), it.kind.toString()) }
+        val index = _indexStatus.value
+        return FalseErrorReport.render(
+            FalseErrorReport.Input(
+                appVersion = env.hostVersion,
+                host = FalseErrorReports.hostDescription(),
+                severity = severity,
+                message = message,
+                file = file,
+                text = text,
+                startOffset = startOffset,
+                endOffset = endOffset,
+                language = language.id,
+                projectRoot = runCatching { workspaceRoot }.getOrNull(),
+                moduleName = module?.name,
+                moduleType = module?.type?.id,
+                languageLevel = module?.languageLevel?.toString(),
+                sourceSet = sourceSet?.let { "${it.name} (${it.scope})" },
+                platformSdk = sdk?.let { "${it.name} (${it.kind})" },
+                moduleFacts = facts,
+                indexState = if (index.building) "building (${index.phase.ifEmpty { index.message }})" else "ready",
+                boot = context?.let { entries(it.bootClasspath.entries) }.orEmpty(),
+                classpath = context?.let { entries(it.classpath.entries) }.orEmpty(),
+                dependencies = module?.dependencies.orEmpty().map { d ->
+                    val name = when (d) {
+                        is LibraryDependency -> d.library.name
+                        is ModuleDependency -> "module ${d.target.value}"
+                        is dev.ide.model.SdkDependency -> "sdk ${d.sdk}"
+                        is dev.ide.model.PlatformDependency -> "bom ${d.bom}"
+                        else -> d.toString()
+                    }
+                    FalseErrorReport.Dependency(d.scope.toString(), name, d.exported)
+                },
+                recentLog = dev.ide.platform.log.Log.recent().takeLast(FalseErrorReports.LOG_LINES).map { r ->
+                    "[${r.level}] ${r.tag}: ${r.message}" + (r.throwable?.let { " (${it.javaClass.simpleName}: ${it.message})" } ?: "")
+                },
+            ),
+        )
+    }
+
+    /** The runtime library jars last resolved for a module's real-view render; see [previewRuntimeLibs]. */
+    private class CachedRuntimeLibs(val key: String, val dexJars: List<Path>)
+
+    private val runtimeLibsCache = ConcurrentHashMap<String, CachedRuntimeLibs>()
+
+    /**
+     * [AndroidLibraries.resolve]'s runtime jars for the real-view render, resolved once per model state instead
+     * of on every render: it classifies every library and checks each exploded AAR (about 12ms for a Material
+     * project, a quarter of a render that changed nothing), for an answer no keystroke in a layout changes. Dropped
+     * with the other preview caches on any model or variant change ([invalidateAnalyzers]), and not reused once
+     * a jar has gone from disk (a clean removes the exploded AARs).
+     */
+    private fun previewRuntimeLibs(module: Module, explodeRoot: Path, configurations: Set<String>?): List<Path>? {
+        val key = "$explodeRoot|$configurations"
+        runtimeLibsCache[module.id.value]?.let { c ->
+            if (c.key == key && c.dexJars.all { Files.exists(it) }) return c.dexJars
+        }
+        val resolved = runCatching { AndroidLibraries.resolve(module, explodeRoot, configurations) }.getOrNull() ?: return null
+        runtimeLibsCache[module.id.value] = CachedRuntimeLibs(key, resolved.dexJars)
+        return resolved.dexJars
     }
 
     /** The logical dp of a pixel size at [density]: the preview frame is authored in dp and sent as pixels. */
@@ -4649,7 +4837,9 @@ class IdeServices private constructor(
         val selectedVariant = AndroidVariants.select(module, activeVariant(module))
             ?: AndroidVariants.defaultVariant(module)
         val variant = selectedVariant?.name ?: "debug"
+        val tVariant = System.nanoTime()
         val resDirs = AndroidResources.resourceDirs(module, store.workspace)
+        val tResDirs = System.nanoTime()
 
         // The runtime library set + the AAR package names, resolved once. Must be the RUNTIME set (what the APK
         // packages), NOT the compile classpath: a Material widget's `implementation` transitives (e.g.
@@ -4659,13 +4849,7 @@ class IdeServices private constructor(
         // + user custom views. The VM interprets these jars directly (no dexing).
         val explodeRoot =
             AndroidBuildSystem.explodedAarPath(module, variant)
-        val resolved = runCatching {
-            AndroidLibraries.resolve(
-                module,
-                explodeRoot,
-                selectedVariant?.configurations
-            )
-        }.getOrNull()
+        val resolvedDexJars = previewRuntimeLibs(module, explodeRoot, selectedVariant?.configurations)
         val tResolved = System.nanoTime()
         // Relink the live buffer over the project's resources so the preview reflects the edited (or newly
         // added) layout. The linker self-builds its base from the live res tree, so a prior successful build
@@ -4682,6 +4866,7 @@ class IdeServices private constructor(
             facet.minSdk,
             facet.targetSdk,
             progress = { _realViewProgress.value = PreviewProgress(it) },
+            libraryResDirs = runCatching { AndroidResources.libraryResourceDirs(module, store.workspace) }.getOrDefault(emptyList()),
         )
         val tLinked = System.nanoTime()
         // Broken project resources: report them. Rendering the build's last resources.ap_ (or owned rendering)
@@ -4709,7 +4894,7 @@ class IdeServices private constructor(
         val rJar = linked?.rJar?.takeIf { Files.exists(it) }
             ?: AndroidBuildSystem.rJarPath(module, variant)
                 .takeIf { Files.exists(it) }
-        val runtimeLibs = resolved?.dexJars ?: emptyList()
+        val runtimeLibs = resolvedDexJars ?: emptyList()
         // The real-view runtime always INTERPRETS the library + project view classes with the bytecode VM
         // instead of dexing them onto a DexClassLoader. Nothing downloaded or user-built is loaded into ART,
         // which sidesteps Google Play's Device-and-Network-Abuse "DDL" scorer — and a project-SOURCE custom view
@@ -4738,7 +4923,7 @@ class IdeServices private constructor(
         // the preview R.jar — no dexing, no DexClassLoader.
         val classpath = externalJars + projectClassDirs + listOfNotNull(rJar, linked?.toolsJar)
         Log.logger("ide.preview").info(
-            "real-view (interpret) resolved=${resolved != null} runtimeLibs=${runtimeLibs.size} " +
+            "real-view (interpret) resolved=${resolvedDexJars != null} runtimeLibs=${runtimeLibs.size} " +
                 "externalJars=${externalJars.size} projectDirs=${projectClassDirs.size} rJar=${rJar != null} " +
                 "classpath=${classpath.size}"
         )
@@ -4769,6 +4954,7 @@ class IdeServices private constructor(
             screenHeightDp = config.screenHeightDp,
             smallestWidthDp = config.smallestWidthDp,
             rtl = config.rtl,
+            renderScale = request.renderScale,
         ).apply {
             stageListener = { _realViewProgress.value = PreviewProgress(it) }
         }
@@ -4794,7 +4980,10 @@ class IdeServices private constructor(
         // Trace each captured view back to its `<Tag …>` in the live buffer (stamping sourceOffset) so the
         // Preview can open the editable attribute editor on tap. Best-effort — a failure leaves the tree
         // unstamped (read-only), never breaking the render.
-        val viewTree = result.viewTree?.let { vt ->
+        val viewTree = result.viewTree?.let { captured ->
+            // A view whose id only the unsaved buffer declares was rendered with a spare id (the quick relink's
+            // stand-in, see PreviewResourceLinker.withSpareIds): give it its own name back before matching by id.
+            val vt = linked?.idAliases?.takeIf { it.isNotEmpty() }?.let { renameIds(captured, it) } ?: captured
             runCatching {
                 LayoutSourceMapper.stamp(
                     vt,
@@ -4804,9 +4993,10 @@ class IdeServices private constructor(
         }
         fun ms(a: Long, b: Long) = (b - a) / 1_000_000
         Log.logger("ide.preview").info(
-            "real-view host '${req.layoutName}': repo=${previewRepoNanos / 1_000_000}ms resolve=${ms(t0, tResolved)}ms " +
+            "real-view host '${req.layoutName}': repo=${previewRepoNanos / 1_000_000}ms resolve=${ms(t0, tResolved)}ms (variant=${ms(t0, tVariant)} resDirs=${ms(tVariant, tResDirs)} libs=${ms(tResDirs, tResolved)}) " +
                 "link=${ms(tResolved, tLinked)}ms classpath=${ms(tLinked, tRender)}ms render=${ms(tRender, tRendered)}ms " +
-                "stamp=${ms(tRendered, System.nanoTime())}ms"
+                "stamp=${ms(tRendered, System.nanoTime())}ms" +
+                (previewAapt2Daemon?.let { " aapt2-daemon=${it.served} served/${it.declined} declined" } ?: "")
         )
         return LayoutPreviewResult(
             root,
@@ -4816,8 +5006,19 @@ class IdeServices private constructor(
             renderedImage = png,
             renderedNativeImage = nativeImage,
             viewTree = viewTree,
+            // The views that rendered as a stand-in or failed mid-frame (the rest of the frame rendered).
+            problems = result.problems.map { line ->
+                dev.ide.preview.PreviewProblem(line.substringBefore('\t'), line.substringAfter('\t', line))
+            },
         )
     }
+
+    /** [node] and its subtree with every id in [aliases] replaced by the name it stands for. */
+    private fun renameIds(node: dev.ide.preview.PreviewViewNode, aliases: Map<String, String>): dev.ide.preview.PreviewViewNode =
+        dev.ide.preview.PreviewViewNode(
+            node.className, node.id?.let { aliases[it] ?: it }, node.left, node.top, node.right, node.bottom,
+            node.properties, node.children.map { renameIds(it, aliases) }, node.sourceOffset,
+        )
 
     /** Parse the live layout buffer into the tolerant XML DOM (with source offsets) for the attribute editor. */
     private fun parseLayoutXml(file: Path, text: String): XmlParsedFile =
@@ -4877,6 +5078,112 @@ class IdeServices private constructor(
                 it.resourceTypes.map { r -> r.rClass })
         }
         return LayoutElementInfo(tag.name ?: "", elementId(tag), tag.startOffset, setAttrs, addable)
+    }
+
+    /**
+     * The attributes a layout element [tag] may carry inside [parentTag] (null for the root), for the module [file]
+     * belongs to: the same hierarchy-aware SDK + library + project set the XML editor completes from. Null when
+     * [file] is not an Android resource of a module with XML support.
+     */
+    internal fun layoutAttributeSpecs(
+        file: Path,
+        tag: String,
+        parentTag: String?,
+    ): List<dev.ide.android.support.metadata.AttributeSpec>? {
+        val module = moduleForResourceFile(file) ?: return null
+        val contributor = androidXmlContributor(module) ?: return null
+        return contributor.allowedAttributes(tag, parentTag)
+    }
+
+    /** One resource for the layout services: its name, default-config value or file, and resolved color. */
+    internal class LayoutResourceInfo(val name: String, val value: String?, val file: String?, val argb: Int?, val library: Boolean = false)
+
+    /**
+     * The module's resources of the R class [rClass] for [file]'s module, default configuration first, with
+     * colors resolved against the app theme. Null when [file] is not in an Android module.
+     */
+    internal fun layoutResources(file: Path, rClass: String): List<LayoutResourceInfo>? {
+        val module = moduleForResourceFile(file) ?: return null
+        val type = ResourceType.byRClass(rClass) ?: return emptyList()
+        // Ids and layout names come from layout files, the open buffer included; every other type is a value.
+        val cached = if (type == ResourceType.ID || type == ResourceType.LAYOUT) resourceRepository(module) else resourceRepositoryForValues(module)
+        val repo = cached?.repo ?: return null
+        val theme = manifestThemeAndLabel(module, repo).first
+        val values = dev.ide.preview.impl.ProjectPreviewResources(repo, 1f, themeName = theme)
+        // The project's own res dirs (this module and the modules it depends on); anything else came from a library.
+        val own = runCatching { AndroidResources.projectResourceDirs(module, store.workspace) }.getOrDefault(emptyList())
+            .map { it.toAbsolutePath().normalize() }
+        return repo.names(type).sorted().map { name ->
+            val defs = repo.definitions(type, name)
+            val def = defs.firstOrNull { it.qualifier.isEmpty() } ?: defs.first()
+            val argb = if (type == ResourceType.COLOR) {
+                (values.resolve("@color/$name", dev.ide.preview.ValueFormat.COLOR) as? dev.ide.preview.ResolvedValue.Color)?.argb
+            } else null
+            val library = defs.none { d -> d.source?.toAbsolutePath()?.normalize()?.let { src -> own.any { src.startsWith(it) } } == true }
+            LayoutResourceInfo(name, def.value, def.source?.toString(), argb, library)
+        }
+    }
+
+    /**
+     * The module to compile so the preview of layout [file] ([text]) shows the project's own views as they are
+     * now, with its active variant, or null when none is needed: every project view the layout names has a
+     * compiled class no older than its source. The preview interprets compiled classes, so a view never built, or
+     * edited since, would otherwise render as a stand-in or stale.
+     */
+    internal fun projectViewsToCompile(file: Path, text: String): Triple<String, String, Long>? {
+        // Only the real-view runtime reads compiled classes; the approximate renderer compiles its own.
+        if (realViewRuntime == null) return null
+        val module = moduleForResourceFile(file) ?: return null
+        val refs = projectCustomViewRefs(text)
+        val fqns = refs.javaTags + refs.kotlinOnlyTags
+        if (fqns.isEmpty()) return null
+        val variant = activeVariant(module)
+        val closure = listOf(module) + modules().filter { it !== module }
+        for (fqn in fqns) {
+            val rel = fqn.replace('.', '/')
+            for (m in closure) {
+                val source = sourceRoots(m).asSequence().flatMap { r -> sequenceOf(r.resolve("$rel.java"), r.resolve("$rel.kt")) }
+                    .firstOrNull { Files.isRegularFile(it) } ?: continue
+                val compiled = listOf(AndroidBuildSystem.classesPath(m, variant), AndroidBuildSystem.kotlinClassesPath(m, variant))
+                    .map { it.resolve("$rel.class") }.firstOrNull { Files.isRegularFile(it) }
+                val sourceTime = Files.getLastModifiedTime(source).toMillis()
+                val stale = compiled == null || sourceTime > Files.getLastModifiedTime(compiled).toMillis()
+                // Compiling the layout's module compiles the modules it depends on first. The source time keys
+                // the attempt, so a compile that fails is not retried until the source changes again.
+                if (stale) return Triple(module.name, variant, sourceTime)
+                break
+            }
+        }
+        return null
+    }
+
+    /** A view class for the layout palette: tag, holds children, and 0 = framework, 1 = library, 2 = project. */
+    internal class LayoutViewClassInfo(val tag: String, val isViewGroup: Boolean, val origin: Int, val doc: String?)
+
+    /** The view classes a layout in [file]'s module can use: framework widgets, library views, project views. */
+    internal fun layoutViewClasses(file: Path): List<LayoutViewClassInfo>? {
+        val module = moduleForResourceFile(file) ?: return null
+        val contributor = androidXmlContributor(module) ?: return null
+        val project = runCatching { currentSourceCustomViewScan().widgets }.getOrDefault(emptyList()).mapTo(HashSet()) { it.tag }
+        val out = ArrayList<LayoutViewClassInfo>()
+        val seen = HashSet<String>()
+        for (w in contributor.frameworkWidgets()) if (seen.add(w.tag)) out += LayoutViewClassInfo(w.tag, w.isViewGroup, 0, w.doc)
+        for (w in contributor.customViewTags()) if (seen.add(w.tag)) {
+            out += LayoutViewClassInfo(w.tag, w.isViewGroup, if (w.tag in project) 2 else 1, w.doc)
+        }
+        return out
+    }
+
+    /** The app theme's color attributes that resolve to a color, as (attr name, argb). */
+    internal fun layoutThemeColors(file: Path): List<Pair<String, Int>>? {
+        val module = moduleForResourceFile(file) ?: return null
+        val repo = resourceRepositoryForValues(module)?.repo ?: return null
+        val theme = manifestThemeAndLabel(module, repo).first ?: return emptyList()
+        val values = dev.ide.preview.impl.ProjectPreviewResources(repo, 1f, themeName = theme)
+        return THEME_COLOR_ATTRS.mapNotNull { a ->
+            (values.resolve("?attr/$a", dev.ide.preview.ValueFormat.COLOR) as? dev.ide.preview.ResolvedValue.Color)
+                ?.let { a to it.argb }
+        }
     }
 
     /**
@@ -5144,8 +5451,9 @@ class IdeServices private constructor(
     // the layout buffer being typed, so a content fingerprint over those files is the cache key — typing in
     // a layout hits the cache; saving a res or .java file changes the fingerprint and rebuilds.
 
+    /** [valuesFingerprint] is [fingerprint] without the open LAYOUT buffers (see [resourceRepositoryForValues]). */
     private class CachedRepo(
-        val fingerprint: String, val repo: ResourceRepository
+        val fingerprint: String, val repo: ResourceRepository, val valuesFingerprint: String = fingerprint,
     )
 
     private val repoCache = ConcurrentHashMap<String, CachedRepo>()
@@ -5271,14 +5579,36 @@ class IdeServices private constructor(
         // Fingerprint the res FILES on disk PLUS any open editor buffer of a res `.xml` under those dirs — so an
         // UNSAVED edit (a just-typed `<string>`) produces a fresh fingerprint and rebuilds the repository, and
         // the synthetic `R` sees the new resource before the file is saved (matching the live XML `@string/` path).
-        val fp = resDiskFingerprint(key, resDirs) + resourceBufferFingerprint(resDirs)
+        val disk = resDiskFingerprint(key, resDirs)
+        val fp = disk + resourceBufferFingerprint(resDirs)
         repoCache[key]?.let { if (it.fingerprint == fp) return it }
         return synchronized(repoBuildLock) {
             val cur = repoCache[key]
             if (cur != null && cur.fingerprint == fp) cur
             else runCatching { AndroidResources.repository(module, store.workspace, resourceModel, textOverride = ::resourceBufferText) }
-                .getOrNull()?.let { CachedRepo(fp, it).also { c -> repoCache[key] = c } }
+                .getOrNull()?.let {
+                    CachedRepo(fp, it, disk + resourceBufferFingerprint(resDirs, layouts = false)).also { c -> repoCache[key] = c }
+                }
         }
+    }
+
+    /**
+     * The repository for questions about resource VALUES (strings, colors, the theme), which an open layout's
+     * unsaved buffer cannot change: a layout contributes only its own name and the ids it declares. So a cached
+     * repository that differs from the live state only in open layout buffers answers as well as a fresh one.
+     * The layout editor asks for the project's strings after every render: warm, a rebuild re-parses only the
+     * edited buffer and is cheap, but while the first index pass runs it measured 3 s to 22 s on an emulator per
+     * ask, each one queued on the background lane in front of the preview's next render.
+     */
+    private fun resourceRepositoryForValues(module: Module): CachedRepo? {
+        val key = module.id.value
+        repoCache[key]?.let { cached ->
+            val resDirs = runCatching { AndroidResources.resourceDirs(module, store.workspace) }.getOrDefault(emptyList())
+            if (cached.valuesFingerprint == resDiskFingerprint(key, resDirs) + resourceBufferFingerprint(resDirs, layouts = false)) {
+                return cached
+            }
+        }
+        return resourceRepository(module)
     }
 
     /** The live editor-buffer text of an open `res/` file, or null (the parser then reads disk). */
@@ -5286,11 +5616,12 @@ class IdeServices private constructor(
 
     /** A fingerprint fragment for every open `.xml` buffer under [resDirs] (path + content hash), so an unsaved
      *  resource edit invalidates the repository cache. Empty when nothing under res/ is open. */
-    private fun resourceBufferFingerprint(resDirs: List<Path>): String {
+    private fun resourceBufferFingerprint(resDirs: List<Path>, layouts: Boolean = true): String {
         if (resDirs.isEmpty() || openDocuments.isEmpty()) return ""
         val norm = resDirs.map { it.toAbsolutePath().normalize() }
         return openDocuments.entries.asSequence()
             .filter { (p, _) -> p.toString().endsWith(".xml") && norm.any { p.startsWith(it) } }
+            .filter { (p, _) -> layouts || p.parent?.fileName?.toString()?.startsWith("layout") != true }
             .map { (p, text) -> "$p:${bufferHash(p, text)}" }
             .sorted().joinToString("|", prefix = "|buf:")
             .takeIf { it != "|buf:" } ?: ""
@@ -5336,7 +5667,7 @@ class IdeServices private constructor(
         for (root in roots) {
             if (!Files.isDirectory(root)) continue
             runCatching {
-                Files.walk(root).use { w ->
+                contentFilesUnder(root).let { w ->
                     w.filter { it.toString().endsWith(suffix) && Files.isRegularFile(it) }
                         .forEach { p ->
                             runCatching {
@@ -5390,9 +5721,7 @@ class IdeServices private constructor(
             // siblings/deps) resolve; library jars come from each module's analysis classpath.
             modules().forEach { m ->
                 sourceRoots(m).forEach { root ->
-                    if (Files.isDirectory(root)) Files.walk(root).use { w ->
-                        w.filter { it.toString().endsWith(".java") }.forEach { sources.add(it) }
-                    }
+                    contentFilesUnder(root).filterTo(sources) { it.toString().endsWith(".java") }
                 }
             }
             // Dedupe to one jar per artifact before dexing: flattening every module's classpath can present the
@@ -5687,14 +6016,8 @@ class IdeServices private constructor(
         override fun files(): Sequence<VirtualFile> {
             val out = ArrayList<VirtualFile>()
             for (m in modules()) for (root in sourceRoots(m)) {
-                if (!Files.isDirectory(root)) continue
-                runCatching {
-                    Files.walk(root).use { s ->
-                        // Every file the per-file pass would analyze (the same gate as targetFor), not just Java.
-                        s.filter { Files.isRegularFile(it) && isAnalyzable(it) }
-                            .forEach { out += store.vfs.fileFor(it) }
-                    }
-                }
+                // Every file the per-file pass would analyze (the same gate as targetFor), not just Java.
+                for (f in contentFilesUnder(root)) if (Files.isRegularFile(f) && isAnalyzable(f)) out += store.vfs.fileFor(f)
             }
             return out.asSequence()
         }
@@ -5979,8 +6302,17 @@ class IdeServices private constructor(
             return CorePlatformProvider.coreJavaSdk(
                 androidJar,
                 stubs,
-                baseDir.resolve(".platform/caches/core-platform")
+                baseDir.resolve(".platform/caches/core-platform"),
+                // A console program runs in the bytecode VM, which supplies the Java 21 API android.jar lacks
+                // (virtual-thread builders, ScopedValue, StructuredTaskScope): declare it, so it compiles too.
+                VmApiAdditions,
             )
+        }
+
+        private object VmApiAdditions : CorePlatformProvider.ApiAdditions {
+            override val version get() = dev.ide.jvm.CoreJavaApiAdditions.VERSION
+            override fun rewrite(entryName: String, bytes: ByteArray) = dev.ide.jvm.CoreJavaApiAdditions.rewrite(entryName, bytes)
+            override fun additions(has: (String) -> Boolean) = dev.ide.jvm.CoreJavaApiAdditions.additions(has)
         }
 
         /** Open an existing workspace at [root] (used by the "Open Project…" picker). */
@@ -6313,3 +6645,13 @@ private val sharedIndexDispatcher: CoroutineDispatcher by lazy {
 private val sharedIndexDispatcher1: CoroutineDispatcher by lazy {
     BackgroundThreads.single("ide-index").asCoroutineDispatcher()
 }
+
+/** The theme color attributes a layout color picker offers, Material 3 roles first, then the AppCompat ones. */
+private val THEME_COLOR_ATTRS = listOf(
+    "colorPrimary", "colorOnPrimary", "colorPrimaryContainer", "colorOnPrimaryContainer",
+    "colorSecondary", "colorOnSecondary", "colorSecondaryContainer", "colorOnSecondaryContainer",
+    "colorTertiary", "colorOnTertiary", "colorTertiaryContainer", "colorOnTertiaryContainer",
+    "colorSurface", "colorOnSurface", "colorSurfaceVariant", "colorOnSurfaceVariant",
+    "colorSurfaceContainer", "colorSurfaceContainerHigh", "colorOutline", "colorOutlineVariant",
+    "colorError", "colorOnError", "colorAccent", "colorPrimaryDark", "colorControlNormal",
+)

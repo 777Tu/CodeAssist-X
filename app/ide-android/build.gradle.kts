@@ -223,6 +223,62 @@ val bundleVmSpikeMaterial3Asset = tasks.register<Copy>("bundleVmSpikeMaterial3As
     into(layout.buildDirectory.dir("vm-spike-asset/vmbench"))
 }
 
+// --- unit-test runner + interpreted-reflection fixtures (androidTest: TestRunnerArtSpike) ----------
+// TestRunnerArtSpike runs the IDE's JUnit runner on ART exactly as a phone test run does: JUnit and hamcrest are
+// INTERPRETED from their jars, and every generated class (peers, reflection mirrors, the rule Statement) is dexed
+// by DexPeerFactory. The fixtures are :jvm-build's and :jvm-interp's own test classes, STAGED from their test
+// output (not checked in) so they cannot go stale. Wired to the androidTest asset merge only, so an app build
+// does not compile those test sources.
+val testRunSpikeJars: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+dependencies { testRunSpikeJars(libs.junit4) }
+val bundleTestRunSpikeAsset = tasks.register<Copy>("bundleTestRunSpikeAsset") {
+    description = "Stage the JUnit runner and reflection fixtures, plus junit/hamcrest jars, for TestRunnerArtSpike."
+    dependsOn(":jvm-build:testClasses", ":jvm-interp:testClasses")
+    into(layout.buildDirectory.dir("vm-spike-asset/testrun"))
+    from(project(":jvm-build").layout.buildDirectory.dir("classes/kotlin/test")) {
+        include("dev/ide/build/jvm/test/fixtures/RuleFixture*.class", "dev/ide/build/jvm/test/fixtures/RulePrivateFixture*.class")
+        include("dev/ide/build/jvm/test/fixtures/BacktickFixture*.class")
+        into("classes")
+    }
+    from(project(":jvm-interp").layout.buildDirectory.dir("classes/java/test")) {
+        include("dev/ide/jvm/fixtures/ReflectMethods*.class", "dev/ide/jvm/fixtures/ReflectMembers*.class")
+        into("classes")
+    }
+    from(testRunSpikeJars) { into("jars") }
+}
+tasks.matching { it.name.endsWith("AndroidTestAssets") }.configureEach { dependsOn(bundleTestRunSpikeAsset) }
+
+// --- Java 17 to 21 fixtures (androidTest: Java21ArtSpike) -----------------------------------------
+// Java21ArtSpike interprets :jvm-interp's Java 21 fixtures on ART, where the platform stand-ins, the library
+// backports and the emulated thread API are what actually answer. The fixtures cannot run natively there, so
+// their real results are recorded on the build JVM (Expectations) and staged beside the class files.
+val java21SpikeExpectations = tasks.register<JavaExec>("java21SpikeExpectations") {
+    description = "Record what :jvm-interp's Java 21 fixtures return on a real JVM, for Java21ArtSpike."
+    dependsOn(":jvm-interp:testClasses", ":jvm-interp:classes")
+    val jvmInterp = project(":jvm-interp").layout.buildDirectory
+    val out = layout.buildDirectory.file("vm-spike-asset/java21/expected.properties")
+    classpath = files(jvmInterp.dir("classes/java/test"), jvmInterp.dir("classes/java/main"))
+    mainClass.set("dev.ide.jvm.fixtures.Expectations")
+    inputs.files(classpath)
+    outputs.file(out)
+    argumentProviders.add(CommandLineArgumentProvider { listOf(out.get().asFile.absolutePath) })
+}
+val bundleJava21SpikeAsset = tasks.register<Copy>("bundleJava21SpikeAsset") {
+    description = "Stage :jvm-interp's Java 21 fixtures for Java21ArtSpike."
+    dependsOn(":jvm-interp:testClasses", java21SpikeExpectations)
+    into(layout.buildDirectory.dir("vm-spike-asset/java21/classes"))
+    from(project(":jvm-interp").layout.buildDirectory.dir("classes/java/test")) {
+        include(
+            "dev/ide/jvm/fixtures/Java21*.class", "dev/ide/jvm/fixtures/Structured*.class",
+            "dev/ide/jvm/fixtures/PatternSwitch*.class", "dev/ide/jvm/fixtures/ThreadLoad*.class",
+        )
+    }
+}
+tasks.matching { it.name.endsWith("AndroidTestAssets") }.configureEach { dependsOn(bundleJava21SpikeAsset) }
+
 // --- Full Compose stack, Android variants (androidTest: interpret foundation/ui, milestone A) ------
 // VmTextFieldArtSpike against material3 1.5.0-alpha24 needs foundation classes newer than the app bundles
 // (androidx.compose.foundation.style.MutableStyleState); the flip must interpret those from the project jars,
@@ -347,6 +403,29 @@ val r8DexTool: Configuration by configurations.creating {
 }
 dependencies { r8DexTool(libs.android.r8) { isTransitive = false } }
 
+// --- Pre-dexed bundled jars -------------------------------------------------------------------------
+// Two jars go into every user app the IDE builds without coming from Maven: the bundled kotlin-stdlib and the
+// app-log bridge. The dex repository (DexRepository) finds libraries by Maven coordinate, so these two were dexed
+// on the phone in every project's first build (~5 s on a 2 GB device). They are dexed here instead, with the
+// same pinned D8 and the repository's settings (debug, min-api 26), into `predexed/<jar>.dex.zip`; the app
+// installs them as merged dex buckets the first time a build needs them (BundledDex).
+fun predexBundledJar(taskName: String, jars: Configuration, outName: String) = tasks.register<JavaExec>(taskName) {
+    description = "D8-dex the bundled $outName jar into a predexed/$outName.dex.zip asset."
+    val outZip = layout.buildDirectory.file("predexed-asset/predexed/$outName.dex.zip")
+    classpath = r8DexTool
+    mainClass.set("com.android.tools.r8.D8")
+    inputs.files(jars).withPropertyName("jar").withNormalizer(ClasspathNormalizer::class)
+    outputs.file(outZip).withPropertyName("dexZip")
+    outputs.cacheIf("a pure function of the pinned D8 and one jar") { true }
+    doFirst {
+        val out = outZip.get().asFile
+        out.parentFile.mkdirs(); out.delete()
+        args = listOf("--debug", "--min-api", "26", "--output", out.absolutePath, jars.singleFile.absolutePath)
+    }
+}
+val predexKotlinStdlib = predexBundledJar("predexKotlinStdlib", kotlinStdlibArtifact, "kotlin-stdlib")
+val predexAppLogRuntime = predexBundledJar("predexAppLogRuntime", appLogRuntimeArtifact, "applog-runtime")
+
 val r8StaxRuntime: Configuration by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
@@ -356,6 +435,22 @@ dependencies {
     r8StaxRuntime(libs.stax.api)
     r8StaxRuntime(libs.aalto.xml)
     r8StaxRuntime(libs.stax2.api)
+}
+
+// The R8 the forked VM runs is dexed below straight from the R8 jar, so it never passes through the app's
+// bytecode instrumentation, and R8 reads every Android resource with `InputStream.readAllBytes()` (API 33): a
+// release build with shrinking on failed below Android 13. Run the same ART passes over the jar first, and
+// give it the shim they route those calls to (:lang-jdt's InputStreamCompat), which the fork's classpath lacks.
+val patchR8ForArt = tasks.register<dev.ide.build.kotlinc.ArtPatchJarTask>("patchR8ForArt") {
+    description = "Apply the ART bytecode passes to the R8 jar the forked dexer and shrinker run."
+    dependsOn(":lang-jdt:compileJava")
+    inputJar.from(r8DexTool)
+    shims.from(
+        project(":lang-jdt").layout.buildDirectory.dir("classes/java/main").map {
+            fileTree(it) { include("dev/ide/lang/jdt/compat/InputStreamCompat*.class") }
+        },
+    )
+    outputJar.set(layout.buildDirectory.file("r8-art/r8-art.jar"))
 }
 
 val bundleR8DexAsset = tasks.register<JavaExec>("bundleR8DexAsset") {
@@ -369,6 +464,9 @@ val bundleR8DexAsset = tasks.register<JavaExec>("bundleR8DexAsset") {
     // location in the Gradle cache never enters the key. `args` is assembled in doFirst (after Gradle has
     // snapshotted inputs) but is derived entirely from this jar, so it adds nothing to the key.
     inputs.files(r8DexTool).withPropertyName("r8Tool").withNormalizer(ClasspathNormalizer::class)
+    // What gets dexed is the patched jar; the unpatched one above only runs D8 here on the build host.
+    val patchedR8 = patchR8ForArt.flatMap { it.outputJar }
+    inputs.file(patchedR8).withPropertyName("patchedR8").withNormalizer(ClasspathNormalizer::class)
     inputs.files(r8StaxRuntime).withPropertyName("staxRuntime").withNormalizer(ClasspathNormalizer::class)
     outputs.file(outZip).withPropertyName("r8DexZip")
     outputs.cacheIf("r8.dex.zip is a pure function of the pinned r8 + StAX jars") { true }
@@ -381,7 +479,7 @@ val bundleR8DexAsset = tasks.register<JavaExec>("bundleR8DexAsset") {
             "--release",
             "--min-api", "26",
             "--output", dexOnly.absolutePath,
-            r8DexTool.singleFile.absolutePath,
+            patchedR8.get().asFile.absolutePath,
         ) + r8StaxRuntime.files.map { it.absolutePath }
     }
     // Combine D8's `classes*.dex` with every non-class entry of the source jar into one zip. A classloader
@@ -442,70 +540,82 @@ val bundleComposeDrawablesAsset = tasks.register<Copy>("bundleComposeDrawablesAs
     into(layout.buildDirectory.dir("compose-drawables-asset/composeResources/dev.ide.ui.generated.resources/drawable"))
 }
 
-// --- AdMob ids (debug/profile = Google TEST ids; release = your real ids) ------------------------
+// --- AdMob ids (debug/profile = Google TEST ids; release = the ids you supply) -------------------
 // Debug + profile builds ALWAYS use Google's TEST ids: test ads are non-billable and safe to click during
-// development, so there's no risk of an invalid-traffic ban. The release build uses the real ids when supplied
-// via -PADMOB_APP_ID / -PADMOB_NATIVE_UNIT_ID (or the ADMOB_APP_ID / ADMOB_NATIVE_UNIT_ID env vars), falling
-// back to the test ids so a fork builds fine with AdMob unconfigured. The App id reaches the manifest through
-// the `admobAppId` placeholder; the native ad-unit id is a BuildConfig field AndroidAdHost reads. One native
-// ad unit serves every placement that has no unit of its own (see below). OFFICIAL RELEASES MUST SET BOTH real ids.
+// development, so there's no risk of an invalid-traffic ban. The release build uses real ids only when they are
+// supplied from OUTSIDE the repository, and no real id is written in this file: traffic from somebody else's
+// build of this code on the upstream ad units counts as invalid traffic against the upstream AdMob account.
+// Each id is looked up, in order, in `ads.properties` (gitignored, at the repo root, see ads.properties.example),
+// then a Gradle property (-PADMOB_APP_ID=...), then an env var of the same name. With none of them a release
+// falls back to Google's test ids (or to blank, where blank means "off"), so a fork builds with AdMob
+// unconfigured; `requireRealAdsInSignedRelease` below stops such a build from being SIGNED by accident.
+// The App id reaches the manifest through the `admobAppId` placeholder; the unit ids are BuildConfig fields
+// AndroidAdHost reads. One native ad unit serves every placement that has no unit of its own (see below).
 /** The Cloudflare Worker that serves CodeAssist Free AI (see supabase/cloudflare/ai-proxy). */
 val DEFAULT_AI_PROXY_URL = "https://codeassist-ai-proxy.lucena-tyronscott.workers.dev"
+
+val adsProperties = Properties().apply {
+    val f = rootProject.file("ads.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+/** The ad id called [name]: ads.properties, then -P[name], then the env var [name], else [fallback]. */
+fun adId(name: String, fallback: String): String =
+    (adsProperties.getProperty(name) ?: (findProperty(name) as String?) ?: System.getenv(name))?.trim() ?: fallback
 
 val testAdmobAppId = "ca-app-pub-3940256099942544~3347511713"
 val testAdmobNativeUnitId = "ca-app-pub-3940256099942544/2247696110"
 // Google's TEST interstitial unit — the full-screen "long build" ad (AndroidAdHost.showBuildInterstitial).
 val testAdmobInterstitialUnitId = "ca-app-pub-3940256099942544/1033173712"
-// The real ids are baked in as the release defaults (AdMob ids are not secret — they ship inside every APK),
-// and stay overridable so a fork can point ads at its own AdMob account instead of the upstream one.
-val realAdmobAppId = (findProperty("ADMOB_APP_ID") as String?) ?: System.getenv("ADMOB_APP_ID")
-    ?: "ca-app-pub-7523005242346905~2985774451"
-val realAdmobNativeUnitId = (findProperty("ADMOB_NATIVE_UNIT_ID") as String?) ?: System.getenv("ADMOB_NATIVE_UNIT_ID")
-    ?: "ca-app-pub-7523005242346905/7440024785"
-// The real interstitial unit (full-screen "long build" ad). Baked in as the release default like the other
-// ids (AdMob ids aren't secret — they ship in every APK), overridable via -PADMOB_INTERSTITIAL_UNIT_ID or the
-// ADMOB_INTERSTITIAL_UNIT_ID env var so a fork can point at its own AdMob account.
-val realAdmobInterstitialUnitId = (findProperty("ADMOB_INTERSTITIAL_UNIT_ID") as String?)
-    ?: System.getenv("ADMOB_INTERSTITIAL_UNIT_ID")
-    ?: "ca-app-pub-7523005242346905/6735189457"
+val realAdmobAppId = adId("ADMOB_APP_ID", testAdmobAppId)
+val realAdmobNativeUnitId = adId("ADMOB_NATIVE_UNIT_ID", testAdmobNativeUnitId)
+val realAdmobInterstitialUnitId = adId("ADMOB_INTERSTITIAL_UNIT_ID", testAdmobInterstitialUnitId)
 // Rewarded ads: the one ad a user asks for, in exchange for CodeAssist Free AI points. Google's TEST rewarded unit
 // for non-shipping builds. The real unit's server-side verification callback is the `ai-reward` Supabase function,
-// which is what credits the points; a fork pointing at its own AdMob account must set up the same callback, and
-// passing a blank id hides the "watch an ad" button in release.
+// which is what credits the points; a fork pointing at its own AdMob account must set up the same callback. Left
+// unset it is blank in release, which hides the "watch an ad" button: the test unit never calls that server, so
+// showing it would have people watch an ad for nothing.
 val testAdmobRewardedUnitId = "ca-app-pub-3940256099942544/5224354917"
-val realAdmobRewardedUnitId = (findProperty("ADMOB_REWARDED_UNIT_ID") as String?)
-    ?: System.getenv("ADMOB_REWARDED_UNIT_ID")
-    ?: "ca-app-pub-7523005242346905/8159191965"
-// Google's TEST adaptive-banner unit, used by debug/profile/minified for both banner uses below.
+val realAdmobRewardedUnitId = adId("ADMOB_REWARDED_UNIT_ID", "")
+// Google's TEST adaptive-banner unit, used by debug/profile for both banner uses below.
 val testAdmobBannerUnitId = "ca-app-pub-3940256099942544/9214589741"
-// The real banner units, baked in like the ids above. A blank one turns that banner off in release: AndroidAdHost
-// then shows nothing where it would go. ADMOB_BANNER_UNIT_ID is the banner a native slot
-// falls back to when no native ad fills; ADMOB_BUILD_BANNER_UNIT_ID is the console-footer banner while a build
-// runs, and falls back to the first one when left blank. Overridable like the others (-P or env).
-val realAdmobBannerUnitId = (findProperty("ADMOB_BANNER_UNIT_ID") as String?)
-    ?: System.getenv("ADMOB_BANNER_UNIT_ID")
-    ?: "ca-app-pub-7523005242346905/7699599336"
-val realAdmobBuildBannerUnitId = (findProperty("ADMOB_BUILD_BANNER_UNIT_ID") as String?)
-    ?: System.getenv("ADMOB_BUILD_BANNER_UNIT_ID")
-    ?: ""
+// The banner units. A blank one turns that banner off in release: AndroidAdHost then shows nothing where it would
+// go. ADMOB_BANNER_UNIT_ID is the banner a native slot falls back to when no native ad fills;
+// ADMOB_BUILD_BANNER_UNIT_ID is the console-footer banner while a build runs, and falls back to the first one
+// when left blank.
+val realAdmobBannerUnitId = adId("ADMOB_BANNER_UNIT_ID", testAdmobBannerUnitId)
+val realAdmobBuildBannerUnitId = adId("ADMOB_BUILD_BANNER_UNIT_ID", "")
 // Per-placement native units, keyed by AdPlacement name, so the AdMob report splits native earnings by screen.
-// A placement left blank falls back to the shared native unit above, and several placements may share one
-// unit. Each is overridable via -PADMOB_NATIVE_UNIT_<PLACEMENT> (or the env var of the same name). Reaches
-// AndroidAdHost as AD_NATIVE_UNIT_IDS, `PLACEMENT=unit` pairs joined by `;`.
-val realAdmobNativeUnitsByPlacement = mapOf(
-    "STORE" to "ca-app-pub-7523005242346905/7834378049",
-    "STORE_ITEM" to "ca-app-pub-7523005242346905/7783155586",
-    "PROJECTS" to "ca-app-pub-7523005242346905/4502386125",
-    "LEARN" to "ca-app-pub-7523005242346905/1338175893",
-    "CHALLENGE" to "ca-app-pub-7523005242346905/9563141113",
-    "BUILD_CONSOLE" to "ca-app-pub-7523005242346905/3460767191",
-    "RUN_RESULT" to "ca-app-pub-7523005242346905/5021260875",
-    "SDK_MANAGER" to "ca-app-pub-7523005242346905/6936977775",
-    "SETTINGS" to "ca-app-pub-7523005242346905/7642806352",
-    "SIDEBAR" to "ca-app-pub-7523005242346905/8833522537",
-).mapValues { (placement, default) ->
-    (findProperty("ADMOB_NATIVE_UNIT_$placement") as String?) ?: System.getenv("ADMOB_NATIVE_UNIT_$placement") ?: default
-}.filterValues { it.isNotBlank() }.entries.joinToString(";") { "${it.key}=${it.value}" }
+// A placement left unset falls back to the shared native unit above, and several placements may share one
+// unit. Each is ADMOB_NATIVE_UNIT_<PLACEMENT>, supplied like the ids above. Reaches AndroidAdHost as
+// AD_NATIVE_UNIT_IDS, `PLACEMENT=unit` pairs joined by `;`.
+val realAdmobNativeUnitsByPlacement = listOf(
+    "STORE", "STORE_ITEM", "PROJECTS", "LEARN", "CHALLENGE", "BUILD_CONSOLE", "RUN_RESULT", "SDK_MANAGER",
+    "SETTINGS", "SIDEBAR",
+).associateWith { placement -> adId("ADMOB_NATIVE_UNIT_$placement", "") }
+    .filterValues { it.isNotBlank() }.entries.joinToString(";") { "${it.key}=${it.value}" }
+
+// A release signed with a configured keystore is one somebody means to publish, and it must not go out with
+// Google's test ads in it: they earn nothing and a production app serving them breaks AdMob policy. So such a
+// build fails here, before the long compile, when the ids were not supplied. A build that really wants test ads
+// in a signed release (a fork with no AdMob account) says so with -Pcodeassist.testAdsInRelease=true.
+val requireRealAdsInSignedRelease = Regex("(assemble|bundle|package)Release(Bundle)?")
+gradle.taskGraph.whenReady {
+    val shipping = allTasks.any { it.project == project && requireRealAdsInSignedRelease.matches(it.name) }
+    if (!shipping || android.signingConfigs.findByName("release") == null) return@whenReady
+    if (providers.gradleProperty("codeassist.testAdsInRelease").orNull == "true") return@whenReady
+    val missing = buildList {
+        if (realAdmobAppId == testAdmobAppId) add("ADMOB_APP_ID")
+        if (realAdmobNativeUnitId == testAdmobNativeUnitId) add("ADMOB_NATIVE_UNIT_ID")
+        if (realAdmobInterstitialUnitId == testAdmobInterstitialUnitId) add("ADMOB_INTERSTITIAL_UNIT_ID")
+        if (realAdmobBannerUnitId == testAdmobBannerUnitId) add("ADMOB_BANNER_UNIT_ID")
+        if (realAdmobRewardedUnitId.isBlank()) add("ADMOB_REWARDED_UNIT_ID")
+    }
+    if (missing.isNotEmpty()) throw GradleException(
+        "This signed release has no real AdMob id for: ${missing.joinToString()}. Put them in ads.properties at " +
+            "the repo root (see ads.properties.example), or pass -Pcodeassist.testAdsInRelease=true to ship " +
+            "Google's test ads on purpose."
+    )
+}
 
 android {
     namespace = "dev.ide.android"
@@ -521,8 +631,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // versionCode must exceed the last published release (the previous-codebase app reached ~29).
-        versionCode = 131
-        versionName = "3.43.0"
+        versionCode = 135
+        versionName = "3.47.0"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -561,6 +671,17 @@ android {
                 ).joinToString(",")
             } else ""
         buildConfigField("String", "ANALYTICS_SIGNERS", "\"$analyticsSigners\"")
+
+        // The Google Cloud project NUMBER linked to the app in Play Console, for Play Integrity (see
+        // PlayIntegrityAttestor and supabase/functions/attest). The app asks Play to state which package and
+        // signing certificate it is, and the backend records the answer: that is how it tells an official build
+        // from a modified one. Not a secret, and it is useless without the backend's service account. Blank
+        // turns the check off, which is what a build pointed at its own endpoint gets unless it sets one.
+        val defaultPlayIntegrityProject = "114115428236"
+        val playIntegrityProject = (findProperty("PLAY_INTEGRITY_PROJECT") as String?)
+            ?: System.getenv("PLAY_INTEGRITY_PROJECT")
+            ?: if (supabaseUrl == defaultSupabaseUrl) defaultPlayIntegrityProject else ""
+        buildConfigField("String", "PLAY_INTEGRITY_PROJECT", "\"${playIntegrityProject.trim()}\"")
 
         // Where the daily-challenge judge is deployed. Separate from the Supabase pair because it is a
         // separate service: Supabase holds the problems and the leaderboard, and the judge is the only
@@ -629,9 +750,11 @@ android {
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("compose-strings-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("agent-ui-strings-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("vcs-ui-strings-asset").get().asFile)
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("layout-editor-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("compose-drawables-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("r8-dex-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("applog-runtime-asset").get().asFile)
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("predexed-asset").get().asFile)
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("vm-spike-asset").get().asFile)
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("moshi-libs-asset").get().asFile)
     // The Kotlin-analysis parity corpus and its goldens, staged as test assets so the instrumented suite
@@ -669,12 +792,19 @@ android {
 
     buildTypes {
         getByName("release") {
-            // R8 is OFF: the app loads JDT/ecj/D8/apksig classes reflectively and dexes user code at
-            // runtime, so aggressive shrinking would strip needed classes. Revisit with keep rules if
-            // download size becomes a concern.
-            isMinifyEnabled = false
+            // R8 shrinks the shipping build. The app reaches most of its toolchain (Kotlin compiler, IntelliJ
+            // platform, JDT, D8/R8, bundletool) and the libraries user code links against by NAME, through
+            // reflection, ServiceLoader and the preview/console interpreters, so proguard-rules.pro keeps
+            // those wholesale and lets R8 tree-shake the rest. A missing keep is a RUNTIME failure inside a
+            // feature, never a build error: :ide-android-e2e drives every feature against this build
+            // (as `profile`) on a device, run it after touching the rules or adding a dependency.
+            // -Pcodeassist.r8=false builds it unminified: the baseline :ide-android-e2e's benign-linkage list
+            // is collected from, and a quick way to tell whether a runtime failure is R8's doing.
+            isMinifyEnabled = providers.gradleProperty("codeassist.r8").orNull != "false"
+            isShrinkResources = false // code is the bulk; resources are reached by name from user projects
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release")
-            // The shipped build serves real AdMob ads (falls back to test ids if none were configured).
+            // The shipped build serves the AdMob ids supplied from outside the repo (test ids if none were).
             manifestPlaceholders["admobAppId"] = realAdmobAppId
             buildConfigField("String", "AD_NATIVE_UNIT_ID", "\"$realAdmobNativeUnitId\"")
             buildConfigField("String", "AD_INTERSTITIAL_UNIT_ID", "\"$realAdmobInterstitialUnitId\"")
@@ -686,8 +816,8 @@ android {
         // A release-like, non-debuggable build that's still installable locally (signed with the debug key).
         // Use this — never `debug` — to judge runtime/typing/recomposition performance: a `debuggable` app
         // runs with ART optimizations off and the Compose runtime is disproportionately slow in that mode,
-        // so debug timings are not representative. Mirrors `release` (R8 stays off for the reflection/runtime-
-        // dexing reasons above); only the signing differs so `adb install` works without the release keystore.
+        // so debug timings are not representative. Mirrors `release`, R8 included, so it is also the build
+        // :ide-android-e2e tests; only the signing and the ad ids differ.
         create("profile") {
             initWith(getByName("release"))
             // Sign with the release/upload key when a keystore is configured (so testers get a build with
@@ -700,35 +830,6 @@ android {
             isProfileable = true
             // This build is for on-device perf testing, so keep TEST ads (initWith(release) copied the real
             // ids — undo that) — a tester must never click a live ad.
-            manifestPlaceholders["admobAppId"] = testAdmobAppId
-            buildConfigField("String", "AD_NATIVE_UNIT_ID", "\"$testAdmobNativeUnitId\"")
-            buildConfigField("String", "AD_INTERSTITIAL_UNIT_ID", "\"$testAdmobInterstitialUnitId\"")
-            buildConfigField("String", "AD_REWARDED_UNIT_ID", "\"$testAdmobRewardedUnitId\"")
-            buildConfigField("String", "AD_NATIVE_UNIT_IDS", "\"\"")
-            buildConfigField("String", "AD_BANNER_UNIT_ID", "\"$testAdmobBannerUnitId\"")
-            buildConfigField("String", "AD_BUILD_BANNER_UNIT_ID", "\"$testAdmobBannerUnitId\"")
-        }
-        // EXPERIMENTAL, non-shipping: an R8-minified build used only to measure how far the app's own
-        // dex (~61% of the APK, mostly the bundled Kotlin compiler + IntelliJ platform) can shrink. The
-        // shipping `release` build keeps R8 OFF (see above) because the toolchain is loaded reflectively;
-        // this variant explores that "revisit with keep rules" note behind conservative keep rules
-        // (proguard-rules-minified.pro keeps the reflective toolchain wholesale and tree-shakes only the
-        // safe libraries). Build with `:ide-android:assembleMinified` — R8 whole-program on this input is
-        // memory-hungry, so bump org.gradle.jvmargs (~8g) for the run. NOT runtime-validated: a minified
-        // build can boot and still break when it compiles/dexes a user project, so never ship it without
-        // exercising the full toolchain (compile -> dex -> sign -> run -> completion) on-device.
-        create("minified") {
-            initWith(getByName("release"))
-            isMinifyEnabled = true
-            isShrinkResources = false // isolate code shrinking; resources aren't the bulk
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules-minified.pro",
-            )
-            // Sign with the release/upload key when configured, else the debug key so it installs locally.
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
-            matchingFallbacks += listOf("release")
-            // Non-shipping: keep Google TEST ad ids (initWith(release) copied the real ones).
             manifestPlaceholders["admobAppId"] = testAdmobAppId
             buildConfigField("String", "AD_NATIVE_UNIT_ID", "\"$testAdmobNativeUnitId\"")
             buildConfigField("String", "AD_INTERSTITIAL_UNIT_ID", "\"$testAdmobInterstitialUnitId\"")
@@ -891,7 +992,7 @@ val fetchAndroidBuildTools = tasks.register("fetchAndroidBuildTools") {
 // Run before anything AGP does, so the freshly-fetched lib*.so are on disk when the native-lib merge runs,
 // and the staged kotlin-stdlib.jar asset is present when the asset merge runs.
 tasks.named("preBuild").configure {
-    dependsOn(fetchAndroidBuildTools, stripAndroidJarAsset, generatePrebuiltIndexAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleAwtFixtureAsset)
+    dependsOn(fetchAndroidBuildTools, stripAndroidJarAsset, generatePrebuiltIndexAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleLayoutEditorComposeAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, predexKotlinStdlib, predexAppLogRuntime, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleAwtFixtureAsset)
 }
 
 // Same Android packaging gap as the fonts above, for the i18n string resources. :ide-ui-resources'
@@ -938,6 +1039,22 @@ val bundleVcsUiComposeStringAsset = tasks.register<Copy>("bundleVcsUiComposeStri
     into(layout.buildDirectory.dir("vcs-ui-strings-asset/composeResources/dev.ide.vcs.ui.generated.resources"))
 }
 
+// The SAME Android packaging gap, for :layout-editor (the built-in layout editor plugin). It carries its own
+// strings AND its own fonts (the Material Symbols subset it draws its icons with, since a plugin cannot use the
+// IDE's), so both are staged: the compiled `.cvr` strings and the verbatim `.ttf` files, under its resClass
+// package dev.ide.android.layouteditor.generated.resources. Without this the Design view crashes on device.
+val bundleLayoutEditorComposeAsset = tasks.register<Copy>("bundleLayoutEditorComposeAsset") {
+    description = "Stage :layout-editor's compose-resource strings + fonts into the APK assets (Android packaging gap)."
+    dependsOn(":layout-editor:desktopProcessResources")
+    from(project(":layout-editor").layout.buildDirectory.dir("processedResources/desktop/main/composeResources/dev.ide.android.layouteditor.generated.resources")) {
+        include("values*/**/*.cvr")
+    }
+    from(project(":layout-editor").file("src/commonMain/composeResources")) {
+        include("font/*.ttf")
+    }
+    into(layout.buildDirectory.dir("layout-editor-asset/composeResources/dev.ide.android.layouteditor.generated.resources"))
+}
+
 // The staging tasks above are easy to forget, and forgetting one is invisible until the app runs on a device:
 // desktop and unit tests load composeResources through the normal JVM resources route, so a module whose
 // strings never reach the APK assets compiles and tests green, then throws MissingResourceException on the
@@ -954,7 +1071,7 @@ val composeStringPackages: Map<String, String> = rootProject.subprojects
     }
     .toMap()
 
-tasks.matching { it.name.matches(Regex("merge(Debug|Profile|Release|Minified)Assets")) }.configureEach {
+tasks.matching { it.name.matches(Regex("merge(Debug|Profile|Release)Assets")) }.configureEach {
     val expected = composeStringPackages
     doLast {
         val merged = outputs.files.files.firstOrNull() ?: return@doLast
@@ -1026,6 +1143,9 @@ dependencies {
     // Installs src/main/baseline-prof.txt (compiled into assets/dexopt/baseline.prof) on first launch when the
     // APK was not installed by Play, so sideloaded installs AOT-compile the startup and editing hot paths too.
     implementation(libs.androidx.profileinstaller)
+    // The real-view preview runs a project's androidx.graphics.shapes as this copy instead of interpreting it
+    // (VmViewFactory.hostShapes): Material's shape morphs are 11M interpreted instructions otherwise.
+    implementation("androidx.graphics:graphics-shapes:1.0.1")
 
     // The real on-device IDE engine, shared with :ide-desktop. ide-core pulls in lang-jdt (jdt.core +
     // ecj) transitively along with the Eclipse platform runtime jars (org.eclipse.core.runtime, etc.).
@@ -1165,6 +1285,8 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
 
+    // Play Integrity: the token the backend's `attest` function decodes (PlayIntegrityAttestor).
+    implementation(libs.play.integrity)
     implementation(libs.play.services.ads)
     // Play services (ads, base, basement) still declare androidx.fragment 1.0/1.1, which Play Console flags as
     // an outdated SDK. Nothing here uses fragments; this only lifts the resolved version.
@@ -1214,6 +1336,9 @@ dependencies {
     // On-device throughput benchmark for the :jvm-interp bytecode interpreter. Not in the app dex, so it is
     // included in the test APK; its asm dependency resolves against the app's dexed copy at runtime.
     androidTestImplementation(project(":jvm-interp"))
+    // McpServerArtSpike starts the in-app MCP server the way the agent backend does. Already in the app through
+    // :ide-core; named here only so the test compiles against it.
+    androidTestImplementation(project(":agent-mcp"))
     // The compiler API (K2JVMCompiler/K2JVMCompilerArguments/MessageCollector/…) to COMPILE the spike
     // against. It arrives in the app only as a transitive `implementation` (via :ide-core → :lang-kotlin),
     // which doesn't leak to the androidTest *compile* classpath — and at runtime the app's dexed copy

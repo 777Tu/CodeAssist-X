@@ -50,8 +50,9 @@ class BuiltInParityTest {
         // The 24 prior producers plus the 5 kotlin.* workspace-index producers added with the per-language
         // index split (class names / packages / package types / go-to-symbol / members over Kotlin source),
         // plus source.memberUsage, which ranks receiver members by how often the project calls them, plus
-        // android.resourceRefs, the files naming each resource (Usages, rename, layout <-> class links).
-        assertEquals(31, ext.extensions(INDEX_EP).size)
+        // android.resourceRefs, the files naming each resource (Usages, rename, layout <-> class links), plus
+        // java.staticMembers, the public statics the static-import fix offers.
+        assertEquals(32, ext.extensions(INDEX_EP).size)
     }
 
     @Test
@@ -90,6 +91,10 @@ class BuiltInParityTest {
             // An adapter over the engine's dependency service rather than an alias, since that service speaks
             // the UI's DTOs; it resolves the same instance, so a plugin's add is the screen's add.
             "platform.moduleDependencies",
+            // Not an alias either: the plugin's way to ask the editor for a fresh analysis pass.
+            "platform.reanalysis",
+            // The entry point the user chose on a module's Run card, for a plugin with a Run of its own (SPI 3.7.0).
+            "platform.runSettings",
         )
         // The plugin-facing interpreter (interp-api) is the one published service at APPLICATION scope: a
         // plugin resolves services through `PluginRegistration.appServices` and holds no project, so it
@@ -99,7 +104,7 @@ class BuiltInParityTest {
             moduleAnalyzers + workspaceServices + spiModuleAliases + spiWorkspaceAliases +
                 spiApplicationServices,
             byId.keys,
-            "exactly the 19 engine services plus the 8 published-SPI keys",
+            "exactly the 19 engine services plus the 10 published-SPI keys",
         )
         spiApplicationServices.forEach {
             assertEquals(ServiceScopeLevel.APPLICATION, byId.getValue(it).level, it)

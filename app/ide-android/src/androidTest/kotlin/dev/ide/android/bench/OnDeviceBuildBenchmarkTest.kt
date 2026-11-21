@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.ide.android.ForkedD8Dexer
+import dev.ide.android.ForkedR8Shrinker
+import dev.ide.android.R8ForkSupport
 import dev.ide.android.support.AndroidBuildSystem
 import dev.ide.android.support.AndroidFacet
 import dev.ide.android.support.AndroidFacetCodec
@@ -13,6 +15,11 @@ import dev.ide.android.support.tools.AndroidSdk
 import dev.ide.android.support.tools.D8InProcessDexer
 import dev.ide.android.support.tools.DebugKeystore
 import dev.ide.android.support.tools.Dexer
+import dev.ide.android.support.tools.R8Subprocess
+import dev.ide.android.support.tools.ShrinkRequest
+import dev.ide.android.support.tools.Shrinker
+import dev.ide.android.support.tools.ToolMemory
+import dev.ide.android.support.tools.ToolResult
 import dev.ide.android.support.tools.SigningConfig
 import dev.ide.build.BuildGoal
 import dev.ide.build.BuildRequest
@@ -422,6 +429,140 @@ class OnDeviceBuildBenchmarkTest {
 
         runCatching { File(home, "compose-build-bench-report.txt").writeText(report.toString()) }
         Log.i(TAG, "report written to ${File(home, "compose-build-bench-report.txt")}")
+    }
+
+    /**
+     * A minified release build of the seeded Compose app whose R8 genuinely runs out of memory, on the device.
+     * The build must still succeed: the minify task falls back to shrinking the project's own code with the
+     * libraries as classpath and dexes the libraries without R8.
+     *
+     *   -e shrinker starved   (default) R8 in a forked VM with a heap too small for the whole program
+     *                         (`-e heapMb`, default 192): the out-of-memory is the real ART one, whatever the
+     *                         device's RAM, and the retry over the project's own code fits the same heap.
+     *   -e shrinker product   the app's own [ForkedR8Shrinker], with its real heap choice. Only a device that
+     *                         cannot give R8 enough memory (2 GB of RAM) reaches the fallback this way.
+     *
+     *     adb shell am instrument -w -e class dev.ide.android.bench.OnDeviceBuildBenchmarkTest#minifiedBuildSurvivesR8RunningOutOfMemory \
+     *       com.tyron.code.test/androidx.test.runner.AndroidJUnitRunner
+     */
+    @Test
+    fun minifiedBuildSurvivesR8RunningOutOfMemory() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val args = InstrumentationRegistry.getArguments()
+        val product = args.getString("shrinker") == "product"
+        val heapMb = args.getString("heapMb")?.toIntOrNull() ?: 192
+        val expectFallback = args.getString("expectFallback")?.toBoolean() ?: !product
+
+        val home = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "codeassist")
+        val projectsRoot = File(home, "projects").apply { mkdirs() }
+        val work = File(ctx.filesDir, "build-bench").apply { mkdirs() }
+        val androidJar = copyAsset(ctx, "android.jar", File(work, "android.jar")).toPath()
+        val stubs = copyAsset(ctx, "core-lambda-stubs.jar", File(work, "core-lambda-stubs.jar")).toPath()
+        val debugKeystore = copyAsset(ctx, "debug.keystore", File(work, "debug.keystore")).toPath()
+        val sdk = AndroidSdk.forDevice(androidJar, File(ctx.applicationInfo.nativeLibraryDir).toPath())
+        assumeTrue("Native aapt2/zipalign not extracted — can't build here", sdk.hasNativeTools())
+        val signing = SigningConfig(debugKeystore, DebugKeystore.STORE_PASS, DebugKeystore.KEY_ALIAS, DebugKeystore.KEY_PASS)
+        System.setProperty("kotlin.environment.keepalive", "true")
+        System.setProperty("kotlinc.art.home", provisionKotlincHome(ctx, File(work, "kotlinc-home")).absolutePath)
+
+        val workspaceRoot = seedComposeProject(File(projectsRoot, "oom-compose-min26"), 26)
+        // Minify has no model switch here: flip the release build type in module.toml, as a user does.
+        val toml = File(workspaceRoot, "app/module.toml")
+        val text = toml.readText()
+        if ("minifyEnabled = true" !in text) {
+            val release = text.indexOf("\"release\"").takeIf { it >= 0 } ?: throw AssertionError("no release build type:\n$text")
+            val flag = text.indexOf("minifyEnabled = false", release).takeIf { it >= 0 } ?: throw AssertionError("no minify flag:\n$text")
+            toml.writeText(text.replaceRange(flag, flag + "minifyEnabled = false".length, "minifyEnabled = true"))
+        }
+
+        val shrinker: Shrinker = if (product) ForkedR8Shrinker(ctx.applicationContext) else {
+            val launcher = R8ForkSupport.launcher()
+            val r8 = R8ForkSupport.extractR8Zip(ctx)
+            assumeTrue("no forked-VM launcher or R8 asset on this device", launcher != null && r8 != null)
+            R8Subprocess(listOf(r8!!.toPath()), Paths.get(launcher!!), listOf("-Xmx${heapMb}m"))
+        }
+        Log.i(TAG, "oom test: shrinker=${if (product) "product" else "starved ${heapMb}MB fork"} ram=${R8ForkSupport.totalMemMb(ctx)}MB appHeap=${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB")
+
+        val platform = PlatformCore()
+        try {
+            AndroidSupport.register(ModuleTypeRegistry(platform.extensions), FacetCodecRegistry())
+            val store = ProjectModel.open(workspaceRoot.toPath(), platform, FacetCodecRegistry().register(AndroidFacetCodec))
+            val project = store.workspace.projects.first { p -> p.modules.any { it.type.id == "android-app" } }
+            val app = project.modules.first { it.type.id == "android-app" }
+            clearBuildDirs(workspaceRoot)
+            val d8 = ForkedD8Dexer(ctx.applicationContext)
+            val build = AndroidBuildSystem.inProcess(
+                sdk, signing,
+                bootClasspath = listOf(androidJar, stubs),
+                kotlin = IncrementalKotlinCompiler(KotlinJvmCompiler()),
+                plugins = listOf(ComposeCompilerPlugin),
+                dexCacheRoot = File(home, "caches/dex").toPath(),
+                shrinker = shrinker, dexer = d8, mergeDexer = d8,
+            )
+            val graph = build.createBuildGraph(project, BuildRequest(listOf(app.id), VariantSelector("release"), BuildGoal.PACKAGE))
+            val log = StringBuilder()
+            val startNs = System.nanoTime()
+            val outcome = runBlocking {
+                TaskExecutorImpl(BuildCache(File(work, "buildcache-oom").apply { deleteRecursively() }.toPath()))
+                    .execute(graph, SimpleTaskContext(log = { line ->
+                        log.appendLine(line)
+                        if ("R8" in line || "minify" in line || "ran out of memory" in line) Log.i(TAG, "  $line")
+                    }), 2)
+            }
+            Log.i(TAG, "oom test: ${if (outcome.succeeded) "OK" else "FAILED"} in ${(System.nanoTime() - startNs) / 1_000_000}ms")
+            if (!outcome.succeeded) Log.e(TAG, "build log:\n$log")
+            assertTrue("the build must survive R8 running out of memory — see logcat -s $TAG", outcome.succeeded)
+            val fellBack = "R8 ran out of memory shrinking the whole app" in log
+            Log.i(TAG, "oom test: fellBack=$fellBack")
+            if (expectFallback) assertTrue("R8 was expected to run out of memory and fall back:\n$log", fellBack)
+            val apk = File(workspaceRoot, "app/build/outputs/apk/release/app-release.apk")
+            assertTrue("signed release APK missing", apk.isFile)
+            Log.i(TAG, "oom test: apk=${apk.absolutePath} ${apk.length() / 1024}KB")
+        } finally {
+            platform.dispose()
+        }
+    }
+
+    /**
+     * When R8 runs out of memory the error says where it ran and with how much, not just "raise the heap": a
+     * fork already at the device's limit and an in-process run cannot follow that advice.
+     *
+     * The app's real [ForkedR8Shrinker] is handed the IDE's own APK as the program, hundreds of MB of dex and far
+     * more than any heap it grants. A device that can fork exhausts the forked VM for real (which also shows the
+     * call returning rather than hanging on a VM stuck after its OutOfMemoryError). A device that cannot fork
+     * goes in-process, where exhausting the test's own heap would take the process down, so that branch gets a
+     * stand-in that reports the out-of-memory.
+     */
+    @Test
+    fun r8OutOfMemoryNamesTheMemoryItHad() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val work = File(ctx.filesDir, "build-bench").apply { mkdirs() }
+        val androidJar = copyAsset(ctx, "android.jar", File(work, "android.jar")).toPath()
+        val out = File(work, "oom-message-out").apply { deleteRecursively(); mkdirs() }
+        val inProcessStandIn = object : Shrinker {
+            override fun shrink(request: ShrinkRequest): ToolResult =
+                ToolResult(false, listOf("${ToolMemory.MESSAGE_PREFIX} (stand-in advice)", "error: Compilation failed to complete"))
+            override fun l8(request: dev.ide.android.support.tools.L8Request): ToolResult = ToolResult(false)
+        }
+        val shrinker = ForkedR8Shrinker(ctx.applicationContext, fallback = inProcessStandIn)
+        val request = ShrinkRequest(
+            programs = listOf(Paths.get(ctx.packageCodePath)), library = androidJar, minApi = 26, outDir = out.toPath(), threads = 1,
+        )
+        val startNs = System.nanoTime()
+        val r = shrinker.shrink(request)
+        val seconds = (System.nanoTime() - startNs) / 1_000_000_000
+        r.log.take(12).forEach { Log.i(TAG, "oom message: $it") }
+        Log.i(TAG, "oom message: returned after ${seconds}s, heapProfile=${shrinker.heapProfile}, ram=${R8ForkSupport.totalMemMb(ctx)}MB")
+        assertTrue("R8 over the IDE's own APK was expected to fail", !r.success)
+        val line = r.log.firstOrNull { it.startsWith(ToolMemory.MESSAGE_PREFIX) }
+            ?: throw AssertionError("no out-of-memory line in:\n${r.log.joinToString("\n")}")
+        if (shrinker.heapProfile.startsWith("forked-")) {
+            val heap = shrinker.heapProfile.removePrefix("forked-")
+            assertTrue("a forked run names its heap: $line", "R8 ran with a ${heap}MB heap" in line)
+        } else {
+            assertTrue("an in-process run says so and why: $line", "R8 ran inside the app" in line && "because" in line)
+            assertTrue("the stand-in's advice is replaced: $line", "stand-in" !in line)
+        }
     }
 
     /**

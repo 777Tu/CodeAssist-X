@@ -76,6 +76,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 import java.nio.file.Files
 import java.nio.file.Path
@@ -180,6 +181,10 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         }
     }
 
+    /** Module management ([ModuleTools]): shared by the chat and the MCP server, like [ftpControlTool]. */
+    private val moduleTools: List<AgentTool> = ModuleTools.tools({ ctx.servicesOrNull }) { ctx.bumpFileSystemEpoch() } +
+        TestTools.tools({ ctx.servicesOrNull }) { ctx.buildRunnerFor(it) }
+
     // --- ask_user: the agent's multiple-choice questions, answered in the chat ---
 
     private val _questionRequest = MutableStateFlow<dev.ide.ui.backend.UiAgentQuestionRequest?>(null)
@@ -217,7 +222,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
 
     /** The MCP server's tools write straight to the workspace: an external client's edits are not a chat turn,
      *  and recording them into one would let that turn's Undo revert someone else's work. */
-    private val mcpTools = SimpleToolRegistry(builtinTools(workspace) + ftpControlTool)
+    private val mcpTools = SimpleToolRegistry(builtinTools(workspace) + ftpControlTool + moduleTools)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val log = Log.logger("ide.agent")
 
@@ -225,7 +230,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
     private val agentConnections = AgentConnections(ctx, scope)
 
     // ask_user is the chat's alone: an MCP client has no card to answer it with.
-    private val builtinChatTools: List<AgentTool> = builtinTools(checkpoints) + ftpControlTool + askUser
+    private val builtinChatTools: List<AgentTool> = builtinTools(checkpoints) + ftpControlTool + moduleTools + askUser
 
     /**
      * The chat's tools: the built-ins, then whatever the connected MCP servers and installed skills add. Read on
@@ -291,6 +296,13 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
     @Volatile
     private var mcpServer: HttpMcpServer? = null
 
+    private val _mcpHost = MutableStateFlow(dev.ide.ui.backend.UiMcpHost(supported = true, port = MCP_PORT))
+
+    @Volatile private var relayClient: dev.ide.agent.mcp.McpRelayClient? = null
+    @Volatile private var relayServer: HttpMcpServer? = null
+    @Volatile private var relayInFlight = 0
+    private val _mcpRelay = MutableStateFlow(dev.ide.ui.backend.UiMcpRelay())
+
     /** The local FTP asset server, started when the AI settings "FTP server" toggle (or the `ftp_server`
      *  tool) is on. Anonymous and bound to 127.0.0.1 only; uploads land in `<project>/assets`. */
     @Volatile
@@ -301,6 +313,9 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         if (prefBool("mcpServer", default = false)) {
             mcpServer = startMcpServer()
         }
+        publishMcpHost(wanted = prefBool("mcpServer", default = false))
+        if (prefBool(RELAY_PREF, default = false)) startRelay()
+        publishRelay()
         if (prefBool(FTP_PREF, default = false)) {
             ftpServer = startFtpServer()
         }
@@ -347,6 +362,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
             port = CodeAssistMcpServer.DEFAULT_HTTP_PORT,
             tools = mcpTools,
             gate = AllowAllGate,
+            notes = listOf(ModuleTools.PROMPT),
         )
     } catch (e: Exception) {
         // WARN, not ERROR: an ERROR carrying a throwable is what raises the app's critical-error dialog, and
@@ -354,6 +370,12 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         // app's own previous process, or another app), and the caller simply leaves the server off. Telling
         // the user about it with a modal on startup, which is where this runs, is the wrong trade.
         log.warn("MCP server not started on port ${CodeAssistMcpServer.DEFAULT_HTTP_PORT}: ${e.message}")
+        null
+    } catch (e: LinkageError) {
+        // A library call the device's runtime lacks (the MCP SDK is built for a desktop JVM). This runs from
+        // the backend's constructor, so letting it escape would stop the whole IDE from starting, on every
+        // launch, over an optional server.
+        log.warn("MCP server not started, unsupported on this device: $e")
         null
     }
 
@@ -369,6 +391,118 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         // a disabled feature, not an error the user has to dismiss.
         log.warn("FTP server not started on port ${CodeAssistMcpServer.DEFAULT_FTP_PORT}: ${e.message}")
         null
+    }
+
+    override val mcpHost: StateFlow<dev.ide.ui.backend.UiMcpHost> get() = _mcpHost.asStateFlow()
+
+    override fun setMcpHostEnabled(enabled: Boolean) {
+        ctx.manager?.setPreference("settings.$AI_PAGE.mcpServer", enabled.toString())
+        if (enabled) {
+            if (mcpServer == null) mcpServer = startMcpServer()
+        } else {
+            mcpServer?.close()
+            mcpServer = null
+        }
+        publishMcpHost(wanted = enabled)
+    }
+
+    /** [wanted] and not running means the start failed, which on a fixed port is nearly always "already in use". */
+    private fun publishMcpHost(wanted: Boolean) {
+        val running = mcpServer != null
+        _mcpHost.value = dev.ide.ui.backend.UiMcpHost(
+            supported = true,
+            running = running,
+            port = MCP_PORT,
+            url = "http://127.0.0.1:$MCP_PORT/mcp",
+            error = if (wanted && !running) "Port $MCP_PORT is in use, so the server could not start." else null,
+        )
+    }
+
+    // --- the hosted relay: the same tools at a public address, for Claude on the web and on a phone ---
+
+    /** The relay's address, when this build has one: next to the Free AI proxy, on the same account. */
+    private fun relayBaseUrl(): String? =
+        System.getProperty("codeassist.mcpRelayUrl")?.takeIf { it.isNotBlank() }
+            ?: freeAiCredits.proxyBaseUrl()?.takeIf { AI_PROXY_HOST in it }?.replace(AI_PROXY_HOST, MCP_RELAY_HOST)
+
+    override val mcpRelay: StateFlow<dev.ide.ui.backend.UiMcpRelay> get() = _mcpRelay.asStateFlow()
+
+    override fun setMcpRelayEnabled(enabled: Boolean) {
+        ctx.manager?.setPreference("settings.$AI_PAGE.$RELAY_PREF", enabled.toString())
+        if (enabled) startRelay() else stopRelay()
+        publishRelay()
+    }
+
+    override fun resetMcpRelayLink() {
+        ctx.manager?.setPreference("settings.$AI_PAGE.$RELAY_SECRET_PREF", dev.ide.agent.mcp.McpRelayClient.newSecret())
+        if (relayClient != null) { stopRelay(); startRelay() }
+        publishRelay()
+    }
+
+    private fun relaySecret(): String =
+        pref(RELAY_SECRET_PREF) ?: dev.ide.agent.mcp.McpRelayClient.newSecret().also {
+            ctx.manager?.setPreference("settings.$AI_PAGE.$RELAY_SECRET_PREF", it)
+        }
+
+    /**
+     * The relay answers from an MCP server of its own, on a port the system picks, rather than from [mcpServer]:
+     * turning the relay on should not also open the well-known local port to every app on the device.
+     */
+    @Synchronized
+    private fun startRelay() {
+        if (relayClient != null) return
+        val base = relayBaseUrl() ?: return
+        val server = try {
+            CodeAssistMcpServer.startHttpServer(
+                workspace = workspace, port = 0, tools = mcpTools, gate = AllowAllGate, notes = listOf(ModuleTools.PROMPT),
+            )
+        } catch (e: Exception) {
+            log.warn("The relay's MCP server did not start: ${e.message}")
+            return
+        } catch (e: LinkageError) {
+            log.warn("The relay's MCP server did not start, unsupported on this device: $e")
+            return
+        }
+        relayServer = server
+        relayClient = dev.ide.agent.mcp.McpRelayClient(
+            relayBaseUrl = base,
+            secret = relaySecret(),
+            localUrl = "http://127.0.0.1:${server.port}/mcp",
+            token = { freeAiCredits.accessToken() },
+            refreshToken = { stale -> freeAiCredits.refreshAccessToken(stale) },
+            onState = { publishRelay() },
+            onActivity = { count -> relayInFlight = count; publishRelay() },
+        ).start()
+    }
+
+    @Synchronized
+    private fun stopRelay() {
+        relayClient?.close()
+        relayClient = null
+        relayServer?.close()
+        relayServer = null
+    }
+
+    private fun publishRelay() {
+        val base = relayBaseUrl()
+        val client = relayClient
+        val status = when (client?.state) {
+            null, dev.ide.agent.mcp.McpRelayClient.State.CLOSED -> dev.ide.ui.backend.UiMcpRelayStatus.OFF
+            dev.ide.agent.mcp.McpRelayClient.State.CONNECTING -> dev.ide.ui.backend.UiMcpRelayStatus.CONNECTING
+            dev.ide.agent.mcp.McpRelayClient.State.CONNECTED -> dev.ide.ui.backend.UiMcpRelayStatus.CONNECTED
+            dev.ide.agent.mcp.McpRelayClient.State.OFFLINE -> dev.ide.ui.backend.UiMcpRelayStatus.OFFLINE
+            dev.ide.agent.mcp.McpRelayClient.State.SIGNED_OUT -> dev.ide.ui.backend.UiMcpRelayStatus.SIGNED_OUT
+            dev.ide.agent.mcp.McpRelayClient.State.IN_USE -> dev.ide.ui.backend.UiMcpRelayStatus.IN_USE
+            dev.ide.agent.mcp.McpRelayClient.State.REPLACED -> dev.ide.ui.backend.UiMcpRelayStatus.REPLACED
+        }
+        _mcpRelay.value = dev.ide.ui.backend.UiMcpRelay(
+            supported = base != null,
+            signedIn = freeAiCredits.signedIn(),
+            enabled = client != null,
+            status = status,
+            url = if (client != null) client.publicUrl else "",
+            inFlight = if (client != null) relayInFlight else 0,
+        )
     }
 
     override fun ftpServerSupported(): Boolean = true
@@ -598,6 +732,17 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
         ctx.manager?.setPreference("settings.$AI_PAGE.gatewayModel", model)
         ctx.manager?.setPreference("settings.$AI_PAGE.gatewayCaCert", caCert)
         resetLoop()
+    }
+
+    override suspend fun fetchGatewayModels(): List<UiAgentModel>? {
+        val base = pref("gatewayBaseUrl")?.takeIf { it.isNotBlank() } ?: return null
+        val provider = registry.provider("openai") ?: return null
+        val config = ProviderConfig(pref("gatewayKey")?.trim().orEmpty(), base, pref("gatewayCaCert"))
+        val fetched = withContext(Dispatchers.IO) { runCatching { provider.listModels(config) }.getOrNull() }
+        // The client answers with its own built-in list when the endpoint could not be read; that is not the
+        // gateway's list, so it is reported as a failure.
+        if (fetched == null || fetched === provider.models) return null
+        return fetched.map { UiAgentModel(it.id, it.displayName) }
     }
 
     private val openRouter = OpenRouterSignIn(transport, scope) { key, freeModel ->
@@ -1367,7 +1512,7 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
             SystemPrompt.grounding(
                 tools.tools.map { it.spec.name },
                 ctx.servicesOrNull?.let { projectInstructions(it) },
-                agentConnections.promptSections(),
+                listOf(ModuleTools.PROMPT) + agentConnections.promptSections(),
             )
         }
 
@@ -1375,7 +1520,10 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
 
     override val connections: StateFlow<dev.ide.ui.backend.UiAgentConnections> get() = agentConnections.state
 
-    override fun refreshConnections() = agentConnections.refresh()
+    override fun refreshConnections() {
+        agentConnections.refresh()
+        publishRelay() // the page shows whether an account is signed in, which changes outside this class
+    }
 
     override fun saveMcpServer(
         config: dev.ide.ui.backend.UiMcpServerConfig,
@@ -1530,6 +1678,12 @@ internal class AgentBackend(private val ctx: BackendContext) : AgentService {
 
         /** The port the in-app MCP server listens on (see the "MCP server" AI setting). */
         const val MCP_PORT = CodeAssistMcpServer.DEFAULT_HTTP_PORT
+
+        /** Prefs of the hosted relay: whether it is on, and this install's link secret. */
+        const val RELAY_PREF = "claudeRelay"
+        const val RELAY_SECRET_PREF = "claudeRelaySecret"
+        private const val AI_PROXY_HOST = "codeassist-ai-proxy"
+        private const val MCP_RELAY_HOST = "codeassist-mcp-relay"
 
         /** The "leave it to the provider" reasoning-effort choice: nothing is sent on the request. */
         const val REASONING_EFFORT_DEFAULT = "default"

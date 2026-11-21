@@ -1,6 +1,7 @@
 package dev.ide.agent.ui
 
 
+import dev.ide.ui.distinctKeys
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.CompositionLocalProvider
 import dev.ide.ui.backend.UiFeatures
@@ -190,6 +191,7 @@ import dev.ide.agent.ui.generated.resources.chat_title
 import dev.ide.ui.components.CodeSample
 import dev.ide.ui.icons.CaIcons
 import dev.ide.ui.markdown.Markdown
+import dev.ide.ui.platform.hasHardwareKeyboard
 import dev.ide.ui.markdown.defaultHeadingStyle
 import dev.ide.ui.theme.Ca
 import dev.ide.ui.theme.CaMotion
@@ -646,15 +648,21 @@ private fun ModelPicker(
     onOpen: (Boolean) -> Unit,
 ) {
     val current = currentModel(cfg)
+    // A model without a display name shows its own name, not the routing path in front of it: an id like
+    // `ms/deepseek-ai/DeepSeek-V4.1-Flash-1017` is mostly provider prefix.
     val label = models.firstOrNull { it.id == current }?.displayName
-        ?: current.ifBlank { cfg.providers.firstOrNull { it.id == cfg.selectedProvider }?.displayName ?: "" }
+        ?: current.substringAfterLast('/').ifBlank { cfg.providers.firstOrNull { it.id == cfg.selectedProvider }?.displayName ?: "" }
     Box {
         Row(
             Modifier.clip(RoundedCornerShape(Ca.radius.pill)).clickable { onOpen(true) },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // Ellipsized within whatever width the header leaves it, the chevron kept.
+            Text(
+                label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
             val chevron by animateFloatAsState(if (open) 180f else 0f, label = "chevron")
             Icon(CaIcons.chevronDown, null, Modifier.size(12.dp).rotate(chevron), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -788,7 +796,7 @@ internal fun Transcript(
             contentPadding = PaddingValues(start = 14.dp, top = 14.dp, end = 14.dp, bottom = 2.dp),
             // Chat-app feel: content anchors to the bottom when short, newest message at the bottom.
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
-        ) {
+        ) { distinctKeys {
             itemsKeyed(messages, key = { it.id }) { msg ->
                 // Only the most recent failure offers a retry (it resumes the latest turn).
                 val latest = msg.id == lastId
@@ -802,7 +810,7 @@ internal fun Transcript(
                 )
             }
             item(key = TRANSCRIPT_END) { Spacer(Modifier.fillMaxWidth().height(1.dp)) }
-        }
+        } }
         AnimatedVisibility(
             visible = !following && listState.canScrollForward,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
@@ -1189,7 +1197,7 @@ private fun aggregateStatus(calls: List<UiAgentToolCall>): UiAgentToolStatus = w
 
 /** One-tap copy of a message's text, flipping to a check for ~1.5s as confirmation. */
 @Composable
-private fun CopyButton(text: String, tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+internal fun CopyButton(text: String, tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) { if (copied) { delay(1500); copied = false } }
@@ -1532,6 +1540,9 @@ private fun Composer(
             label = "composerBorderWidth",
         )
         val fieldShape = RoundedCornerShape(Ca.radius.xl)
+        // Enter sends only from a physical keyboard. An on-screen keyboard that reports its Enter as a key
+        // press (several Chinese input methods do) would otherwise send the message instead of breaking the line.
+        val enterSends = hasHardwareKeyboard()
         Box(
             Modifier.weight(1f)
                 .background(scheme.surfaceContainerHighest, fieldShape)
@@ -1555,7 +1566,7 @@ private fun Composer(
                 modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
                     when {
                         event.type != KeyEventType.KeyDown -> false
-                        event.key == Key.Enter && !event.isShiftPressed -> { onSend(); true }
+                        event.key == Key.Enter && !event.isShiftPressed && enterSends -> { onSend(); true }
                         // Paste claims Ctrl/Cmd+V only when the clipboard holds an image; text paste is untouched.
                         event.key == Key.V && (event.isCtrlPressed || event.isMetaPressed) &&
                             images.paste != null && images.hasClipboardImage() -> { images.paste.invoke(); true }

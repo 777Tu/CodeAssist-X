@@ -30,7 +30,6 @@ import dev.ide.ui.IdeUiState
 import dev.ide.ui.LeftPanelId
 import dev.ide.ui.OpenFile
 import dev.ide.ui.components.Breadcrumb
-import dev.ide.ui.editor.preview.isLayoutPreviewable
 import dev.ide.ui.ext.EditorPreviewRegistry
 import dev.ide.ui.ext.EditorViewModeContribution
 import dev.ide.ui.ext.ViewModeRegistry
@@ -63,6 +62,7 @@ internal fun BreadcrumbBar(
     hasPreview: Boolean,
 ) {
     var crumbs by remember(active.path) { mutableStateOf(breadcrumbFor(state, active)) }
+    val blocksHere = remember(active.path) { state.blocksEnabled && state.backend.blocks.blocksSupport(active.path) }
     val caretOffset = active.session.selection.start
     LaunchedEffect(active.path, active.session.textRevision, caretOffset) {
         delay(200.milliseconds)
@@ -76,7 +76,7 @@ internal fun BreadcrumbBar(
         crumbs = if (structure.isEmpty()) breadcrumbFor(state, active)
         else listOfNotNull(state.backend.files.moduleNameForFile(active.path)) + structure
     }
-    val canPreview = isPreviewable(active.path) || isLayoutPreviewable(active.path) ||
+    val canPreview = isPreviewable(active.path) ||
             isMarkdownPreviewable(active.path) || hasPreview ||
             // A plugin's contributed pane counts as previewable too, or the toggle would omit Preview for
             // exactly the files a plugin added it for.
@@ -102,7 +102,7 @@ internal fun BreadcrumbBar(
         ViewModeToggle(
             mode = active.viewMode,
             canPreview = canPreview,
-            blocksEnabled = state.blocksEnabled,
+            blocksEnabled = blocksHere,
             contributed = ViewModeRegistry.forFile(active.path),
         ) {
             if (it != active.viewMode) state.countViewMode(active.path, it)
@@ -147,7 +147,8 @@ private fun ViewModeToggle(
             stringResource(Res.string.breadcrumb_code),
             mode == EditorViewMode.Text
         ) { onSelect(EditorViewMode.Text) }
-        // The Blocks segment is present only when the `blocks` plugin is enabled (see IdeUiState.blocksEnabled).
+        // The Blocks segment is present only when the `blocks` plugin is enabled (see IdeUiState.blocksEnabled)
+        // and the file is in a language it has blocks for.
         if (blocksEnabled) {
             SegmentItem(CaIcons.layers, stringResource(Res.string.breadcrumb_blocks), mode == EditorViewMode.Blocks) {
                 onSelect(

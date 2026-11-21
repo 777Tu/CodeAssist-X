@@ -82,6 +82,13 @@ object ArtPatchPasses {
         FastutilInterfaceDispatchArtPass(), // Android 12 ART dispatches PsiBuilder's IntSet.contains(int) to
                                   // AbstractIntCollection.removeAll(Collection) -> SIGSEGV in instance-of (the
                                   // top native crash, api 31/32 only) → shim the calls onto vtable dispatch
+        // Same instrumentation reaches the MCP SDK and Jackson 3 jars.
+        StringFormattedArtPass(), // String.formatted (API 34) in their exception messages → String.format
+        RecordReflectionArtPass(), // Class.isRecord/isSealed (API 34) in Jackson's introspection → "no": every
+                                  // record in the dex is one D8 desugared, for which the platform says no too
+        // Reaches the R8 jar dexed into the forked-VM asset (ArtPatchJarTask), which has no desugaring at all.
+        R8CollectionArtPass(),    // Collection.toArray(IntFunction) + ByteArrayOutputStream.toString(Charset)
+                                  // (API 33): every forked minify build failed below Android 13
     )
 
     /** True if any registered pass rewrites [classFqn]. */

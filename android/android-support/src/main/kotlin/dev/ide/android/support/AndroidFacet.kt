@@ -69,6 +69,15 @@ data class AndroidFacet(
      * native API level, and the desugared runtime is L8-compiled into the APK. Build-wide.
      */
     val coreLibraryDesugaringEnabled: Boolean = false,
+    /**
+     * AGP's `android.nonTransitiveRClass`, kept so a project round-trips to Gradle with the value it had (import
+     * reads it from `gradle.properties`, export writes it back). It no longer changes how the IDE builds: every
+     * dependency library's `R` is made from that library's own `R.txt` with the app's final ids, as AGP makes
+     * them, and the app's own `R` is complete. It used to select between that and giving every library package
+     * a copy of the app's whole resource table, which no Gradle build does and which was most of a clean
+     * build's time for an app with many libraries.
+     */
+    val nonTransitiveRClass: Boolean = false,
     /** AGP's `android { buildFeatures { … } }`: per-module toggles for generated-code/compiler features. */
     val buildFeatures: BuildFeatures = BuildFeatures(),
     /** AGP's `android { packaging { … } }`: how Java resources + native libs are merged into the APK. */

@@ -284,6 +284,58 @@ class MavenDependencyResolverTest {
     }
 
     @Test
+    fun anAarsBundledLibJarsAreMergedIntoItsClassesJar() {
+        // Unity Ads: `classes.jar` calls into `com.unity3d.scar.adapter.common.Utils`, which the AAR ships
+        // in `libs/unity-scaradapter-common.jar`. Only `classes.jar` was unpacked, so the class was in no
+        // build and the app died on launch with NoClassDefFoundError. The class root must hold both.
+        fun jar(vararg entries: Pair<String, String>): ByteArray {
+            val out = java.io.ByteArrayOutputStream()
+            ZipOutputStream(out).use { z ->
+                for ((name, text) in entries) { z.putNextEntry(ZipEntry(name)); z.write(text.toByteArray()); z.closeEntry() }
+            }
+            return out.toByteArray()
+        }
+        val aar = java.io.ByteArrayOutputStream().also { out ->
+            ZipOutputStream(out).use { z ->
+                z.putNextEntry(ZipEntry("classes.jar"))
+                z.write(jar("sdk/Core.class" to "core", "sdk/Shared.class" to "from classes.jar",
+                    "META-INF/services/sdk.Spi" to "sdk.CoreImpl"))
+                z.closeEntry()
+                z.putNextEntry(ZipEntry("libs/"))
+                z.closeEntry()
+                z.putNextEntry(ZipEntry("libs/b-adapter.jar"))
+                z.write(jar("adapter/Utils.class" to "utils", "sdk/Shared.class" to "from libs",
+                    "META-INF/services/sdk.Spi" to "adapter.AdapterImpl", "META-INF/SIGNER.SF" to "sig"))
+                z.closeEntry()
+                z.putNextEntry(ZipEntry("libs/a-om.jar")); z.write(jar("om/Session.class" to "om")); z.closeEntry()
+                // Not code: only a jar directly under libs/ is.
+                z.putNextEntry(ZipEntry("libs/nested/skip.jar")); z.write(jar("no/Thanks.class" to "x")); z.closeEntry()
+                z.putNextEntry(ZipEntry("libs/notes.txt")); z.write("x".toByteArray()); z.closeEntry()
+            }
+        }.toByteArray()
+        val files = FakeRepo()
+        files.put("ads", "1.0", packaging = "aar", jarBytes = aar)
+        val (resolver, _) = newResolver(files)
+
+        val result = runBlocking { resolver.resolve(listOf(coord("ads", "1.0")), listOf(repo), ConflictPolicy.NEWEST, noProgress) }
+        assertTrue(result.unresolved.isEmpty(), "unexpected unresolved: ${result.unresolved}")
+        val classesJar = Path.of(result.resolved.single().classesRoot.path)
+
+        val content = LinkedHashMap<String, String>()
+        java.util.zip.ZipFile(classesJar.toFile()).use { zf ->
+            for (e in zf.entries()) content[e.name] = zf.getInputStream(e).use { it.readBytes().toString(Charsets.UTF_8) }
+        }
+        assertEquals(
+            setOf("sdk/Core.class", "sdk/Shared.class", "adapter/Utils.class", "om/Session.class", "META-INF/services/sdk.Spi"),
+            content.keys,
+        )
+        assertEquals("from classes.jar", content["sdk/Shared.class"], "classes.jar wins a name both define")
+        assertEquals(listOf("sdk.CoreImpl", "adapter.AdapterImpl"), content.getValue("META-INF/services/sdk.Spi").lines().filter { it.isNotBlank() })
+        assertEquals(listOf("classes.jar"), Files.list(classesJar.parent).use { s -> s.map { it.fileName.toString() }.filter { !it.startsWith(".extracted") }.sorted().toList() },
+            "no scratch files left beside the class root")
+    }
+
+    @Test
     fun reExtractsAStaleExplodedAarMissingRes() {
         // The AndroidX-Navigation "attribute … not found" bug: an AAR exploded by an OLDER build left
         // classes.jar + AndroidManifest.xml + an empty `.extracted` marker but NO `res/` (res unpacking was
@@ -311,6 +363,19 @@ class MavenDependencyResolverTest {
         // Re-resolve: the stale (empty) marker must trigger re-extraction, restoring res/.
         runBlocking { resolver.resolve(listOf(coord("widget", "1.0")), listOf(repo), ConflictPolicy.NEWEST, noProgress) }
         assertTrue(Files.isRegularFile(res), "a stale exploded AAR (empty marker, no res/) must be re-extracted: $res")
+    }
+
+    @Test
+    fun anAarsConsumerKeepRulesAreUnpackedBesideItsClasses() {
+        // The Android build looks for `proguard.txt` beside an exploded AAR's classes.jar and hands it to R8.
+        // The explosion used to leave it in the AAR, so no Maven library's keep rules reached a minified build.
+        val files = FakeRepo()
+        files.put("widget", "1.0", packaging = "aar", jarBytes = aarWithRes())
+        val (resolver, tmp) = newResolver(files)
+        runBlocking { resolver.resolve(listOf(coord("widget", "1.0")), listOf(repo), ConflictPolicy.NEWEST, noProgress) }
+        val rules = java.nio.file.Paths.get(ResolverCache(tmp.toString()).explodedDir(coord("widget", "1.0"))).resolve("proguard.txt")
+        assertTrue(Files.isRegularFile(rules), "proguard.txt must be unpacked: $rules")
+        assertEquals("-keep class com.widget.Reflected", Files.readString(rules))
     }
 
     @Test
@@ -1699,6 +1764,7 @@ class MavenDependencyResolverTest {
             zos.putNextEntry(ZipEntry("res/values/strings.xml"))
             zos.write("""<resources><string name="widget_label">W</string></resources>""".toByteArray())
             zos.closeEntry()
+            zos.putNextEntry(ZipEntry("proguard.txt")); zos.write("-keep class com.widget.Reflected".toByteArray()); zos.closeEntry()
         }
         return out.toByteArray()
     }

@@ -7,9 +7,16 @@ import platform.Foundation.NSCalendarUnitDay
 import platform.Foundation.NSCalendarUnitHour
 import platform.Foundation.NSCalendarUnitMonth
 import platform.Foundation.NSDate
+import platform.Foundation.NSDateFormatter
+import platform.Foundation.NSLocale
+import platform.Foundation.NSTimeZone
+import platform.Foundation.currentLocale
+import platform.Foundation.timeZoneForSecondsFromGMT
 import platform.Foundation.timeIntervalSince1970
 
 actual val isMobilePlatform: Boolean = true
+
+actual val supportsBlur: Boolean = true
 
 // iOS has no system back; every way out of something is an affordance the app draws itself.
 actual val hasSystemBack: Boolean = false
@@ -33,4 +40,21 @@ actual fun localMonthDay(): Int {
     val now = NSDate()
     return calendar.component(NSCalendarUnitMonth, fromDate = now).toInt() * 100 +
         calendar.component(NSCalendarUnitDay, fromDate = now).toInt()
+}
+
+actual fun formatIsoDay(isoDate: String, short: Boolean): String {
+    // Parsed and printed in UTC so the day cannot shift with the device's zone.
+    val utc = NSTimeZone.timeZoneForSecondsFromGMT(0)
+    val parser = NSDateFormatter().apply {
+        locale = NSLocale("en_US_POSIX")
+        timeZone = utc
+        dateFormat = "yyyy-MM-dd"
+    }
+    val date = parser.dateFromString(isoDate) ?: return isoDate
+    val printer = NSDateFormatter().apply {
+        locale = NSLocale.currentLocale
+        timeZone = utc
+        setLocalizedDateFormatFromTemplate(if (short) "MMMd" else "EEEEMMMMd")
+    }
+    return printer.stringFromDate(date)
 }

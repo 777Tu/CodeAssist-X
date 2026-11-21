@@ -59,16 +59,28 @@ data class ToolDiagnostic(
 enum class ToolSeverity { ERROR, WARNING, INFO }
 
 /**
- * D8 emits a per-method desugaring warning when *library* code uses an API above the build's min-api —
- * e.g. guava's `MethodHandle`/`VarHandle` helpers warn "only supported starting with Android O
- * (--min-api 26)" at min-api < 26. They are benign (guava selects those code paths at runtime only on
- * capable devices) and flood the console, so the dexer suppresses them and surfaces a single count.
+ * D8 warnings about library code that the developer can neither act on nor is harmed by. They arrive by the
+ * dozen on any Compose app below min-api 26, so the dexer drops them from the Problems list and the console
+ * and keeps a one-line count in the build transcript:
+ *  - "… only supported starting with Android O (--min-api 26)": library code (guava's MethodHandle/VarHandle
+ *    helpers) that only takes those paths at runtime on devices that have them.
+ *  - "Type `X` was not found, it is required for default or static interface methods desugaring of `Y`": `X` is
+ *    not in the app at all (a hidden platform class like `android.view.HardwareCanvas`, a device-provided
+ *    `androidx.window.extensions` type, `java.lang.instrument`, an optional dependency the app doesn't use), so
+ *    `Y` is never loaded. A type the app DOES have is on the desugaring classpath and never warns.
+ *  - "Methods with invalid locals information": debug info Kotlin's inliner wrote for its own locals; D8 drops
+ *    that debug info and the code is unchanged. D8 follows them with "Some warnings are typically a sign of using
+ *    an outdated Java toolchain", which goes with them.
  */
 internal fun isBenignDexWarning(message: String): Boolean =
-    "only supported starting with Android" in message
+    "only supported starting with Android" in message ||
+        "it is required for default or static interface methods desugaring" in message ||
+        "invalid locals information" in message ||
+        // D8's trailer to the locals warnings above, printed once as its own diagnostic.
+        "sign of using an outdated Java toolchain" in message
 
-/** Drop benign desugaring warnings (and their `Warning in …:` headers) from D8's line output, appending a
- *  one-line count when any were suppressed. */
+/** Drop benign D8 warnings ([isBenignDexWarning]), with their `Warning in …:` headers and indented detail
+ *  lines, from D8's line output, appending a one-line count when any were dropped. */
 internal fun suppressBenignDexWarnings(lines: List<String>): List<String> {
     val out = ArrayList<String>(lines.size)
     var suppressed = 0
@@ -76,13 +88,17 @@ internal fun suppressBenignDexWarnings(lines: List<String>): List<String> {
     while (i < lines.size) {
         val line = lines[i]
         // A D8 warning is a "Warning in <file>…:" header followed by the message line; drop both when benign.
-        if (line.startsWith("Warning in ") && i + 1 < lines.size && isBenignDexWarning(lines[i + 1])) {
-            suppressed++; i += 2; continue
+        val skip = when {
+            line.startsWith("Warning in ") && i + 1 < lines.size && isBenignDexWarning(lines[i + 1]) -> 2
+            isBenignDexWarning(line) -> 1
+            else -> 0
         }
-        if (isBenignDexWarning(line)) { suppressed++; i++; continue }
-        out.add(line); i++
+        if (skip == 0) { out.add(line); i++; continue }
+        suppressed++; i += skip
+        // A multi-line warning ("Methods with invalid locals information:") lists its methods indented below it.
+        while (i < lines.size && lines[i].isNotEmpty() && lines[i][0].isWhitespace()) i++
     }
-    if (suppressed > 0) out.add("($suppressed D8 desugaring warning(s) suppressed — library APIs needing a higher min-api; benign)")
+    if (suppressed > 0) out.add("($suppressed benign D8 warning(s) hidden: library code needing a higher min-api, types the app doesn't contain, or Kotlin inliner debug info)")
     return out
 }
 
@@ -108,6 +124,8 @@ internal class DexDiagnosticsCollector : DiagnosticsHandler {
     private fun record(severity: ToolSeverity, prefix: String, d: Diagnostic) {
         val message = d.diagnosticMessage.orEmpty()
         log.add("$prefix: $message")
+        // Benign warnings stay in [log] (where [DexDiagnostics.humanize] counts them) but are not Problems.
+        if (severity != ToolSeverity.ERROR && isBenignDexWarning(message)) return
         val position = d.position as? TextPosition
         diagnostics.add(
             ToolDiagnostic(
@@ -155,6 +173,24 @@ internal object DexDiagnostics {
     private val UNSUPPORTED_VERSION = Regex("""[Uu]nsupported class file (?:major )?version|bytecode (?:that is )?newer""")
     private const val TOO_MANY = "Cannot fit requested classes in a single dex file"
 
+    /** The JVM/ART exception type a tool's raw output names when it exhausts its heap. */
+    const val OOM_TOKEN = "OutOfMemoryError"
+
+    /** What [humanize] turns a raw out-of-memory line into. A shrinker that knows the heap it ran with replaces
+     *  the generic advice with its own (see `ForkedR8Shrinker`); [isOutOfMemory] recognizes either form. */
+    const val OUT_OF_MEMORY_PREFIX = "error: The dexer ran out of memory."
+    const val OUT_OF_MEMORY =
+        "$OUT_OF_MEMORY_PREFIX Raise the \"R8 forked-VM heap\" setting in Build Runtime settings, or reduce the build's dependencies."
+
+    /** True when a tool's log (raw or already humanized) says it ran out of memory. */
+    fun isOutOfMemory(log: List<String>): Boolean =
+        log.any { it.contains(OOM_TOKEN) || it.startsWith(OUT_OF_MEMORY_PREFIX) }
+
+    /** True when [t] or anything in its cause chain is an [OutOfMemoryError]. R8 wraps a worker's failure in a
+     *  `CompilationFailedException` whose own message does not name it. */
+    fun causedByOutOfMemory(t: Throwable): Boolean =
+        generateSequence(t) { it.cause }.take(16).any { it is OutOfMemoryError }
+
     fun humanize(log: List<String>): List<String> {
         val base = suppressBenignDexWarnings(log)
         val out = ArrayList<String>(base.size)
@@ -182,8 +218,7 @@ internal object DexDiagnostics {
         ALREADY_PRESENT.find(line)?.let { return duplicate(it.groupValues[1]) }
         if (line.contains(TOO_MANY))
             return "error: Too many methods or fields to fit in a single dex file (the 64K limit). Enable multidex (automatic at minSdk 21+) or remove unused dependencies."
-        if (line.contains("OutOfMemoryError"))
-            return "error: The dexer ran out of memory. Raise the \"R8 forked-VM heap\" setting in Build Runtime settings, or reduce the build's dependencies."
+        if (line.contains(OOM_TOKEN)) return OUT_OF_MEMORY
         if (UNSUPPORTED_VERSION.containsMatchIn(line))
             return "error: A class was compiled for a newer Java bytecode version than the dexer supports. Lower the module's language level to Java 17 or below."
         return null
@@ -200,6 +235,22 @@ internal object DexDiagnostics {
     /** Replace internal per-class dex-archive paths with the class name, so a retained line reads in user terms. */
     private fun shortenPaths(line: String): String =
         DEX_BUCKET_PATH.replace(line) { it.groupValues[1].replace('/', '.') }
+}
+
+/**
+ * Whether a dex or shrink tool's log says it ran out of memory, for callers outside this module: the on-device
+ * shrinker that rewrites the advice for the heap it actually had, and the build-failure classifier.
+ */
+object ToolMemory {
+    /** How the humanized out-of-memory line starts; what follows is advice the caller may replace. */
+    const val MESSAGE_PREFIX: String = DexDiagnostics.OUT_OF_MEMORY_PREFIX
+
+    fun ranOut(log: List<String>): Boolean = DexDiagnostics.isOutOfMemory(log)
+
+    /** Whether a build-console line says the minify step fell back to shrinking the project's own code only. */
+    fun isShrinkFallback(line: String): Boolean =
+        dev.ide.android.support.tasks.R8MinifyTask.FALLBACK_TRIGGERED in line ||
+            dev.ide.android.support.tasks.R8MinifyTask.FALLBACK_REMEMBERED in line
 }
 
 /** aapt2: compile resources to an intermediate form, then link them into `resources.ap_` + `R.java`. */
@@ -235,6 +286,8 @@ interface Aapt2 {
         rTxt: Path? = null,             // aapt2 `--output-text-symbols`: the R symbol table (`R.txt`) for an AAR
         includes: List<Path> = emptyList(), // more `-I` tables after [androidJar], to resolve references against
         packageId: Int? = null,         // aapt2 `--package-id`; null keeps the app id 0x7f
+        stableIds: Path? = null,        // aapt2 `--stable-ids`: ids to keep, as an earlier link's [emitIds] wrote them
+        emitIds: Path? = null,          // aapt2 `--emit-ids`: write every resource's id here
     ): ToolResult
 
     /**
@@ -433,6 +486,13 @@ data class L8Request(
 interface Shrinker {
     fun shrink(request: ShrinkRequest): ToolResult
 
+    /**
+     * Names the memory R8 runs with here (which VM, how large a heap), or empty when that is not this shrinker's
+     * to say. The minify task remembers a whole-program shrink that ran out of memory beside this, so the same
+     * project is tried in full again once the answer changes, for example after the user raises the heap.
+     */
+    val heapProfile: String get() = ""
+
     /** Compile the core-library-desugaring runtime to dex (L8), packaged alongside the R8/D8 output. */
     fun l8(request: L8Request): ToolResult =
         ToolResult.fail("core-library desugaring (L8) not supported by this implementation")
@@ -441,6 +501,14 @@ interface Shrinker {
 /** zipalign + apksigner: produce an aligned, signed APK. */
 fun interface ApkSigner {
     fun sign(unsigned: Path, signed: Path, config: SigningConfig): ToolResult
+
+    /**
+     * [sign] for an APK that will only be installed on [minSdk] and above. From API 24 the APK Signature Scheme
+     * v2 is all a device checks, so a signer that can leave the v1 (JAR) signature out there does: v1 digests
+     * every entry one by one and writes a manifest of them, most of the time signing takes. A signer that
+     * cannot choose signs as it always did.
+     */
+    fun sign(unsigned: Path, signed: Path, config: SigningConfig, minSdk: Int): ToolResult = sign(unsigned, signed, config)
 }
 
 /** A keystore + alias/passwords used to sign. A debug build uses [DebugKeystore.getOrCreate]. */

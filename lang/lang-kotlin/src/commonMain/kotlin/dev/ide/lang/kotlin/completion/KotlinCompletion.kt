@@ -75,6 +75,7 @@ import dev.ide.lang.kotlin.symbols.KotlinSymbol
 import dev.ide.lang.kotlin.symbols.KotlinSymbolService
 import dev.ide.lang.kotlin.symbols.Builtins
 import dev.ide.lang.kotlin.symbols.KotlinType
+import dev.ide.lang.kotlin.symbols.TypeRendering
 import dev.ide.lang.kotlin.symbols.SourceIndexBuilder
 import dev.ide.lang.resolve.Modifier
 import dev.ide.lang.resolve.SymbolKind
@@ -266,9 +267,13 @@ class KotlinCompletion(
             val properties = pos.properties
             val out = ArrayList<Candidate>(raw.size)
             val seen = HashSet<String>()
+            val lambdaTwins = if (pos.memberAccess) lambdaOnlyOverloads(raw) else emptyMap()
             for (s in raw) {
                 val name = s.name
                 if (name == "_" || MARKER in name) continue
+                // `sumOf` has seven overloads that differ only in what the selector returns; each is typed
+                // the same way, so one row stands for all of them (see [lambdaOnlyOverloads]).
+                lambdaTwins[lambdaShapeKey(s)]?.let { kept -> if (kept !== s) continue }
                 val grade = matcher.grade(name) ?: continue
                 // Dedup overloads by name+kind+signature, but TYPES by fully-qualified name: two DISTINCT
                 // classes sharing a simple name (`androidx.compose.ui.Modifier` vs `java.lang.reflect.Modifier`)
@@ -562,7 +567,8 @@ class KotlinCompletion(
                 // was no way to reach `import util.StringUtils.twice` from the editor. Accepting one inserts
                 // that import (see [importEditFor]).
                 members + resolver.scopeMemberExtensions(offset, recvType, prefix) +
-                    resolver.importableSingletonExtensions(recvType, prefix)
+                    resolver.importableSingletonExtensions(recvType, prefix) +
+                    listOfNotNull(functionTypeInvoke(recvType)?.takeIf { matcher.matches(it.name) })
             }
             val properties = gettableProperties(raw)
             return PositionResult(
@@ -581,6 +587,26 @@ class KotlinCompletion(
             service.packageMembers(pkg, prefix), packageCompletion = true, bareCallable = inImportOrPackage
         )
         else PositionResult(emptyList())
+    }
+
+    /**
+     * `invoke` on a value of function type (`f.invoke(1)`, and the only way to call a nullable one:
+     * `f?.invoke(1)`). A function type is synthetic, so its one member comes from nowhere but here.
+     */
+    private fun functionTypeInvoke(type: KotlinType): KotlinSymbol? {
+        if (!TypeRendering.isFunctionType(type.qualifiedName) || type.typeArguments.isEmpty()) return null
+        val args = type.typeArguments
+        if (args.any { it.qualifiedName == "kotlin.coroutines.Continuation" }) return null
+        val params = args.dropLast(1).drop(if (type.isExtensionFunctionType) 1 else 0)
+        val result = args.last()
+        fun show(t: TypeRef) = (t as? KotlinType)?.toString() ?: t.qualifiedName.substringAfterLast('.')
+        val names = params.indices.map { "p${it + 1}" }
+        return KotlinSymbol(
+            name = "invoke", kind = SymbolKind.METHOD, type = result,
+            signature = "(" + params.indices.joinToString(", ") { "${names[it]}: ${show(params[it])}" } + "): ${show(result)}",
+            paramTypes = params, paramNames = names, paramHasDefault = params.map { false },
+            declaringClassFqn = type.qualifiedName,
+        )
     }
 
     /** `left infixName█` — the infix functions applicable to [left]'s type: its own members plus the extensions
@@ -668,6 +694,8 @@ class KotlinCompletion(
         // At a `when (subject) { <caret> }` branch slot on a SEALED/ENUM subject → a single "add remaining
         // branches" item that fills every not-yet-covered case (IntelliJ's exhaustive-when fill).
         whenAddBranchesItem(markerLeaf, offset, resolver)?.let { extra += it }
+        // The one parameter of a property setter (`set(<caret>)`) → `value`, the name everyone gives it.
+        setterParameterItem(markerLeaf, matcher)?.let { extra += it }
         // The marker IS the NAME being given to a declaration (`val foo`, `fun bar`, a parameter) — an
         // identifier the user is inventing, so scope symbols / type names / auto-imports don't belong here.
         // (Any override / ctor-property / named-argument stubs above still apply: they're the *right* offers at
@@ -696,6 +724,24 @@ class KotlinCompletion(
         return PositionResult(
             raw, extra = extra, expected = expected, keywordContext = true,
             nameReference = true, capped = types.capped,
+        )
+    }
+
+    /**
+     * `value` at the name of a property setter's parameter (`set(<caret>)`, `set(va<caret>)`). The name is free,
+     * but `value` is the convention, and nothing else is offered here: the slot is a name being invented, so
+     * without this the popup held only words lifted from the buffer (`var` for someone typing `va`).
+     */
+    private fun setterParameterItem(markerLeaf: KtElement?, matcher: PrefixMatcher): CompletionItem? {
+        val param = markerLeaf?.parent as? KtParameter ?: return null
+        if (param.nameIdentifier !== markerLeaf) return null
+        val accessor = (param.parent as? KtParameterList)?.parent as? KtPropertyAccessor ?: return null
+        if (!accessor.isSetter || !matcher.matches(SETTER_PARAMETER)) return null
+        return CompletionItem(
+            label = SETTER_PARAMETER,
+            insertText = SETTER_PARAMETER,
+            kind = CompletionItemKind.PARAMETER,
+            sortPriority = -1,
         )
     }
 
@@ -1179,6 +1225,37 @@ class KotlinCompletion(
         return if (topLevelCallable) TOP_LEVEL_CALLABLE_PROXIMITY else base
     }
 
+    /** A key under which overloads that take ONLY function arguments of the same arities collide: their name,
+     *  parameter names and each function parameter's arity. Null for anything else. */
+    private fun lambdaShapeKey(s: KotlinSymbol): String? {
+        if (s.kind != SymbolKind.METHOD || s.paramTypes.isEmpty()) return null
+        val arities = s.paramTypes.map { p ->
+            val t = p as? KotlinType ?: return null
+            if (!TypeRendering.isFunctionType(t.qualifiedName)) return null
+            t.typeArguments.size
+        }
+        return s.name + "/" + s.paramNames.joinToString(",") + "/" + arities.joinToString(",") + "/" + (s.receiverTypeFqn ?: "")
+    }
+
+    /**
+     * The one overload to show for each group of overloads a caller cannot tell apart while typing: same name,
+     * same parameters, every parameter a lambda. `sumOf { }` is written identically whether the lambda returns
+     * an `Int`, a `Long` or a `BigDecimal`, and seven rows of it bury `sum`. The `Int` flavour is kept when
+     * there is one, since that is what the lambda most often returns; otherwise the first.
+     */
+    private fun lambdaOnlyOverloads(raw: List<KotlinSymbol>): Map<String, KotlinSymbol> {
+        val groups = HashMap<String, MutableList<KotlinSymbol>>()
+        for (s in raw) lambdaShapeKey(s)?.let { groups.getOrPut(it) { ArrayList(2) }.add(s) }
+        val out = HashMap<String, KotlinSymbol>()
+        for ((key, group) in groups) {
+            if (group.size < 2) continue
+            out[key] = group.firstOrNull { c ->
+                ((c.paramTypes.last() as? KotlinType)?.typeArguments?.lastOrNull())?.qualifiedName == "kotlin.Int"
+            } ?: group.first()
+        }
+        return out
+    }
+
     /**
      * IntelliJ-style grouping for member-access ranking (lower sorts earlier): the receiver's own members
      * first, then project-source extensions, then other (library) extensions on a specific receiver, then the
@@ -1203,6 +1280,11 @@ class KotlinCompletion(
         while (queue.isNotEmpty() && out.size < MAX_CHAIN) {
             val t = queue.removeFirst()
             if (out.add(t.qualifiedName)) queue.addAll(t.supertypes())
+        }
+        // An enum class extends `Enum` without saying so, and a project enum's supertype list is what its
+        // source says. Without it `name` and `ordinal` have no popularity and sort under `clone()`.
+        if ("kotlin.Enum" !in out && runCatching { service.enumConstantsOf(type.qualifiedName).isNotEmpty() }.getOrDefault(false)) {
+            out += "kotlin.Enum"
         }
         return out.toList()
     }
@@ -1518,6 +1600,9 @@ class KotlinCompletion(
     private companion object {
         // The classic completion dummy identifier; unlikely to collide with real code.
         const val MARKER = "IntellijIdeaRulezzz"
+
+        /** The conventional name of a property setter's parameter. */
+        private const val SETTER_PARAMETER = "value"
 
         /** Value types with a callable constructor that nobody means to call: completing `String` wants the
          *  type (`String.format`, `String::class`), never `String()`. The boxed Java forms come along because

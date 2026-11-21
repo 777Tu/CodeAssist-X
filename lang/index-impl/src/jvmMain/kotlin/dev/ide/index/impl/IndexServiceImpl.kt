@@ -112,6 +112,12 @@ class IndexServiceImpl(
      * No effect on 64-bit devices or the desktop.
      */
     private val singleThreadedBuild: Boolean = false,
+    /**
+     * Directories (absolute, normalized) the source walk stays out of: derived output that sits inside a
+     * source root, which happens when a module's source root is its own directory. Read on every pass, so a
+     * changed project model takes effect on the next one. A root that is itself one of them is still walked.
+     */
+    private val excludedDirs: () -> Set<Path> = { emptySet() },
 ) : IndexService, Closeable {
 
     private class State(val ext: IndexExtension<*, *>) {
@@ -399,10 +405,10 @@ class IndexServiceImpl(
             val all = buildList {
                 scope.jdkHome?.let { add(Artifact.Jrt(it)) }
                 scope.libraryJars.forEach { add(Artifact.Jar(it, scope.stableJarIds[it])) }
-                scope.sourceArchives.forEach { if (Files.exists(it)) add(Artifact.SourceArchive(it)) }
+                scope.sourceArchives.forEach { if (Files.exists(it)) add(Artifact.SourceArchive(it, scope.stableJarIds[it])) }
                 // Immutable dependency/AAR res dirs index to content-addressed disk segments (parsed once,
                 // reopened thereafter), not into the resident source side.
-                scope.libraryResourceRoots.forEach { if (Files.isDirectory(it)) add(Artifact.ResourceDir(it)) }
+                scope.libraryResourceRoots.forEach { if (Files.isDirectory(it)) add(Artifact.ResourceDir(it, scope.stableJarIds[it])) }
             }.map { a -> a.contentHash().let { h -> Keyed(a, h, sanitize(h.value)) } }
             // Library SOURCE archives feed only the source-doc indexes (parameter names, javadoc). When deferred,
             // they build in the background after this pass, never holding up readiness or the next pass. One
@@ -699,6 +705,9 @@ class IndexServiceImpl(
             val gate = kotlinx.coroutines.sync.Semaphore(1)
             var built = 0
             for (k in docs) {
+                // Nice-to-have work: it waits while one of the app's builds compiles, which it otherwise slows
+                // several times over on a small device (see BuildActivity).
+                dev.ide.platform.BuildActivity.awaitIdle()
                 try {
                     if (!indexArtifact(k.art, gate, null, k.hash).isHit) built++
                 } catch (c: kotlinx.coroutines.CancellationException) {
@@ -986,13 +995,21 @@ class IndexServiceImpl(
             // extension's inputFilter selects its own, so the Java indexes ignore .xml and the resource index .java.
             val groups =
                 roots.map { it to setOf(".java", ".kt") } + resourceRoots.map { it to setOf(".xml") }
+            val excluded = runCatching { excludedDirs() }.getOrDefault(emptySet())
             for ((root, exts) in groups) {
                 if (!Files.isDirectory(root)) continue
+                val start = root.toAbsolutePath().normalize()
                 // walkFileTree hands each file the [BasicFileAttributes] the traversal already stat'd, so the
                 // (size, mtime) fingerprint costs ZERO extra syscalls — the old Files.walk path did three stats
                 // per file (isRegularFile + size + lastModifiedTime), which dominated the "nothing changed" restart
                 // on a large tree (thousands of res/source files) on ART's filesystem.
                 Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                    override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (excluded.isEmpty()) return FileVisitResult.CONTINUE
+                        val d = dir.toAbsolutePath().normalize()
+                        return if (d != start && d in excluded) FileVisitResult.SKIP_SUBTREE else FileVisitResult.CONTINUE
+                    }
+
                     override fun visitFile(f: Path, attrs: BasicFileAttributes): FileVisitResult {
                         if (attrs.isRegularFile && exts.any { f.toString().endsWith(it) }) {
                             val sig = SourceSig(attrs.size(), attrs.lastModifiedTime().toMillis())
@@ -1347,12 +1364,15 @@ class IndexServiceImpl(
 
         /** A library/SDK SOURCE archive (`-sources.jar`, JDK `src.zip`) or sources DIR (Android `sources/`):
          *  yields its `.java`/`.kt` entries as immutable [IndexOrigin.LIBRARY_SOURCE] units (segment-cached). */
-        class SourceArchive(val path: Path) : Artifact() {
+        class SourceArchive(val path: Path, val stableId: String? = null) : Artifact() {
             override val kind get() = BuiltArtifact.Kind.SOURCE_ARCHIVE
             override val location get() = path
             private val isDir get() = Files.isDirectory(path)
             override val label get() = "sources: ${path.fileName}"
             override fun contentHash(): ContentHash {
+                // A caller-supplied path-free id (see [IndexScope.stableJarIds]) keys a library's sources jar by
+                // content, so its segments are shared and can be prebuilt; else the name + size + mtime key below.
+                stableId?.let { return ContentHash("src-$it") }
                 // A dir's sources are immutable once installed (SDK), so key by path; a zip by size+mtime.
                 if (isDir) return ContentHash("srcdir-$path")
                 val attrs = runCatching {
@@ -1430,11 +1450,14 @@ class IndexServiceImpl(
         /** An immutable dependency/AAR `res/` dir: yields its `.xml` resource files as [IndexOrigin.LIBRARY]
          *  units, segment-cached by the dir's content. So a large merged dependency `values.xml` is parsed once
          *  and reopened from disk thereafter, not re-scanned into the resident source side every launch. */
-        class ResourceDir(val path: Path) : Artifact() {
+        class ResourceDir(val path: Path, val stableId: String? = null) : Artifact() {
             override val kind get() = BuiltArtifact.Kind.RESOURCE_DIR
             override val location get() = path
             override val label get() = "res: ${path.parent?.fileName?.let { "$it/" } ?: ""}${path.fileName}"
             override fun contentHash(): ContentHash {
+                // A caller-supplied path-free id (see [IndexScope.stableJarIds]) keys the folder by what it
+                // came from, so its segments are shared and can be prebuilt; else the path + size key below.
+                stableId?.let { return ContentHash("res-$it") }
                 // FNV-1a over each `.xml` file's path + size (no read) - re-extraction invalidates it, and
                 // identical dependency res across projects hashes to (and shares) one segment.
                 var h = -3750763034362895579L // FNV offset basis

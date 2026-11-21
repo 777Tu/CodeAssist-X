@@ -1,5 +1,9 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.platform.rememberWindowFold
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.geometry.Rect
 import dev.ide.ui.components.ToolWindowFrame
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -141,6 +145,52 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 
+/**
+ * What rides on the soft keyboard while a file is being typed in: the coding-symbol bar directly above it
+ * (Settings > Editor can turn it off), and the volume keys moving the caret when the user asked for that.
+ * Shared by both layouts: a foldable or a tablet gets the wide one and types on the same soft keyboard.
+ */
+@Composable
+private fun KeyboardAccessory(state: IdeUiState, keyboardOpen: Boolean) {
+    // Volume keys move the caret while typing, when the user turned that on.
+    val takeVolumeKeys = keyboardOpen && state.active != null && state.volumeKeysMoveCaret
+    DisposableEffect(takeVolumeKeys) {
+        if (takeVolumeKeys) {
+            dev.ide.ui.platform.VolumeKeyCaret.handler = { dir ->
+                state.active?.session?.moveHorizontal(dir, select = false)
+            }
+        }
+        onDispose { dev.ide.ui.platform.VolumeKeyCaret.handler = null }
+    }
+    if (keyboardOpen && state.active != null && state.symbolBarEnabled) {
+        // Derived: the diagnostics list is replaced on every edit, and this scope should
+        // recompose only when the jump key appears or goes away.
+        val activeSession = state.active?.session
+        val hasDiagnostics by remember(activeSession) {
+            derivedStateOf { activeSession?.diagnostics?.isNotEmpty() == true }
+        }
+        EditorSymbolBar(
+            symbols = effectiveSymbolKeys(state.symbolKeys, state.active?.path),
+            onSymbol = { sym -> state.active?.session?.commitText(sym) },
+            onAction = { id -> dispatchSymbolAction(state, id) },
+            showDiagnosticJump = hasDiagnostics,
+            // No gear here — the Symbols & Macros editor lives in Settings ▸ Symbols & Macros.
+            // The dismiss key only where the platform offers no way out of the keyboard
+            // itself; Android's back already does it. See [hasSystemBack].
+            onHideKeyboard = if (hasSystemBack) null else ({ state.active?.session?.ime?.hide() }),
+            trackpad = remember(state) {
+                object : SymbolBarTrackpad {
+                    override fun begin() { state.active?.session?.beginFloatingCaret() }
+                    override fun move(columns: Float, lines: Float) {
+                        state.active?.session?.moveFloatingCaret(columns, lines)
+                    }
+                    override fun end() { state.active?.session?.endFloatingCaret() }
+                }
+            },
+        )
+    }
+}
+
 /** App-global preference marking the dock's one-shot swipe-up teaching bounce as already shown. */
 private const val DOCK_HINT_PREF = "dock.swipeHint.seen"
 
@@ -148,6 +198,11 @@ private const val DOCK_HINT_PREF = "dock.swipeHint.seen"
 /** Below this editor-area width the tool-window panes float over the editor instead of docking beside it
  *  (IntelliJ's "Undock" mode), so a phone in landscape or a narrow window keeps the editor full width. */
 private val FloatingPanesBelow = 880.dp
+/** A centre column at least this wide and [DockingHeight] tall docks its panes even below
+ *  [FloatingPanesBelow]: an unfolded foldable or a small tablet has the height a phone in landscape lacks, and
+ *  there a floating pane only hides the file being worked on. */
+private val DockingWidth = 640.dp
+private val DockingHeight = 520.dp
 /** The editor width docked panes must leave free; past it they stop growing. */
 private val MinEditorWidth = 360.dp
 
@@ -454,7 +509,12 @@ internal fun ExpandedLayout(
                     // Centre column spanning the width between the two stripes: the side panes and the editor, and
                     // the bottom pane under them. The stripes stay full-height, so the bottom group and the footer
                     // sit in the lower corner.
-                    BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                    // Zen mode took the stripes and the top bar, the only touch ways to a tool window here: a swipe
+                    // from the editor's horizontal start brings the left one back, as the phone's drawer does.
+                    val swipeOpensLeft = state.zenMode && isMobilePlatform && state.shownOn(ToolWindowSide.Left) == null
+                    BoxWithConstraints(
+                        Modifier.weight(1f).fillMaxHeight().swipeOpensStartPane(swipeOpensLeft) { state.openLeftSidebar() },
+                    ) {
                         ToolWindowPanes(state, windows, editorBody, hideSide, maxWidth, maxHeight)
                         ToolWindowDropTargets()
                     }
@@ -475,6 +535,8 @@ internal fun ExpandedLayout(
                         )
                     }
                 }
+                // A foldable or a tablet types on the soft keyboard too: the symbol bar sits on it here as on a phone.
+                KeyboardAccessory(state, WindowInsets.ime.getBottom(LocalDensity.current) > 0)
             }
         }
         DestinationSheets(state, onOpenModuleConfig, onOpenDependencies, onToggleTheme, onOpenHub, onOpenIconManager, onCloseProject, fileActions, logsAsSheet = false)
@@ -489,7 +551,8 @@ internal fun ExpandedLayout(
  * beside the editor, bottom under them, each showing the window docked on that side.
  *
  * Below [FloatingPanesBelow] the side panes float over the editor (IntelliJ's "Undock" mode) so a phone in
- * landscape keeps the editor full width; one side at a time then. The console windows are the exception: they
+ * landscape keeps the editor full width; one side at a time then. A column that is narrower than that but
+ * tall, as on an unfolded foldable, still docks them. The console windows are the exception: they
  * stay docked beside the editor, since being watched while the code is edited is what they are for.
  */
 @Composable
@@ -505,7 +568,7 @@ private fun ToolWindowPanes(
     val rightId = state.shownOn(ToolWindowSide.Right)
     val bottomId = state.shownOn(ToolWindowSide.Bottom)
     val maximized = state.maximizedSide?.takeIf { state.shownOn(it) != null }
-    val narrow = width < FloatingPanesBelow
+    val narrow = width < FloatingPanesBelow && !(width >= DockingWidth && height >= DockingHeight)
     // Whether a side floats follows the window on it, and the last one while it animates out.
     var lastLeft by remember { mutableStateOf(leftId) }
     var lastRight by remember { mutableStateOf(rightId) }
@@ -531,8 +594,23 @@ private fun ToolWindowPanes(
     val rightUsed = if (rightDocked) state.rightPaneWidth.dp.coerceIn(MinPaneWidth, rightMax) else 0.dp
     val leftMax = if (leftFloats) (width * 0.85f).coerceAtLeast(MinPaneWidth)
         else (width - editorMin - rightUsed).coerceAtLeast(MinPaneWidth)
-    val leftW = if (maximized == ToolWindowSide.Left) width else state.leftPaneWidth.dp.coerceIn(MinPaneWidth, leftMax)
-    val rightW = if (maximized == ToolWindowSide.Right) width else state.rightPaneWidth.dp.coerceIn(MinPaneWidth, rightMax)
+    // On a foldable a docked pane ends at the fold, so the pane has one side of the hinge and the editor the
+    // other. The left pane takes it when both are docked. Dragging a splitter takes over until the posture
+    // changes.
+    val fold = rememberWindowFold()?.takeIf { it.vertical }
+    var columnBounds by remember { mutableStateOf(Rect.Zero) }
+    var paneDragged by remember(fold) { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val leftToFold = fold?.takeIf { leftDocked && !paneDragged && !columnBounds.isEmpty }
+        ?.let { with(density) { (it.left - columnBounds.left).toDp() } }
+        ?.takeIf { it >= MinPaneWidth && it <= leftMax }
+    val rightToFold = fold?.takeIf { rightDocked && !leftDocked && !paneDragged && !columnBounds.isEmpty }
+        ?.let { with(density) { (columnBounds.right - it.right).toDp() } }
+        ?.takeIf { it >= MinPaneWidth && it <= rightMax }
+    val leftW = if (maximized == ToolWindowSide.Left) width
+        else leftToFold ?: state.leftPaneWidth.dp.coerceIn(MinPaneWidth, leftMax)
+    val rightW = if (maximized == ToolWindowSide.Right) width
+        else rightToFold ?: state.rightPaneWidth.dp.coerceIn(MinPaneWidth, rightMax)
     // Below the editor: the pane leaves the editor a few lines (a phone in landscape has ~300dp here).
     val bottomMax = (height - BottomSplitterSize - MinEditorHeight).coerceAtLeast(MinBottomPaneHeight)
     val bottomH = if (maximized == ToolWindowSide.Bottom) height - BottomSplitterSize
@@ -540,10 +618,12 @@ private fun ToolWindowPanes(
     // Drag deltas accumulate onto the stored size, first pulled into range so a size saved in a larger window
     // starts moving at once instead of after the excess is dragged off.
     val onResizeLeft: ((Dp) -> Unit)? = if (maximized != null) null else ({ d ->
-        state.leftPaneWidth = state.leftPaneWidth.coerceIn(MinPaneWidth.value, leftMax.value) + d.value
+        state.leftPaneWidth = (leftToFold?.value ?: state.leftPaneWidth.coerceIn(MinPaneWidth.value, leftMax.value)) + d.value
+        paneDragged = true
     })
     val onResizeRight: ((Dp) -> Unit)? = if (maximized != null) null else ({ d ->
-        state.rightPaneWidth = state.rightPaneWidth.coerceIn(MinPaneWidth.value, rightMax.value) + d.value
+        state.rightPaneWidth = (rightToFold?.value ?: state.rightPaneWidth.coerceIn(MinPaneWidth.value, rightMax.value)) + d.value
+        paneDragged = true
     })
     val onResizeBottom: ((Dp) -> Unit)? = if (maximized != null) null else ({ d ->
         state.bottomPaneHeight = state.bottomPaneHeight.coerceIn(MinBottomPaneHeight.value, bottomMax.value) + d.value
@@ -573,7 +653,7 @@ private fun ToolWindowPanes(
             controls = if (floating) null else controls(side),
         )
     }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().onGloballyPositioned { columnBounds = it.boundsInWindow() }) {
         Row(Modifier.weight(1f).fillMaxWidth()) {
             if (!leftFloats && (maximized == null || maximized == ToolWindowSide.Left)) sidePane(ToolWindowSide.Left, floating = false)
             Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -723,6 +803,11 @@ internal fun CompactLayout(
     // focus on the code being typed (the nav is one swipe/back away). The IME inset is read raw — directly,
     // not via a consuming modifier — so the app's `safeDrawing` padding doesn't zero it. Always 0 on desktop.
     val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    // A plugin preview pane that asked for the whole screen, showing as the tab's only surface (Preview, not Split).
+    val fullScreenPreview = state.active?.let { a ->
+        a.viewMode == dev.ide.ui.EditorViewMode.Preview &&
+            dev.ide.ui.ext.EditorPreviewRegistry.forPath(a.path)?.fullScreen == true
+    } == true
     // The drawer's live open fraction, mirrored by the top bar's sidebar icon (its divider tracks the
     // drawer edge through a swipe). Float state written per frame; read deferred in the icon's draw.
     var navProgress by remember { mutableFloatStateOf(0f) }
@@ -795,47 +880,11 @@ internal fun CompactLayout(
                     )
                     // While the keyboard is up: a coding-symbol accessory bar sits directly above it. Off-keyboard,
                     // the dock's collapsed bar takes the slot instead.
-                    // Volume keys move the caret while typing, when the user turned that on.
-                    val takeVolumeKeys = keyboardOpen && state.active != null && state.volumeKeysMoveCaret
-                    DisposableEffect(takeVolumeKeys) {
-                        if (takeVolumeKeys) {
-                            dev.ide.ui.platform.VolumeKeyCaret.handler = { dir ->
-                                state.active?.session?.moveHorizontal(dir, select = false)
-                            }
-                        }
-                        onDispose { dev.ide.ui.platform.VolumeKeyCaret.handler = null }
-                    }
-                    if (keyboardOpen && state.active != null) {
-                        // Derived: the diagnostics list is replaced on every edit, and this scope should
-                        // recompose only when the jump key appears or goes away.
-                        val activeSession = state.active?.session
-                        val hasDiagnostics by remember(activeSession) {
-                            derivedStateOf { activeSession?.diagnostics?.isNotEmpty() == true }
-                        }
-                        EditorSymbolBar(
-                            symbols = effectiveSymbolKeys(state.symbolKeys, state.active?.path),
-                            onSymbol = { sym -> state.active?.session?.commitText(sym) },
-                            onAction = { id -> dispatchSymbolAction(state, id) },
-                            showDiagnosticJump = hasDiagnostics,
-                            // No gear here — the Symbols & Macros editor lives in Settings ▸ Symbols & Macros.
-                            // The dismiss key only where the platform offers no way out of the keyboard
-                            // itself; Android's back already does it. See [hasSystemBack].
-                            onHideKeyboard = if (hasSystemBack) null else ({ state.active?.session?.ime?.hide() }),
-                            trackpad = remember(state) {
-                                object : SymbolBarTrackpad {
-                                    override fun begin() { state.active?.session?.beginFloatingCaret() }
-                                    override fun move(columns: Float, lines: Float) {
-                                        state.active?.session?.moveFloatingCaret(columns, lines)
-                                    }
-                                    override fun end() { state.active?.session?.endFloatingCaret() }
-                                }
-                            },
-                        )
-                    }
+                    KeyboardAccessory(state, keyboardOpen)
                     // Reserve the dock's collapsed-bar slot so the editor column isn't hidden behind it. Zen mode hides
                     // the bar, unless the console is pulled up.
                     // Room for the dock's bar, which a lesson hides (see the BuildDock below).
-                    if (!keyboardOpen && !state.zenMode && !(LocalLessonBanner.current != null && state.learnFocus)) {
+                    if (!keyboardOpen && !state.zenMode && !(LocalLessonBanner.current != null && state.learnFocus) && !fullScreenPreview) {
                         androidx.compose.foundation.layout.Spacer(Modifier.height(DockBarHeight))
                     }
                 }
@@ -847,7 +896,8 @@ internal fun CompactLayout(
                     buildState = buildState,
                     // Hidden during a lesson too: Search / Source / AI are distractions there (and the AI would
                     // do the exercise). The console still opens for a run; Files and Run stay in the top bar.
-                    hidden = (keyboardOpen || state.zenMode || (LocalLessonBanner.current != null && state.learnFocus)) && !state.consoleOpen,
+                    // And while a full-screen preview pane (the layout editor's canvas) is the whole surface.
+                    hidden = (keyboardOpen || state.zenMode || (LocalLessonBanner.current != null && state.learnFocus) || fullScreenPreview) && !state.consoleOpen,
                     modifier = Modifier.align(Alignment.BottomCenter),
                     hint = dockHint,
                     onHintShown = {

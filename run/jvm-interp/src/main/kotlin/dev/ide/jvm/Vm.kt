@@ -21,6 +21,18 @@ fun interface ClassBytesSource {
     }
 }
 
+/**
+ * The resources on the PROGRAM's classpath, by the `/`-separated name a class loader takes (`assets/test.txt`),
+ * in classpath order; empty when it has none by that name.
+ *
+ * An interpreted class is not defined by a loader that has ever seen the program's classpath: its `Class` is a
+ * stand-in defined in the host, so `getResource` on it (or on its loader, or the thread's context loader)
+ * searched the IDE's own classpath and answered null for every file the project ships.
+ */
+fun interface ProgramResources {
+    fun find(name: String): List<java.net.URL>
+}
+
 /** Decides which classes the interpreter runs; the rest are handled by the [NativeBridge]. */
 fun interface InterpretPolicy {
     fun interpret(internalName: String): Boolean
@@ -34,6 +46,37 @@ fun interface InterpretPolicy {
             "java/", "javax/", "jdk/", "sun/", "com/sun/", "kotlin/", "kotlinx/",
             "android/", "androidx/", "com/android/", "dalvik/", "org/jetbrains/",
         )
+
+        /**
+         * [base], except that a class in a bridged LIBRARY namespace that [host] cannot load is interpreted from
+         * the classpath instead of being bridged to a class that isn't there.
+         *
+         * Bridging `kotlinx/`, `androidx/` and the rest assumes the IDE ships each class under its own name, and
+         * it doesn't always: a library it doesn't bundle at all (kotlinx-datetime), and, on the R8-minified
+         * Android build, one it bundles under another name. kotlinx-collections-immutable comes in with the
+         * Kotlin compiler and R8 renames every class of it (`ExtensionsKt` -> `nm6` in 3.44.0), so a console
+         * program calling `persistentListOf()` died in the bridge. Interpreting the project's own copy works for
+         * both. A class the host does load still bridges, so the IDE's types keep their identity, and the
+         * platform namespaces never fall back: java.* and android.* are not the classpath's to supply.
+         *
+         * The VM asks a policy once per class name, so the probe is one `Class.forName` per library class.
+         */
+        fun withHostFallback(host: ClassLoader, base: InterpretPolicy = DEFAULT): InterpretPolicy =
+            InterpretPolicy { name ->
+                base.interpret(name) || (LIBRARY_PREFIXES.any { name.startsWith(it) } && !hostLoads(host, name))
+            }
+
+        private val LIBRARY_PREFIXES = listOf("kotlin/", "kotlinx/", "androidx/", "com/android/", "org/jetbrains/")
+
+        private fun hostLoads(host: ClassLoader, internalName: String): Boolean =
+            try {
+                Class.forName(internalName.replace('/', '.'), false, host)
+                true
+            } catch (_: ClassNotFoundException) {
+                false
+            } catch (_: LinkageError) {
+                false
+            }
     }
 }
 
@@ -43,6 +86,11 @@ fun interface InterpretPolicy {
  * `actual` on the host lives in a differently-named facade. Returns the host owner's internal name, or null to
  * keep the normal resolution. Consulted on every `invokestatic`, so it must reject cheaply.
  */
+/** Told when a contained peer override failed; see [Vm]'s `peerFailure`. [className] is the interpreted class. */
+fun interface PeerFailurePolicy {
+    fun onFailure(peer: Any, className: String, method: String, error: Throwable)
+}
+
 fun interface StaticRedirect {
     fun hostOwner(owner: String, name: String, descriptor: String): String?
 }
@@ -77,7 +125,7 @@ class Vm(
     private val policy: InterpretPolicy = InterpretPolicy.DEFAULT,
     internal val bridge: NativeBridge = ReflectiveBridge(),
     /** Produces the real peer objects that let platform code invoke interpreted overrides. */
-    private val peerFactory: PeerFactory = AsmPeerFactory(),
+    internal val peerFactory: PeerFactory = AsmPeerFactory(),
     /** When > 0, a `java.lang.Thread` the program constructs is given this stack size (bytes). Interpreted
      *  recursion runs on the host thread stack, so a spawned thread needs a generous stack like the main run
      *  thread; the default host stack (a few hundred KB) overflows far shallower. 0 = use the host default
@@ -88,9 +136,30 @@ class Vm(
     internal val staticRedirect: StaticRedirect? = null,
     /** See [ClassAlias]; null (the default) aliases nothing. */
     private val classAlias: ClassAlias? = null,
+    /**
+     * Fixed results for platform (bridged) instance methods, keyed `name + descriptor`: a call interpreted code
+     * makes to one of these on a real object returns the value instead of running the method. A preview sets
+     * `isInEditMode()Z` to true, the convention custom views use to skip what cannot run in a design tool.
+     * Empty (the default) changes nothing and costs one check per bridged call.
+     */
+    internal val constantMethods: Map<String, Any?> = emptyMap(),
+    /**
+     * When set, an interpreted override that platform code invokes through a peer (a custom view's `onMeasure`,
+     * `onDraw`, ...) is CONTAINED: a throw, or running past [peerStepBudget], is reported here and the peer falls
+     * back to the real superclass implementation (or a zero for an abstract one), so one broken view degrades
+     * instead of failing the whole frame. Null (the default) lets failures propagate.
+     */
+    private val peerFailure: PeerFailurePolicy? = null,
+    /** Instructions one contained peer call may run (0 = unlimited); only with [peerFailure]. */
+    private val peerStepBudget: Long = 0,
 ) {
+    /** See [ProgramResources]; null (the default) leaves every resource lookup to the host. */
+    @Volatile var programResources: ProgramResources? = null
+
     private val classes = java.util.concurrent.ConcurrentHashMap<String, VmClass>()
     private val interpreter = Interpreter(this)
+    private val reflection = InterpretedReflection(this)
+    private val proxies = InterpretedProxies(this, reflection)
 
     /** Stored for a name known NOT to be interpreted (bridged or absent): [classes] is a [java.util.concurrent
      *  .ConcurrentHashMap], which cannot hold a null value, so [resolve] uses this sentinel and maps it back to
@@ -107,6 +176,16 @@ class Vm(
     /** The classes an enum's shared peer forwards to, by the enum's internal name (see [enumOverrideSources]):
      *  cached because the peer shape is rebuilt for every constant the enum constructs. */
     private val enumConstantClasses = java.util.concurrent.ConcurrentHashMap<String, List<VmClass>>()
+
+    /**
+     * [peerSpec] per class, and [overridableMethods] per real supertype set. Both depend only on class
+     * structure, yet were recomputed for every interpreted object that gets a peer: each view an inflate
+     * creates reflected over its whole real superclass chain (`getDeclaredMethods` on View, TextView, ...),
+     * which profiled at about half of a Material layout's inflate on a device. Keyed by the [VmClass] object,
+     * so a class [forgetClasses] reloads gets a spec of its own.
+     */
+    private val peerSpecs = java.util.concurrent.ConcurrentHashMap<VmClass, PeerSpec>()
+    private val overridableBySupers = java.util.concurrent.ConcurrentHashMap<List<Class<*>>, Map<String, Candidate>>()
 
     /** The compiler-generated array of an enum's constants, in ordinal order (see [enumConstantPeers]). */
     private val ENUM_VALUES_FIELD = "\$VALUES"
@@ -143,6 +222,10 @@ class Vm(
         interpreter.withReifiedTypes(types, body)
 
     private val loader: ClassLoader = Vm::class.java.classLoader
+
+    init {
+        installPlatformStandIns()
+    }
     private val peerDispatch = PeerDispatch { peer, vmObject, name, descriptor, args ->
         val obj = vmObject as VmObject
         // Link the peer to its interpreted instance on the first dispatch. A real superclass constructor can
@@ -151,7 +234,17 @@ class Vm(
         // peer-under-construction, not a second, no-argument peer built before initPeer records this one.
         if (obj.peer == null) obj.peer = peer
         val sink = peerFactory.peerExceptionSink
-        if (sink == null) {
+        val contain = peerFailure
+        if (contain != null) {
+            try {
+                if (peerStepBudget > 0) interpreter.withStepBudget(peerStepBudget) { runInterpretedOverride(obj, name, descriptor, args) }
+                else runInterpretedOverride(obj, name, descriptor, args)
+            } catch (t: Throwable) {
+                if (t is VmInterruptedException) throw t
+                contain.onFailure(peer, obj.vmClass.name.replace('/', '.'), name, t)
+                superOrZero(peer, name, descriptor, args)
+            }
+        } else if (sink == null) {
             runInterpretedOverride(obj, name, descriptor, args)
         } else {
             // A concrete-class peer is a GENERATED subclass whose overridden methods dispatch here with no
@@ -168,6 +261,20 @@ class Vm(
             }
         }
     }
+
+    /** The real superclass implementation of [name] on [peer] (its generated `super$` trampoline), else a zero. */
+    private fun superOrZero(peer: Any, name: String, descriptor: String, args: Array<Any?>): Any? {
+        val trampoline = peer.javaClass.methods.firstOrNull {
+            it.name == "super$" + name && it.parameterCount == args.size &&
+                org.objectweb.asm.Type.getMethodDescriptor(it) == descriptor
+        }
+        return if (trampoline != null) runCatching { trampoline.invoke(peer, *args) }.getOrElse { zeroForReturn(Descriptors.returnType(descriptor)) }
+        else zeroForReturn(Descriptors.returnType(descriptor))
+    }
+
+    /** Run [body] with at most [budget] more interpreted instructions on this thread; past it, interpreted code
+     *  throws [VmStepBudgetException]. Nested budgets keep the tighter one. */
+    fun <T> withStepBudget(budget: Long, body: () -> T): T = interpreter.withStepBudget(budget, body)
 
     /** A type-correct zero for a method whose return descriptor is [retDesc], handed back to platform code when
      *  a guarded peer override fails (see [peerDispatch]). Boxed to match the primitive the generated peer
@@ -211,10 +318,35 @@ class Vm(
                 cn.interfaces ?: emptyList(),
                 cn.access,
                 cn.methods ?: emptyList(),
-                cn.fields ?: emptyList()
+                cn.fields ?: emptyList(),
+                cn.signature,
+                cn.visibleAnnotations ?: emptyList(),
+                cn.permittedSubclasses ?: emptyList(),
+                cn.recordComponents?.map { it.name to it.descriptor } ?: emptyList(),
             )
         }
         return resolved.takeIf { it !== notInterpreted }
+    }
+
+    /**
+     * Interprets a stand-in for each platform class newer Java bytecode needs that this host's runtime does not
+     * have: `java.lang.Record` (every record's superclass, Android 14), `java.lang.MatchException` (what an
+     * exhaustive pattern `switch` throws, Android 16), and `ScopedValue` and `StructuredTaskScope`, which Android
+     * has at no API level. Without the first a record could not be constructed at all on an older device. A host that has the class keeps its own, so `instanceof Record` and what a `catch` sees
+     * are the real thing there. [force] installs them regardless, which is how a desktop test runs this path.
+     */
+    internal fun installPlatformStandIns(force: Boolean = false) {
+        for ((name, make) in PlatformStandIns.ALL) {
+            if (force || runCatching { loadReal(name) }.isFailure) make().forEach { defineSynthetic(it) }
+        }
+    }
+
+    /** Registers [cn], a class the VM generated itself (an annotation's implementation, see
+     *  [InterpretedReflection]), so it resolves and runs like one read from the classpath. */
+    internal fun defineSynthetic(cn: ClassNode): VmClass {
+        val cls = VmClass(cn.name, cn.superName, cn.interfaces ?: emptyList(), cn.access, cn.methods ?: emptyList(),
+            cn.fields ?: emptyList(), cn.signature, cn.visibleAnnotations ?: emptyList())
+        return classes.putIfAbsent(cn.name, cls) ?: cls
     }
 
     /**
@@ -224,6 +356,9 @@ class Vm(
      */
     fun forgetClasses(match: (String) -> Boolean) {
         classes.keys.removeIf(match)
+        resolveCache.clear() // a kept class may have resolved a method to a forgotten superclass
+        epoch++
+        peerSpecs.keys.removeIf { match(it.name) }
     }
 
     /** The [VmMonitor] for a `synchronized`/`wait`/`notify` on [ref]: attached to the object itself for an
@@ -345,13 +480,16 @@ class Vm(
                 realComponentType(arr.elementDescriptor),
                 arr.length
             ).also { arr.realMirror = it }
-        for (i in 0 until arr.length) java.lang.reflect.Array.set(
-            mirror,
-            i,
-            Marshalling.toRealArg(toReal(arr.data[i]), arr.elementDescriptor)
-        )
+        for (i in 0 until arr.length) java.lang.reflect.Array.set(mirror, i, realElement(arr.data[i], arr.elementDescriptor))
         return mirror
     }
+
+    /** What an interpreted array's element is in its real mirror: a lambda as the proxy of its functional
+     *  interface the bridge would pass it as on its own (a real `Function1[]` holds nothing else), an
+     *  interpreted object as its peer, a small primitive as its own wrapper. */
+    private fun realElement(element: Any?, elementDescriptor: String): Any? =
+        if (element is VmLambda) bridge.realElement(element, elementDescriptor)
+        else Marshalling.toRealArg(toReal(element), elementDescriptor)
 
     /** Copy each argument array's real mirror back into the interpreted array after a platform call, so an
      *  in-place mutation (sort, fill, arraycopy into it) is visible to interpreted code. Nested arrays recurse. */
@@ -363,9 +501,11 @@ class Vm(
         val mirror = arr.realMirror ?: return
         for (i in 0 until arr.length) {
             val element = arr.data[i]
-            if (element is VmArray) syncBack(element) // the mirror element is this nested array's own mirror
-            else arr.data[i] =
-                Marshalling.realToVm(java.lang.reflect.Array.get(mirror, i), arr.elementDescriptor)
+            if (element is VmArray) { syncBack(element); continue } // the mirror element is this nested array's own mirror
+            val real = java.lang.reflect.Array.get(mirror, i)
+            // A lambda the platform left in place stays the lambda, not the proxy that stood for it over there.
+            if (element is VmLambda && real === bridge.realElement(element, arr.elementDescriptor)) continue
+            arr.data[i] = Marshalling.realToVm(real, arr.elementDescriptor)
         }
     }
 
@@ -382,6 +522,12 @@ class Vm(
         return bridge.invokeStatic(owner, name, descriptor, real).also { syncArraysBack(vmArgs) }
     }
 
+    private val internalNames = java.util.concurrent.ConcurrentHashMap<Class<*>, String>()
+
+    /** [cls]'s internal name (`java/util/ArrayList`), kept per class: it is asked on every bridged call. */
+    private fun internalNameOf(cls: Class<*>): String =
+        internalNames[cls] ?: cls.name.replace('.', '/').also { internalNames[cls] = it }
+
     internal fun bridgeVirtual(
         receiver: Any,
         name: String,
@@ -389,13 +535,7 @@ class Vm(
         vmArgs: List<Any?>
     ): Any? {
         val real = vmArgs.map { toReal(it) }
-        interceptReflection(
-            receiver,
-            receiver.javaClass.name.replace('.', '/'),
-            name,
-            descriptor,
-            real
-        )?.let { return it.value }
+        interceptReflection(receiver, internalNameOf(receiver.javaClass), name, descriptor, real)?.let { return it.value }
         return bridge.invokeVirtual(receiver, name, descriptor, real)
             .also { syncArraysBack(vmArgs) }
     }
@@ -429,6 +569,9 @@ class Vm(
         if (owner == "java/lang/Class" && receiver == null && name == "forName") {
             val internal = (args.getOrNull(0) as? String)?.replace('.', '/') ?: return null
             return classForInterpreted(internal)?.let { Reflected(it) }
+        }
+        programResources?.let { resources ->
+            programResource(resources, receiver, owner, name, descriptor, args)?.let { return it }
         }
         // Class.asSubclass(Base.class) on a reflection Class: verify against the interpreted hierarchy.
         if (receiver is Class<*> && name == "asSubclass") {
@@ -487,6 +630,21 @@ class Vm(
                 ),
             )
         }
+        // java.lang.reflect.Proxy over an interpreted interface, whose class literal the real Proxy rejects as
+        // "not an interface": the VM makes the proxy itself ([InterpretedProxies]).
+        if (owner == "java/lang/reflect/Proxy" && receiver == null) {
+            val result = when (name) {
+                "newProxyInstance" -> proxies.newProxyInstance(args.getOrNull(1) as? Array<*>, args.getOrNull(2))
+                "getInvocationHandler" -> proxies.invocationHandlerOf(args.getOrNull(0))
+                "isProxyClass" -> (args.getOrNull(0) as? Class<*>)?.let { peerFactory.interpretedNameOf(it) }
+                    ?.let { Marshalling.realPrimToVm(proxies.isProxyClassName(it)) } ?: InterpretedReflection.NOT_HANDLED
+                else -> InterpretedReflection.NOT_HANDLED
+            }
+            if (result !== InterpretedReflection.NOT_HANDLED) return Reflected(result)
+        }
+        // Members, supertypes, generic signatures and annotations of an interpreted type, and the use of a
+        // mirrored Method/Field: see [InterpretedReflection].
+        reflection.intercept(receiver, name, descriptor, args).let { if (it !== InterpretedReflection.NOT_HANDLED) return Reflected(it) }
         // Constructor.newInstance(args) on a reflection-class constructor: run the interpreted constructor.
         if (receiver is java.lang.reflect.Constructor<*> && name == "newInstance") {
             val internal = peerFactory.interpretedNameOf(receiver.declaringClass) ?: return null
@@ -511,10 +669,63 @@ class Vm(
         return null
     }
 
+    /**
+     * `getResource` / `getResourceAsStream` / `getResources` asked of a `Class` or a `ClassLoader` (and the
+     * `ClassLoader.getSystemResource*` statics), answered from the program's classpath first. Null when the
+     * program has no such resource, which leaves the call to the host as before, so a bridged library's own
+     * files still resolve.
+     */
+    private fun programResource(
+        resources: ProgramResources,
+        receiver: Any?,
+        owner: String,
+        name: String,
+        descriptor: String,
+        args: List<Any?>,
+    ): Reflected? {
+        val system = receiver == null && owner == "java/lang/ClassLoader"
+        val kind = when {
+            !(receiver is Class<*> || receiver is ClassLoader || system) -> return null
+            descriptor == "(Ljava/lang/String;)Ljava/net/URL;" &&
+                name == (if (system) "getSystemResource" else "getResource") -> 0
+            descriptor == "(Ljava/lang/String;)Ljava/io/InputStream;" &&
+                name == (if (system) "getSystemResourceAsStream" else "getResourceAsStream") -> 1
+            descriptor == "(Ljava/lang/String;)Ljava/util/Enumeration;" && receiver !is Class<*> &&
+                name == (if (system) "getSystemResources" else "getResources") -> 2
+            else -> return null
+        }
+        val asked = args.getOrNull(0) as? String ?: return null
+        // A Class resolves a name against its own package unless it starts with `/`; a loader takes it as is.
+        val path = when {
+            receiver !is Class<*> -> asked
+            asked.startsWith("/") -> asked.substring(1)
+            else -> {
+                val self = peerFactory.interpretedNameOf(receiver) ?: receiver.name.replace('.', '/')
+                val pkg = self.substringBeforeLast('/', "")
+                if (pkg.isEmpty()) asked else "$pkg/$asked"
+            }
+        }
+        val found = runCatching { resources.find(path) }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+        return when (kind) {
+            0 -> Reflected(found.first())
+            // Uncached, so a jar the run closes (or the user rebuilds) is not held open by the URL handler.
+            1 -> runCatching { found.first().openConnection().apply { useCaches = false }.getInputStream() }
+                .getOrNull()?.let { Reflected(it) }
+            else -> {
+                val host = runCatching {
+                    val real = if (system) bridge.invokeStatic(owner, name, descriptor, args)
+                    else bridge.invokeVirtual(receiver!!, name, descriptor, args)
+                    (real as? java.util.Enumeration<*>)?.toList().orEmpty()
+                }.getOrDefault(emptyList())
+                Reflected(java.util.Collections.enumeration((found + host).distinct()))
+            }
+        }
+    }
+
     /** The simple name `Class.getSimpleName` reports for interpreted internal name [internalName]: the last
      *  `$`-separated segment, empty for an anonymous class (whose segment is all digits) and with a local
      *  class's leading digits stripped. */
-    private fun simpleNameOf(internalName: String): String =
+    internal fun simpleNameOf(internalName: String): String =
         internalName.substringAfterLast('/').substringAfterLast('$').dropWhile { it.isDigit() }
 
     /** What `Class.toString` reports for interpreted internal name [internalName]: `class a.b.C`, or
@@ -564,7 +775,7 @@ class Vm(
 
     /** A parameter descriptor with any INTERPRETED reference type replaced by `Object` (no real class exists for
      *  it), so a reflection-class stub constructor uses only loadable parameter types. */
-    private fun realizeType(t: String): String = when {
+    internal fun realizeType(t: String): String = when {
         t.startsWith("[") -> "[" + realizeType(t.substring(1))
         t.startsWith("L") -> if (resolve(
                 t.substring(
@@ -653,6 +864,121 @@ class Vm(
         }
     }
 
+    private val realArrayElements = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * Whether an array of [elementDescriptor] is created as a REAL host array instead of a [VmArray]. It is when
+     * no element could ever be an interpreter-only value: a primitive, a final platform class (`String`, the
+     * boxes), or an array of those. A real array is one object on both sides of the bridge, so platform code
+     * that keeps it (`list.add(a)`, `ByteBuffer.wrap(b)`, `Arrays.asList(a)`) and the program see each other's
+     * writes, it crosses with no copy, and its primitives are stored unboxed. Any other element type (an
+     * interpreted class, or a platform type an interpreted object or lambda can implement) stays a [VmArray],
+     * whose elements are interpreter values and which crosses as a mirror copy.
+     */
+    internal fun isRealArrayElement(elementDescriptor: String): Boolean = when (elementDescriptor[0]) {
+        '[' -> isRealArrayElement(elementDescriptor.substring(1))
+        'L' -> realArrayElements.getOrPut(elementDescriptor) {
+            val name = elementDescriptor.substring(1, elementDescriptor.length - 1)
+            resolve(name) == null &&
+                runCatching { java.lang.reflect.Modifier.isFinal(loadReal(name).modifiers) }.getOrDefault(false)
+        }
+        else -> true
+    }
+
+    /** A new array of [length] elements of [elementDescriptor], each at its type default: a real array or a
+     *  [VmArray] as [isRealArrayElement] decides. A negative length and an exhausted heap are the program's to
+     *  catch, so both are thrown as interpreted exceptions. */
+    internal fun newArray(elementDescriptor: String, length: Int): Any {
+        if (length < 0) throw VmException(NegativeArraySizeException(length.toString()))
+        return try {
+            if (isRealArrayElement(elementDescriptor)) {
+                java.lang.reflect.Array.newInstance(realComponentType(elementDescriptor), length)
+            } else VmArray.of(elementDescriptor, length)
+        } catch (e: OutOfMemoryError) {
+            throw VmException(e)
+        }
+    }
+
+    /** A multi-dimensional array of type [arrayDescriptor] (`[[I`), allocating the dimensions [dims] gives and
+     *  leaving any deeper ones null, as `new int[2][]` does. */
+    internal fun newMultiArray(arrayDescriptor: String, dims: IntArray, depth: Int = 0): Any {
+        val elementDescriptor = arrayDescriptor.substring(1)
+        val arr = newArray(elementDescriptor, dims[depth])
+        if (depth + 1 < dims.size) {
+            for (i in 0 until dims[depth]) {
+                val inner = newMultiArray(elementDescriptor, dims, depth + 1)
+                @Suppress("UNCHECKED_CAST")
+                if (arr is VmArray) arr.data[i] = inner else (arr as Array<Any?>)[i] = inner
+            }
+        }
+        return arr
+    }
+
+    private val arrayTargetClasses = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    /** The real class an array type descriptor names (`[I`, `[[Ljava/lang/String;`), or null when its element
+     *  type is interpreted or cannot be loaded, so no real class stands for it. */
+    internal fun realArrayClass(arrayDescriptor: String): Class<*>? {
+        val cached = arrayTargetClasses.getOrPut(arrayDescriptor) {
+            val base = arrayDescriptor.trimStart('[')
+            val interpreted = base.length > 1 && resolve(base.substring(1, base.length - 1)) != null
+            if (interpreted) NO_REAL_CLASS
+            else runCatching { realComponentType(arrayDescriptor) }.getOrNull() ?: NO_REAL_CLASS
+        }
+        return cached as? Class<*>
+    }
+
+    /**
+     * Whether a [VmArray] whose elements are [element] is an instance of the array type whose elements are
+     * [target] (both type descriptors): array types are covariant in a reference element type and invariant in a
+     * primitive one (JLS 4.10.3). A pair that cannot be decided (a platform type that does not load here) is
+     * accepted, since the compiler already checked the cast it emitted.
+     */
+    internal fun arrayElementAssignable(element: String, target: String): Boolean = when {
+        element == target -> true
+        element.length == 1 || target.length == 1 -> false
+        target == "Ljava/lang/Object;" -> true
+        element[0] == '[' ->
+            if (target[0] == '[') arrayElementAssignable(element.substring(1), target.substring(1))
+            else target == "Ljava/lang/Cloneable;" || target == "Ljava/io/Serializable;"
+        target[0] == '[' -> false
+        else -> {
+            val from = element.substring(1, element.length - 1)
+            val to = target.substring(1, target.length - 1)
+            val fromClass = resolve(from)
+            when {
+                fromClass != null -> isSubtype(fromClass, to) || isRealInstance(fromClass, to)
+                resolve(to) != null -> false // a platform class is never a subtype of an interpreted one
+                else -> runCatching { loadReal(to).isAssignableFrom(loadReal(from)) }.getOrDefault(true)
+            }
+        }
+    }
+
+    /**
+     * Whether [value] may be stored into a [VmArray] of [elementDescriptor] (`aastore`'s check, which raises
+     * `ArrayStoreException`). Only a pairing the VM can decide for certain is refused: an interpreted object
+     * against either kind of element type, and a platform object against a platform element type. Anything
+     * else (a lambda, a platform object standing for an interpreted type) is accepted as before.
+     */
+    internal fun arrayAccepts(elementDescriptor: String, value: Any?): Boolean {
+        if (value == null || elementDescriptor == "Ljava/lang/Object;") return true
+        if (elementDescriptor[0] == '[') {
+            return when (value) {
+                is VmArray -> arrayElementAssignable(value.elementDescriptor, elementDescriptor.substring(1))
+                is VmObject, is VmLambda -> false
+                else -> if (value.javaClass.isArray) realArrayClass(elementDescriptor)?.isInstance(value) ?: true else false
+            }
+        }
+        val name = elementDescriptor.substring(1, elementDescriptor.length - 1)
+        return when (value) {
+            is VmObject -> isSubtype(value.vmClass, name) || isRealInstance(value.vmClass, name)
+            is VmArray -> name == "java/lang/Cloneable" || name == "java/io/Serializable"
+            is VmLambda -> true
+            else -> if (resolve(name) != null) true
+            else runCatching { loadReal(name).isInstance(value) }.getOrDefault(true)
+        }
+    }
+
     /** The real array class with [component] as its component type. A nested array's element type is resolved
      *  through [realComponentType] rather than by loading the descriptor's own name, because an interpreted
      *  element type has no real class of that name to load, and a host classpath that happens to carry one
@@ -710,7 +1036,8 @@ class Vm(
         val params = Descriptors.paramTypes(descriptor)
         val vmArgs = args.mapIndexed { i, a -> Marshalling.realToVm(a, params[i]) }
         val (declaring, method) = findInHierarchy(o.vmClass, name, descriptor)
-            ?: throw VmUnsupportedException("no interpreted override $name$descriptor on ${o.vmClass.name}")
+            ?: if (name + descriptor == TO_STRING) return@surfacing defaultToString(o)
+            else throw VmUnsupportedException("no interpreted override $name$descriptor on ${o.vmClass.name}")
         val result = interpreter.execute(declaring, method, o, vmArgs)
         if (result is VmObject) peerOf(result) else Marshalling.vmToReal(
             result,
@@ -718,12 +1045,24 @@ class Vm(
         )
     }
 
+    /** What `Object.toString()` (`Name@hash`) or `Throwable.toString()` (`Name: message`) answers for [o], with
+     *  the interpreted class's name where the real method would print the peer's. */
+    private fun defaultToString(o: VmObject): String {
+        val name = o.vmClass.name.replace('/', '.')
+        val peer = o.peer
+        return if (peer is Throwable) peer.localizedMessage?.let { "$name: $it" } ?: name
+        else name + "@" + Integer.toHexString(peer?.hashCode() ?: System.identityHashCode(o))
+    }
+
     /** The peer shape for [vmClass]: its nearest real superclass, the real interfaces it declares, the
      *  real-supertype methods it overrides, and the abstract supertype methods it leaves unimplemented. An
      *  ENUM's constants all share ONE peer class (a real enum, whose `values()` universe is that enum's
      *  constants), so the shape is taken from the enum itself even for a constant with a body, and covers
      *  every body's overrides. */
-    private fun peerSpec(vmClass: VmClass): PeerSpec {
+    private fun peerSpec(vmClass: VmClass): PeerSpec =
+        peerSpecs[vmClass] ?: computePeerSpec(vmClass).also { peerSpecs.putIfAbsent(vmClass, it) }
+
+    private fun computePeerSpec(vmClass: VmClass): PeerSpec {
         val enumClass = enumBaseOf(vmClass)
         val shapeOf = enumClass ?: vmClass
         val superClass = loadReal(realSuperName(shapeOf))
@@ -743,6 +1082,15 @@ class Vm(
                 } -> methods.add(candidate.method)
 
                 candidate.abstract -> stubs.add(candidate.method)
+            }
+        }
+        // `Object.toString()` and `Throwable.toString()` print `getClass().getName()`, which on a peer is the
+        // generated class (`dev.ide.jvm.peers.a_b_MyException_Peer1: message`). A class that leaves either in
+        // place gets the override anyway, answered with the interpreted class's name ([defaultToString]), so a
+        // printed object, a logged exception and a stack trace's first line name the program's own class.
+        candidates[TO_STRING]?.method?.let { m ->
+            if (m !in methods && (m.ownerInternalName == "java/lang/Object" || m.ownerInternalName == "java/lang/Throwable")) {
+                methods.add(m)
             }
         }
         return PeerSpec(
@@ -861,7 +1209,7 @@ class Vm(
     private fun declaresInChain(vmClass: VmClass, name: String, descriptor: String): Boolean =
         findInHierarchy(vmClass, name, descriptor) != null
 
-    private fun loadReal(internalName: String): Class<*> =
+    internal fun loadReal(internalName: String): Class<*> =
         Class.forName(internalName.replace('/', '.'), false, loader)
 
     /** The real [Class] a `ldc` class-literal constant names. Only reference and array literals reach here (a
@@ -913,6 +1261,12 @@ class Vm(
      *  superclass declares FINAL blocks the signature entirely — the same signature reachable through an
      *  interface (Map.size vs kotlin AbstractMap's final size) must not become an override. */
     private fun overridableMethods(
+        superClass: Class<*>,
+        interfaces: List<Class<*>>
+    ): Map<String, Candidate> =
+        overridableBySupers.getOrPut(listOf(superClass) + interfaces) { computeOverridableMethods(superClass, interfaces) }
+
+    private fun computeOverridableMethods(
         superClass: Class<*>,
         interfaces: List<Class<*>>
     ): Map<String, Candidate> {
@@ -972,28 +1326,15 @@ class Vm(
      *  field's slot is an [AtomicReference] holder so its reads/writes get real
      *  volatile semantics (see [isVolatileInstanceField]).
      **/
-    internal fun newInstance(cls: VmClass): VmObject {
-        val obj = VmObject(cls)
-        var c: VmClass? = cls
-        while (c != null) {
-            val cur = c
-            cur.instanceFieldDescs.forEach { (n, d) ->
-                val default = Descriptors.defaultValue(d)
-                obj.fields.putIfAbsent(
-                    n,
-                    if (n in cur.volatileInstanceFields) {
-                        AtomicReference(
-                            default
-                        )
-                    } else {
-                        default
-                    }
-                )
-            }
-            c = cur.superName?.let { resolve(it) }
-        }
-        return obj
-    }
+    internal fun newInstance(cls: VmClass): VmObject = VmObject(cls, layoutOf(cls))
+
+    /** [cls]'s instance-field layout, built on first use on top of its interpreted superclass's. */
+    internal fun layoutOf(cls: VmClass): FieldLayout =
+        cls.layout ?: FieldLayout(cls.superName?.let { resolve(it) }?.let { layoutOf(it) }, cls).also { cls.layout = it }
+
+    /** Changes whenever a class is forgotten, so state resolved against the classes of a moment ago (a call
+     *  site's target, a static field's cell) is resolved again. */
+    @Volatile @JvmField internal var epoch: Int = 0
 
     /** Whether the interpreted class in [start]'s chain that DECLARES instance field [name] declares it
      *  `volatile` (so its slot is an AtomicReference holder). Mirrors [vmDeclaresField]'s walk. */
@@ -1033,12 +1374,18 @@ class Vm(
             }
         }
         var ok = false
+        val depth = initDepth.get()
+        val initT0 = System.nanoTime()
+        val initSteps = interpreter.steps
+        depth[0]++
         try {
             cls.superName?.let { resolve(it) }?.let { ensureInitialized(it) }
             cls.declaredMethod("<clinit>", "()V")
                 ?.let { interpreter.execute(cls, it, receiver = null, args = emptyList()) }
             ok = true
         } finally {
+            depth[0]--
+            VmProfile.classInitialized(cls.name, System.nanoTime() - initT0, interpreter.steps - initSteps, outermost = depth[0] == 0)
             synchronized(cls.initLock) {
                 cls.initState = if (ok) INIT_DONE else INIT_FAILED
                 cls.initThread = null
@@ -1046,6 +1393,14 @@ class Vm(
             }
         }
     }
+
+    /** How many class initializations this thread is inside, so [VmProfile] counts nested time once. */
+    private val initDepth = ThreadLocal.withInitial { IntArray(1) }
+
+    private val TO_STRING = "toString()Ljava/lang/String;"
+
+    /** Marks an array type that no real class stands for, in [arrayTargetClasses]. */
+    private val NO_REAL_CLASS = Any()
 
     private class Resolved(val target: Pair<VmClass, org.objectweb.asm.tree.MethodNode>?)
 
@@ -1060,12 +1415,18 @@ class Vm(
         start: VmClass,
         name: String,
         descriptor: String
+    ): Pair<VmClass, org.objectweb.asm.tree.MethodNode>? = findInHierarchy(start, name, descriptor, name + descriptor)
+
+    /** [findInHierarchy] for a caller that keeps [key] (`name + descriptor`) instead of building it per call. */
+    internal fun findInHierarchy(
+        start: VmClass,
+        name: String,
+        descriptor: String,
+        key: String,
     ): Pair<VmClass, org.objectweb.asm.tree.MethodNode>? {
-        val perClass = resolveCache.getOrPut(start) { java.util.concurrent.ConcurrentHashMap() }
-        perClass[name + descriptor]?.let { return it.target }
-        return findInHierarchyUncached(start, name, descriptor).also {
-            perClass[name + descriptor] = Resolved(it)
-        }
+        val perClass = resolveCache[start] ?: resolveCache.getOrPut(start) { java.util.concurrent.ConcurrentHashMap() }
+        perClass[key]?.let { return it.target }
+        return findInHierarchyUncached(start, name, descriptor).also { perClass[key] = Resolved(it) }
     }
 
     private fun findInHierarchyUncached(

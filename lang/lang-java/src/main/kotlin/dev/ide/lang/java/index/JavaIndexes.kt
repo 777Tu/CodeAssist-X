@@ -219,6 +219,56 @@ object JavaMembersIndex : IndexExtension<String, MemberValue> {
     }
 }
 
+/**
+ * staticMembers: member name -> the FQN of each class declaring an importable STATIC method or field of that
+ * name: a public static of a public top-level library class, or a non-private static of a project `.java` class. What `import static` (and Kotlin's import of a Java static) can name, so an unresolved
+ * bare `assertEquals(…)` can offer `org.junit.Assert.assertEquals`.
+ *
+ * Separate from [JavaMembersIndex], which keys every member of every class with no modifiers: answering "which
+ * of these is an importable static" from it means loading each owner's class, for a name like `get` thousands.
+ */
+object JavaStaticMembersIndex : IndexExtension<String, String> {
+    override val id = IndexId("java.staticMembers")
+    // v2: the project's own `.java` classes too (any static that is not private, nested owners included).
+    override val version = 2
+    override val keyDescriptor: KeyDescriptor<String> = StringKeyDescriptor
+    override val valueExternalizer = StringExternalizer
+    override val matching = MatchingMode.PREFIX_ONLY
+    override val inputFilter = InputFilter { isClassFile(it) || isSource(it) }
+
+    private const val PUBLIC_STATIC = 0x0001 or 0x0008
+    private const val SYNTHETIC = 0x1000
+
+    override fun index(input: IndexInput): Map<String, Collection<String>> =
+        if (isClassFile(input)) indexBytecode(input) else indexSource(input)
+
+    private fun indexBytecode(input: IndexInput): Map<String, Collection<String>> {
+        val owner = classEntryToFqn(input.unitName ?: return emptyMap())?.first ?: return emptyMap()
+        val info = sharedBytecode(input)?.takeIf { JavaBytecode.isPublic(it.access) } ?: return emptyMap()
+        val names = LinkedHashSet<String>()
+        for (m in info.methods + info.fields) {
+            if (m.access and PUBLIC_STATIC != PUBLIC_STATIC || m.access and SYNTHETIC != 0) continue
+            if (m.name.startsWith("<") || '$' in m.name) continue
+            names += m.name
+        }
+        return names.associateWith { listOf(owner) }
+    }
+
+    /** A project class's statics: anything not `private`, since a package-private one is importable from its
+     *  own package, which is where most of a project's code calling it lives. */
+    private fun indexSource(input: IndexInput): Map<String, Collection<String>> {
+        val parsed = JavaSourceIndexer.sharedParsed(input)
+        val pkg = parsed.packageName.orEmpty()
+        val out = HashMap<String, MutableSet<String>>()
+        for (d in parsed.decls) {
+            if ((d.kind != DeclKind.METHOD && d.kind != DeclKind.FIELD) || !d.static || d.visibility == "private") continue
+            val path = d.owner ?: d.container ?: continue
+            out.getOrPut(d.name) { LinkedHashSet() } += if (pkg.isEmpty()) path else "$pkg.$path"
+        }
+        return out
+    }
+}
+
 /** membersByOwner: owner FQN -> its PUBLIC source members (so a Kotlin file can enumerate a same-project
  *  Java SOURCE class's members). `.java` source only, public-only. Each member carries its SHAPE — parameter
  *  types + names, the `static` flag, the return type — encoded into [MemberValue.signature] via

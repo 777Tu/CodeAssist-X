@@ -1,5 +1,6 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
 import dev.ide.ui.components.HalloweenBackdrop
 import dev.ide.ui.components.HauntedGhost
 import dev.ide.ui.components.SeasonalEmptyArt
@@ -157,7 +158,7 @@ import dev.ide.ui.theme.tonalPair
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import dev.ide.ui.pluralStringResource
-import androidx.compose.material3.AlertDialog
+import dev.ide.ui.dialog.AlertDialog
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
@@ -351,7 +352,7 @@ fun ProjectsHomeScreen(
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 24.dp),
-        ) {
+        ) { distinctKeys {
             item("header") { HomeHeader(onOpenAccount = { sheet = HomeSheet.Account }, bell = bell) }
             item("actions") {
                 HomeActions(
@@ -428,7 +429,7 @@ fun ProjectsHomeScreen(
             if (mostRecent != null) {
                 item("resume") { ResumeCard(mostRecent, now) { onOpen(mostRecent) } }
             }
-        }
+        } }
       }
     }
     }
@@ -555,7 +556,7 @@ private fun HomeHeader(
         // the equivalent control one tab away.
         SquareToneButton(
             glyph = CaSymbols.accountCircle,
-            contentDescription = stringResource(Res.string.home_seg_projects),
+            contentDescription = stringResource(Res.string.home_account),
             onClick = onOpenAccount,
             shape = CircleShape,
             size = 44.dp,
@@ -626,7 +627,7 @@ private fun SegmentRow(
         Modifier.fillMaxWidth().padding(top = 20.dp),
         contentPadding = PaddingValues(horizontal = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
+    ) { distinctKeys {
         item("projects") {
             CountFilterChip(
                 label = stringResource(Res.string.home_seg_projects),
@@ -658,7 +659,7 @@ private fun SegmentRow(
                 )
             }
         }
-    }
+    } }
 }
 
 /**
@@ -1330,6 +1331,9 @@ private val ProjectsWideMaxWidth = 1120.dp
 /** From this width the wide rows also show the kind and module count as a column of their own. */
 private val ProjectsKindColumnBreakpoint = 760.dp
 
+/** Below this width the header's secondary buttons drop their labels so the title is not squeezed out. */
+private val ProjectsLabelledActionsBreakpoint = 900.dp
+
 private enum class ProjectSort { Recent, Name }
 
 /**
@@ -1375,6 +1379,9 @@ private fun WideProjectsHome(
     BoxWithConstraints(Modifier.fillMaxSize().background(c.background)) {
         HalloweenBackdrop()
         val showKind = maxWidth >= ProjectsKindColumnBreakpoint
+        // Below this the labelled Import and Clone buttons leave no room for the title, which was cut to
+        // "Your ...". They keep their icons and the primary action keeps its label.
+        val compactActions = maxWidth < ProjectsLabelledActionsBreakpoint
         Column(Modifier.widthIn(max = ProjectsWideMaxWidth).fillMaxSize().padding(horizontal = 28.dp)) {
             Row(
                 Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 16.dp),
@@ -1390,10 +1397,10 @@ private fun WideProjectsHome(
                     modifier = Modifier.weight(1f),
                 )
                 if (onImportProject != null) {
-                    HeaderButton(CaSymbols.folderOpen, stringResource(Res.string.home_import_project), primary = false, onClick = onImportProject)
+                    HeaderButton(CaSymbols.folderOpen, stringResource(Res.string.home_import_project), primary = false, iconOnly = compactActions, onClick = onImportProject)
                 }
                 if (onCloneRepository != null) {
-                    HeaderButton(CaSymbols.forkRight, stringResource(Res.string.home_clone_repository), primary = false, onClick = onCloneRepository)
+                    HeaderButton(CaSymbols.forkRight, stringResource(Res.string.home_clone_repository), primary = false, iconOnly = compactActions, onClick = onCloneRepository)
                 }
                 HeaderButton(CaSymbols.add, stringResource(Res.string.home_new_project), primary = true, onClick = onNewProject)
                 if (!sidebarShown) {
@@ -1430,7 +1437,7 @@ private fun WideProjectsHome(
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(bottom = 24.dp),
-            ) {
+            ) { distinctKeys {
                 if (shown.isEmpty() && projectsLoaded) {
                     item("empty") {
                         if (projects.isEmpty()) {
@@ -1465,20 +1472,22 @@ private fun WideProjectsHome(
                     )
                 }
                 item("ad") { AdSlot(AdPlacement.PROJECTS, Modifier.padding(top = 16.dp)) }
-            }
+            } }
         }
     }
 }
 
 /** A compact header button: filled for the primary action, outlined for the others. */
 @Composable
-private fun HeaderButton(glyph: Char, label: String, primary: Boolean, onClick: () -> Unit) {
+private fun HeaderButton(glyph: Char, label: String, primary: Boolean, iconOnly: Boolean = false, onClick: () -> Unit) {
     val content: @Composable RowScope.() -> Unit = {
-        Symbol(glyph, contentDescription = null, size = 18.dp)
-        Spacer(Modifier.width(8.dp))
-        Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+        Symbol(glyph, contentDescription = label.takeIf { iconOnly }, size = 18.dp)
+        if (!iconOnly) {
+            Spacer(Modifier.width(8.dp))
+            Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+        }
     }
-    val padding = PaddingValues(start = 14.dp, end = 18.dp)
+    val padding = if (iconOnly) PaddingValues(horizontal = 14.dp) else PaddingValues(start = 14.dp, end = 18.dp)
     if (primary) {
         Button(onClick = onClick, contentPadding = padding, modifier = Modifier.height(40.dp), content = content)
     } else {

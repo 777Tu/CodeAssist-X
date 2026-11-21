@@ -33,20 +33,37 @@ import dev.ide.vfs.local.fileFor
  * Proves a custom-view attribute from an external AAR resolves through aapt2. The regression: a Maven
  * dependency that resolves to an AAR is stored in the model as its *exploded* `classes.jar` (with `res/`
  * and `AndroidManifest.xml` siblings), NOT as the `.aar` file — so the build must recognise that layout,
- * merge the AAR's `res/values/attrs.xml`, and pass the AAR's package to aapt2 `--extra-packages`. Without
+ * merge the AAR's `res/values/attrs.xml`, and generate an `R` for the AAR's package. Without
  * the fix, the app layout's `app:customText` attribute is unknown and aapt2 link fails.
  */
 class AndroidAarAttributeTest {
 
     @Test
-    fun resolvesCustomAttributeFromExplodedAar() {
+    fun resolvesCustomAttributeFromExplodedAar() = build(siblingAar = false)
+
+    /**
+     * The same library as the resolver leaves it on a device: exploded without its `R.txt`, the `.aar` beside
+     * the directory. Its symbol table is taken from the archive, so its R holds its own resources and not a
+     * copy of the app's.
+     */
+    @Test
+    fun aLibrarysRIsMadeFromTheSymbolTableInTheAarBesideIt() = build(siblingAar = true)
+
+    private fun build(siblingAar: Boolean) {
         val sdk = assumeAndroidSdk()
 
         testEnv("android-aar-attr") { env ->
             val dir = env.dir
             val platform = env.platform
             // The exploded-AAR layout the Maven resolver produces: classes.jar + res/ + manifest + .extracted.
-            val exploded = explodeAar(dir.resolve("exploded/customview"), sdk.androidJar)
+            val exploded = explodeAar(dir.resolve("exploded/customview-1.0-exploded"), sdk.androidJar)
+            if (siblingAar) {
+                java.util.zip.ZipOutputStream(Files.newOutputStream(dir.resolve("exploded/customview-1.0.aar"))).use { zip ->
+                    zip.putNextEntry(java.util.zip.ZipEntry("R.txt"))
+                    zip.write("int attr customText 0x0\nint[] styleable CustomView { 0x0 }\nint styleable CustomView_customText 0\n".toByteArray())
+                    zip.closeEntry()
+                }
+            }
 
             val store = ProjectModel.open(dir, platform, FacetCodecRegistry().register(AndroidFacetCodec))
             ModuleTypeRegistry(platform.extensions).register(AndroidAppModuleType, AndroidSupport.PLUGIN)
@@ -83,9 +100,20 @@ class AndroidAarAttributeTest {
             }
             assertTrue(outcome.succeeded, "custom-attribute APK build failed (AAR attrs.xml not merged?):\n$log")
 
-            // aapt2 --extra-packages generated the AAR's own R (so its classes + attrs resolve).
-            val aarR = dir.resolve("app/build/intermediates/android/debug/gen/io/example/customview/R.java")
-            assertTrue(Files.isRegularFile(aarR), "AAR package R.java not generated (extra-packages missing): $aarR")
+            // The AAR's package has an R of its own in the app's R.jar, so its classes and attrs resolve. This AAR
+            // ships no R.txt, so nothing says which resources are its own and it gets the app's whole table.
+            val rJar = Files.walk(dir.resolve("app/build")).use { w -> w.filter { it.fileName.toString() == "R.jar" }.findFirst().get() }
+            java.util.zip.ZipFile(rJar.toFile()).use { zf ->
+                val attrs = zf.getEntry("io/example/customview/R\$attr.class")
+                assertTrue(attrs != null, "the AAR package has no R in $rJar: ${zf.entries().asSequence().map { it.name }.toList()}")
+                assertTrue("customText" in zf.getInputStream(attrs).readBytes().toString(Charsets.ISO_8859_1), "its attr is not in it")
+                // The app's own layout: in the library's R only when the library got the whole table.
+                val appLayout = zf.getEntry("io/example/customview/R\$layout.class") != null
+                assertTrue(appLayout == !siblingAar, "the app's layout in the library's R: $appLayout (symbol table beside it: $siblingAar)")
+            }
+            if (siblingAar) {
+                assertTrue(Files.isRegularFile(dir.resolve("exploded/customview-1.0-exploded/R.txt")), "the table is kept once taken from the archive")
+            }
         }
     }
 

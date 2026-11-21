@@ -11,6 +11,12 @@ import kotlinx.coroutines.CoroutineDispatcher
 expect val isMobilePlatform: Boolean
 
 /**
+ * Whether `Modifier.blur` draws a blur here. Android before 12 has no render effect, and there the modifier
+ * leaves the content sharp, so a design that leans on the blur for legibility needs another way.
+ */
+expect val supportsBlur: Boolean
+
+/**
  * Whether the host gives the user a system-level "back" — the Android gesture/button.
  *
  * It exists because of what back does for free there and nowhere else: **the Android IME consumes back to
@@ -53,3 +59,10 @@ expect fun localHourOfDay(): Int
  * ones. Local for the same reason as [localHourOfDay]: Halloween starts at the user's midnight, not UTC's.
  */
 expect fun localMonthDay(): Int
+
+/**
+ * A calendar day given as `yyyy-MM-dd`, written the way the app's language writes dates: the weekday, month
+ * and day, or with [short] only the abbreviated month and the day. Text that is not such a date comes back
+ * unchanged.
+ */
+expect fun formatIsoDay(isoDate: String, short: Boolean = false): String

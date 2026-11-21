@@ -126,7 +126,7 @@ first, and MRR the average of 1/rank. Latency is measured on the maintainer's ma
 rough figure.
 
 <!-- AUTOGEN:tests:START -->
-**2287** tests passing across **415** suites · 0 failing · 3 skipped (framework / `CI_CORE_ONLY`).
+**2595** tests passing across **442** suites · 0 failing · 4 skipped (framework / `CI_CORE_ONLY`).
 <!-- AUTOGEN:tests:END -->
 
 ## Contributing
@@ -147,3 +147,6 @@ The plugin SPI modules (`plugin-api`, `plugin-ui-api`, `platform-core`, `vfs-api
 `language-api`, `index-api`, `analysis-api` and `build-api`, published under `io.github.tyron12233`) also
 carry the Classpath exception (see [LICENSE-EXCEPTION](LICENSE-EXCEPTION)), so a plugin compiled against
 them can use any license.
+
+The license covers the code, not the name. A modified build needs its own name, icon and application id: see
+[TRADEMARKS.md](TRADEMARKS.md).

@@ -252,6 +252,11 @@ private class BridgedRegistration(
                 iconId = template.iconId,
                 appliesTo = template.appliesTo,
                 files = { dir, name -> template.files(dir, name).map { it.relativePath to it.text } },
+                kinds = template.kinds.map { kind ->
+                    NewFileKindContribution(kind.id, kind.label) { dir, name ->
+                        kind.files(dir, name).map { it.relativePath to it.text }
+                    }
+                },
             ),
         )
         return UiHandle { registration.dispose() }
@@ -263,6 +268,7 @@ private class BridgedRegistration(
                 id = preview.id,
                 title = preview.title,
                 appliesTo = preview.appliesTo,
+                fullScreen = preview.fullScreen,
             ) { ctx ->
                 // Not remembered on the context alone: unlike a tool window, a preview context changes on
                 // every keystroke (it carries the buffer), so remembering it per instance would allocate a
@@ -411,6 +417,14 @@ private class PreviewUiContext(private val ctx: EditorPreviewContext, private va
     override fun reportProblems(problems: List<String>) = ctx.reportProblems(problems)
     override fun openFile(path: String, offset: Int) = ctx.openFile(path, offset)
     override fun openScreen(id: String) = ctx.openScreen(id)
+    override val caretOffset: Int get() = ctx.caretOffset
+    override val selectionEnd: Int get() = ctx.selectionEnd
+    override val isSplit: Boolean get() = ctx.isSplit
+    override val canEdit: Boolean get() = ctx.canEdit
+    override fun applyEdits(edits: List<dev.ide.plugin.ui.TextReplacement>) =
+        ctx.applyEdits(edits.map { dev.ide.ui.backend.UiTextEdit(it.start, it.end, it.newText) })
+    override fun select(start: Int, end: Int) = ctx.select(start, end)
+    override fun reportRendering(rendering: Boolean) = ctx.reportRendering(rendering)
 
     override fun <T : Any> service(key: ServiceKey<T>): T? = services.getServiceOrNull(key)
 }

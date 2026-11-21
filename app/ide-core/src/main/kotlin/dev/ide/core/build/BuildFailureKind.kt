@@ -20,7 +20,9 @@ internal object BuildFailureKind {
      *  problem. The bucket worth watching — most likely a defect on our side, not the user's code. */
     const val NO_DIAGNOSTIC = "no_diagnostic"
 
-    private val OOM_TOKENS = listOf("OutOfMemoryError", "OutOfMemory")
+    // The last is what the dex/shrink tools' output is rewritten to before it reaches the console: without it a
+    // build that R8 or D8 failed for lack of heap was counted as a generic tool failure.
+    private val OOM_TOKENS = listOf("OutOfMemoryError", "OutOfMemory", "ran out of memory")
 
     fun classify(diagnostics: List<BuildDiagnosticUi>, log: List<BuildLogLine>): String {
         val errors = diagnostics.filter { it.severity == UiSeverity.Error }
@@ -41,4 +43,26 @@ internal object BuildFailureKind {
     }
 
     private fun hitsOom(s: String?): Boolean = s != null && OOM_TOKENS.any { s.contains(it) }
+}
+
+/**
+ * What a build's console says about its R8 run, as analytics properties: where R8 ran, with how large a heap,
+ * and whether it ran out of memory and shrank the project's own code only. Without these an out-of-memory
+ * report cannot be tied to the memory R8 was given, and a build the fallback saved looks like any other success.
+ * Reads only the shrinker's own fixed notes, never user content. Empty for a build that did not minify.
+ */
+internal object R8BuildFacts {
+    private val FORKED = Regex("""R8: forked VM, (\d+)MB heap""")
+    private const val IN_PROCESS = "R8: in-process"
+
+    fun props(log: List<BuildLogLine>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (line in log) {
+            val text = line.message
+            FORKED.find(text)?.let { out["r8_mode"] = "forked"; out["r8_heap_mb"] = it.groupValues[1] }
+            if (IN_PROCESS in text) out["r8_mode"] = "in-process"
+            if (dev.ide.android.support.tools.ToolMemory.isShrinkFallback(text)) out["r8_fallback"] = "true"
+        }
+        return out
+    }
 }

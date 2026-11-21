@@ -137,9 +137,9 @@
     <string name="export_format_gradle">مشروع Gradle</string>
     <string name="export_format_gradle_desc">ملف ‎.zip يضم مصادرك مع ملفات بناء Gradle المولَّدة، من أجل Android Studio أو بناء gradle.</string>
     <string name="export_gradle_title">ما الذي سيُولَّد</string>
-    <string name="export_gradle_contents">‏settings.gradle.kts، وملف build.gradle.kts لكل وحدة، وgradle.properties، وإعدادات غلاف Gradle، وكلها مكتوبة من مشروعك: الوحدات والتبعيات ومستويات SDK وأنواع البناء والنكهات وميزات البناء.</string>
+    <string name="export_gradle_contents">‏settings.gradle.kts، وملف build.gradle.kts لكل وحدة، وgradle.properties، وغلاف Gradle، وكلها مكتوبة من مشروعك: الوحدات والتبعيات ومستويات SDK وأنواع البناء والنكهات وميزات البناء.</string>
     <string name="export_gradle_caveat">هذا أفضل ما يمكن. تُولَّد ملفات البناء من نموذج المشروع لا من بناء نُفِّذ فعلًا، فاقرأها قبل أن تعتمد عليها. تُعلَن التبعيات بإحداثيات Maven وينزّلها Gradle عند أول مزامنة، لذا تحتاج تلك المزامنة إلى اتصال.</string>
-    <string name="export_gradle_wrapper_note">لا تُضمَّن سكربتات gradlew: يضيفها Android Studio عند أول مزامنة، أو نفِّذ gradle wrapper مرة واحدة.</string>
+    <string name="export_gradle_wrapper_note">تحصل وحدة المكتبة أيضًا على منشور Maven وملف jitpack.yml، فيمكن نشر المشروع المُصدَّر كما هو، بما في ذلك عبر JitPack.</string>
     <string name="export_success_subtitle_gradle">مشروع Gradle جاهز.</string>
     <string name="export_notes_title">يستحق المراجعة</string>
     <string name="export_notes_desc">هذه موجودة أيضًا في GRADLE-EXPORT.md داخل الأرشيف.</string>
@@ -496,6 +496,11 @@
     <string name="codeaction_severity_info">معلومة</string>
     <string name="codeaction_severity_hint">تلميح</string>
     <string name="codeaction_quick_fixes">إصلاحات سريعة</string>
+    <string name="codeaction_report_false_error">الإبلاغ عن خطأ غير صحيح</string>
+    <string name="false_error_title">تقرير خطأ غير صحيح</string>
+    <string name="false_error_intro">هذا ما ستتم مشاركته: المشكلة، وهذا الملف، وما اعتمد عليه المحرر في تحليله. راجعه قبل إرساله.</string>
+    <string name="false_error_building">جارٍ إنشاء التقرير…</string>
+    <string name="false_error_failed">تعذّر إنشاء التقرير.</string>
     <string name="codeaction_same_span">‏%1$d على النطاق نفسه</string>
     <plurals name="codeaction_problems_here">
         <item quantity="one">مشكلة واحدة هنا</item>
@@ -1263,6 +1268,7 @@
 
     <!-- run/preview/edoverlay — reuses copy(shared) -->
     <string name="run_no_active_run">لا يوجد تشغيل نشط.</string>
+    <string name="run_program_window">نافذة البرنامج</string>
     <string name="run_back">رجوع</string>
     <string name="run_run_again">تشغيل مرة أخرى</string>
     <string name="run_building">جاري البناء…</string>
@@ -1839,6 +1845,10 @@
     <string name="dep_version_conflict">تعارض في الإصدار</string>
     <string name="dep_extra_auto_resolved">+%1$d تم حلها تلقائيًا</string>
     <string name="dep_repo_invalid">أدخل عنوان http(s) صالحًا لم تتم إضافته بالفعل.</string>
+    <string name="dep_repo_quick_add">إضافة سريعة</string>
+    <string name="dep_repo_err_address">هذا ليس عنوان ويب. جرّب شيئًا مثل https://repo.example.com/maven</string>
+    <string name="dep_repo_err_duplicate">%1$s يستخدم هذا العنوان بالفعل.</string>
+    <string name="dep_repo_warn_http">هذا العنوان يستخدم http، لذا التنزيلات منه غير مشفّرة.</string>
     <string name="dep_subtitle_module">وحدة</string>
     <string name="dep_subtitle_platform">منصة (BOM)</string>
     <string name="dep_subtitle_local_aar">aar محلي</string>
@@ -2125,11 +2135,14 @@
     <string name="set_appearance_theme_light">فاتح</string>
     <string name="set_appearance_theme_dark">داكن</string>
     <string name="set_appearance_theme_system">النظام</string>
+    <string name="set_appearance_language">اللغة</string>
+    <string name="set_appearance_language_desc">لغة الواجهة. الخيار الافتراضي يتبع لغة الجهاز</string>
+    <string name="set_appearance_language_system">افتراضي النظام</string>
     <string name="set_appearance_accent">اللون المميّز</string>
     <string name="set_appearance_accent_desc">لون إبراز الواجهة</string>
     <string name="set_appearance_accent_violet">بنفسجي</string>
     <string name="set_appearance_accent_teal">أزرق مخضر</string>
-    <string name="set_appearance_accent_orange">برتقالي (قديم)</string>
+    <string name="set_appearance_accent_orange">برتقالي (كلاسيكي)</string>
     <!-- Editor -->
     <string name="set_editor_font_size">حجم الخط</string>
     <string name="set_editor_code_font">خط الكود</string>
@@ -2148,6 +2161,8 @@
     <string name="set_editor_wrap_indent_desc">محاذاة أسطر استمرار السطر الملفوف إلى مسافته البادئة (عند تفعيل التفاف النص)</string>
     <string name="set_editor_hscrollbar">شريط التمرير الأفقي</string>
     <string name="set_editor_hscrollbar_desc">إظهار شريط قابل للسحب على الحافة السفلية حين يمتد سطر خارج العرض (لا يترك التفاف النص ما يُمرَّر)</string>
+    <string name="set_editor_scroll_gutter">تمرير أرقام الأسطر مع الكود</string>
+    <string name="set_editor_scroll_gutter_desc">السماح لشريط أرقام الأسطر بالانزلاق خارج الشاشة عند التمرير جانبيًا، بدلًا من بقائه مثبتًا عند الحافة اليسرى</string>
     <string name="set_editor_two_axis">التمرير على محورين</string>
     <string name="set_editor_two_axis_desc">اسحب في أي اتجاه للتمرير على المحورين معًا (باللمس)</string>
     <string name="set_editor_pinch">القرص للتكبير</string>
@@ -2159,6 +2174,8 @@
     <string name="blame_uncommitted">لم يُودَع بعد</string>
     <string name="set_editor_kbd_suggest">اقتراحات لوحة المفاتيح</string>
     <string name="set_editor_kbd_suggest_desc">اسمح للوحة المفاتيح الافتراضية بالتصحيح التلقائي والاقتراح وإضافة المسافات تلقائيًا (لوحة مفاتيح عادية). أوقفه لإدخال الكود الخام، بحيث لا تحصل النقطة "." المكتوبة على مسافة مُدرَجة تلقائيًا، مقابل فقدان شريط الاقتراحات.</string>
+    <string name="set_editor_symbol_bar">شريط الرموز فوق لوحة المفاتيح</string>
+    <string name="set_editor_symbol_bar_desc">إظهار صف من رموز البرمجة أعلى لوحة المفاتيح الافتراضية أثناء الكتابة، على الهواتف والأجهزة القابلة للطي والأجهزة اللوحية</string>
     <string name="set_editor_close_unsaved">إغلاق علامة تبويب بها تغييرات غير محفوظة</string>
     <string name="set_editor_close_unsaved_desc">السؤال أولاً، أو الحفظ أو تجاهل التغييرات دائمًا دون سؤال</string>
     <string name="set_editor_close_unsaved_ask">السؤال</string>

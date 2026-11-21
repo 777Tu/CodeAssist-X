@@ -57,9 +57,12 @@ class PeerSpec(
      */
     val enumConstants: (() -> List<Any>)? = null,
 ) {
-    /** True when the interpreted class adds no real supertype behavior, so it needs no peer. */
+    /** True when the interpreted class adds no real supertype behavior, so it needs no peer until it crosses
+     *  to platform code. `toString()` does not count: every peer overrides it (to print the interpreted class's
+     *  name, not the generated peer's), and a peer made on that crossing serves it just as well. */
     val isTrivial: Boolean
-        get() = superClass == Any::class.java && interfaces.isEmpty() && methods.isEmpty() && abstractStubs.isEmpty()
+        get() = superClass == Any::class.java && interfaces.isEmpty() && abstractStubs.isEmpty() &&
+            methods.all { it.name == "toString" && it.descriptor == "()Ljava/lang/String;" }
 }
 
 /**
@@ -70,6 +73,15 @@ class PeerSpec(
  * ([AsmPeerFactory]) generates a subclass with ASM; an Android implementation generates dex for the same
  * contract.
  */
+/**
+ * A method a [PeerFactory.reflectionMirror] declares, with the interpreted method's name and modifiers (synthetic
+ * and bridge included). [descriptor] has every interpreted type already replaced by `Object`.
+ */
+data class ReflectedMethod(val name: String, val descriptor: String, val access: Int)
+
+/** A field a [PeerFactory.reflectionMirror] declares: [descriptor] realized as for [ReflectedMethod]. */
+data class ReflectedField(val name: String, val descriptor: String, val access: Int)
+
 interface PeerFactory {
     fun createPeer(
         vmObject: Any,
@@ -92,6 +104,24 @@ interface PeerFactory {
      * inert. Cached per [className]; recorded so [interpretedNameOf] can map it back.
      */
     fun reflectionClass(className: String, constructorDescriptors: List<String>): Class<*>
+
+    /**
+     * A real class that MIRRORS interpreted class [className]'s declared [methods] and [fields] as members of the
+     * same names, modifiers and (realized) types, so the VM can hand interpreted code real [java.lang.reflect.Method]
+     * and [java.lang.reflect.Field] objects for them. It is separate from the [reflectionClass] stand-in, so
+     * platform code reflecting over the stand-in sees what it always saw, and it is defined only when interpreted
+     * code first reflects over the class's members. Abstract and never instantiated; the VM services every use
+     * of its members (invoke, get/set, declaring class, types, annotations). Not cached here: the caller keeps it.
+     */
+    fun reflectionMirror(
+        className: String,
+        methods: List<ReflectedMethod>,
+        fields: List<ReflectedField>,
+        /** A record's components (name and realized type), which make the mirror a record itself where the host
+         *  supports one, so its real `getRecordComponents` describes them. Empty for any other class. */
+        recordComponents: List<ReflectedField> = emptyList(),
+    ): Class<*> =
+        throw UnsupportedOperationException("this PeerFactory cannot mirror classes for reflection")
 
     /** The interpreted internal name a [reflectionClass] result stands for, or null if [cls] is not one. */
     fun interpretedNameOf(cls: Class<*>): String?

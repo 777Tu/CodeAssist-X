@@ -21,20 +21,31 @@ import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.util.zip.ZipFile
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import dev.ide.model.impl.open
 
 /**
  * Proves resource merging across modules: an `android-app` depends on an `android-lib` module (`liba`)
  * that contributes a string resource and whose own code references its own `R`. The build must merge
- * `liba`'s resources into the app, generate an `R` for `liba`'s package (aapt2 `--extra-packages`) so
+ * `liba`'s resources into the app, generate an `R` for `liba`'s package (from its `R.txt`) so
  * `liba` compiles, and let the app reference the merged resource via its own `R`. Asserts the merged
  * resource is in `resources.arsc` and `liba`'s code is dexed.
  */
 class AndroidLibResourceMergeTest {
 
+    /**
+     * The library's R comes from its own R.txt with the app's final ids, so its code finds
+     * `R.string.liba_greeting`, and it holds nothing of the app's own resources. The same whatever the module's
+     * `nonTransitiveRClass` says: that setting is kept for Gradle and no longer changes the build.
+     */
     @Test
-    fun mergesAndroidLibDependencyResources() {
+    fun mergesAndroidLibDependencyResources() = build(nonTransitiveR = false)
+
+    @Test
+    fun theSettingDoesNotChangeTheLibrarysR() = build(nonTransitiveR = true)
+
+    private fun build(nonTransitiveR: Boolean) {
         val sdk = assumeAndroidSdk()
 
         testEnv("android-libres") { env ->
@@ -54,7 +65,7 @@ class AndroidLibResourceMergeTest {
                 }
                 addModule("app", appType).apply {
                     languageLevel = LanguageLevel.JAVA_17
-                    putFacet(AndroidFacet(namespace = "com.example.app", compileSdk = 34, minSdk = 24, targetSdk = 34))
+                    putFacet(AndroidFacet(namespace = "com.example.app", compileSdk = 34, minSdk = 24, targetSdk = 34, nonTransitiveRClass = nonTransitiveR))
                     addDependency(ModuleDependency(ModuleId("liba"), DependencyScope.IMPLEMENTATION))
                 }
                 commit()
@@ -88,6 +99,13 @@ class AndroidLibResourceMergeTest {
                 val dex = dexNames.joinToString("") { zf.getInputStream(zf.getEntry(it)).readBytes().toString(Charsets.ISO_8859_1) }
                 assertTrue("Lcom/example/liba/LibGreeter;" in dex, "android-lib code not dexed")
                 assertTrue("Lcom/example/liba/R" in dex, "the library's final R must be dexed (by the app)")
+            }
+            // The app's final R.jar: the library's R holds its own resources and none of the app's.
+            ZipFile(dir.resolve("app/build/intermediates/debug/R.jar").toFile().takeIf { it.exists() }
+                ?: Files.walk(dir.resolve("app/build")).use { w -> w.filter { it.fileName.toString() == "R.jar" }.findFirst().get().toFile() }).use { zf ->
+                val libString = zf.getInputStream(zf.getEntry("com/example/liba/R\$string.class")).readBytes().toString(Charsets.ISO_8859_1)
+                assertTrue("liba_greeting" in libString, "the library's own string")
+                assertTrue("app_name" !in libString, "the app's own string is not in the library's R")
             }
 
             // Decoupled R model: the library's own compiled output carries LibGreeter but NOT R; its R is a

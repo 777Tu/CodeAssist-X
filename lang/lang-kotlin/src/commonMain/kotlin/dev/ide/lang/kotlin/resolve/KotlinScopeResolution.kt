@@ -642,6 +642,27 @@ fun KotlinResolver.typeParameterUpperBound(
     return null
 }
 
+/** Every resolvable upper bound of the type parameter [name] in scope at [offset]: its `: Bound` and each
+ *  `where T : Bound`. [typeParameterUpperBound] answers with the first; a member may come from any of them. */
+fun KotlinResolver.typeParameterUpperBounds(name: String, offset: Int): List<KotlinType> {
+    var node: KtElement? = elementAt(offset)
+    while (node != null) {
+        if (node is KtTypeParameterListOwner) {
+            val tp = node.typeParameters.firstOrNull { it.name == name }
+            if (tp != null) {
+                val texts = ArrayList<String>()
+                tp.extendsBound?.text?.let { texts += it }
+                node.typeConstraints.forEach { c ->
+                    if (c.subjectTypeParameterName?.getReferencedName() == name) c.boundTypeReference?.text?.let { texts += it }
+                }
+                return texts.mapNotNull { service.typeFromText(it, fileContext) }.filter { service.isKnownType(it.qualifiedName) }
+            }
+        }
+        node = node.parent
+    }
+    return emptyList()
+}
+
 /**
  * [type] as a receiver for MEMBER access: a bare type-parameter classifier in scope at [offset] is replaced by
  * its resolved upper bound ([typeParameterUpperBound]) so `t.member` sees the bound's members; any other type
@@ -733,7 +754,13 @@ fun KotlinResolver.bareNameResolves(name: String, offset: Int): Boolean {
     // bare only same-package), so an unimported same-module type is flagged by the bare-reference diagnostic. The
     // ENCLOSING class is passed so a NESTED-class constructor (`Plan(1)` inside `class Game { private class Plan }`)
     // resolves by simple name.
-    return service.resolveTypeName(name, fileContext, enclosingClassFqn(offset))?.let { service.isKnownType(it) } == true
+    if (service.resolveTypeName(name, fileContext, enclosingClassFqn(offset))?.let { service.isKnownType(it) } == true) return true
+    // A STAR import of a class puts its bare-callable members in scope: `import org.junit.Assert.*` makes
+    // `assertEquals(…)` a call to a Java static. The by-name spelling (`import org.junit.Assert.assertEquals`)
+    // was settled by the explicit-import rule above, which never looks the member up; a star import names
+    // nothing, so only the container's own members can answer. Last, because it is the one probe here that
+    // reads a container's members, and everything commoner has already had its say.
+    return importedSingletonMembers(name, exactName = true).any { it.name == name }
 }
 
 /**

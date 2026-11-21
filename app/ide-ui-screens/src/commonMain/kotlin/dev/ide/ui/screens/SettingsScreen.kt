@@ -1,7 +1,8 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.AlertDialog
+import dev.ide.ui.dialog.AlertDialog
 import dev.ide.ui.itemsKeyed
 import dev.ide.ui.theme.Ide
 import androidx.compose.material3.MaterialTheme
@@ -319,7 +320,7 @@ private fun NarrowLayout(
     } else {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButtonCa(CaIcons.chevronLeft, stringResource(Res.string.settings_all_settings), { openId = null })
+                IconButtonCa(CaIcons.arrowLeft, stringResource(Res.string.settings_all_settings), { openId = null })
                 Text(localizedPageTitle(open), color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
             PageContent(backend, open, values, codeFont, onSet, onAction, onStructuralChange, Modifier.weight(1f))
@@ -353,7 +354,7 @@ private fun PageContent(
     // Regular controls grouped by their optional sub-heading (null group first, in declaration order).
     val groups = regular.groupBy { it.group }.toList()
 
-    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { distinctKeys {
         groups.forEach { (groupTitle, controls) ->
             item(groupTitle ?: "_") {
                 SettingsCard(localizedGroup(groupTitle)) {
@@ -371,7 +372,7 @@ private fun PageContent(
         if (page.inspectionsSection) {
             item("inspections") { InspectionsCard(backend) }
         }
-    }
+    } }
 }
 
 @Composable
@@ -524,7 +525,7 @@ private fun SettingsHeader(onBack: () -> Unit, title: String) {
             Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            IconButtonCa(CaIcons.chevronLeft, stringResource(Res.string.back), onBack)
+            IconButtonCa(CaIcons.arrowLeft, stringResource(Res.string.back), onBack)
             Icon(CaIcons.gear, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
             Text(title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         }

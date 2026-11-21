@@ -48,17 +48,30 @@ class AndroidRealViewRuntime(
     private val cacheDir: File,
     @Suppress("unused") private val deviceApiLevel: Int,
     @Suppress("unused") private val dexCacheRoot: Path? = null,
+    /**
+     * Draw every render into the same [Bitmap] (while its size holds) instead of a new one. Only for a caller
+     * that copies the frame out before the next render, as the `:preview` service does; an in-process caller
+     * keeps showing the bitmap it was handed, so it must get a new one each time.
+     */
+    private val reuseBitmap: Boolean = false,
 ) : RealViewRuntime {
+
+    private var lastBitmap: Bitmap? = null
 
     private val log = Log.logger("ide.preview")
     private val lock = Any()
     private var contextCache: Pair<String, ResourceContextFactory.PreviewContext>? = null
     private var vmFactoryCache: Pair<String, VmViewFactory>? = null
 
+    /** [classDirSig] of the project class dirs the cached VM last rendered with. */
+    private var projectDirContents: String? = null
+
     // One peer factory for the runtime's lifetime, shared across VM rebuilds so a generated peer class (an
     // interpreted view's real subclass) is dexed + defined ONCE and reused when the classpath changes but the
     // peer shape doesn't. Interpret mode only; built lazily so the dex-mode path never touches it.
-    private val peerFactory: PeerFactory by lazy { DexPeerFactory() }
+    // The dexed peers are kept on disk: a peer's shape depends on the view class, not the project, and dexing the
+    // 39 a Material layout needs took 8.5 s in every new preview process.
+    private val peerFactory: PeerFactory by lazy { DexPeerFactory(File(cacheDir, "vm-peer-dex").toPath()) }
 
     /** Root of the real-view dex cache; the `.hashcache` sidecar under it is shared by [classpathSig] and the
      *  library dexer, so a jar is content-hashed once per (path, size, mtime) across both the signature and the dex. */
@@ -129,6 +142,7 @@ class AndroidRealViewRuntime(
     }
 
     private fun renderInternal(request: RealViewRequest, resourcesAp: File): RealViewResult {
+        holdsCaches = true
         val notify = request.stageListener
         val t0 = System.nanoTime()
         // The classpath is INTERPRETED by the bytecode VM — nothing is dexed or loaded into ART (no
@@ -140,12 +154,21 @@ class AndroidRealViewRuntime(
         val (rJars, classpath) = request.classpath.partition { it.fileName?.toString() in R_JAR_NAMES }
         val jars = classpath.filter { it.toString().endsWith(".jar") }
         val dirs = classpath.filter { Files.isDirectory(it) }
+        // The VM (and the context that carries it) is keyed by the LIBRARY jars and the class-dir LIST; the
+        // contents of the project's class dirs change with every compile and only make the VM forget the
+        // project classes it loaded (VmViewFactory.projectClassesChanged), keeping the decoded libraries.
         val sig: String
+        val dirContents: String
         synchronized(lock) {
-            sig = "${classpathSig(jars)}|dirs:${classDirSig(dirs)}|api${request.minApi}|${request.packageName}"
+            sig = "${classpathSig(jars)}|dirs:${dirs.sorted().joinToString(",")}|api${request.minApi}|${request.packageName}"
+            dirContents = classDirSig(dirs)
         }
         val vmFactory: VmViewFactory = cachedVmFactory(classpath, request.packageName, sig, notify)
         vmFactory.useResourceClasses(rJars.firstOrNull())
+        synchronized(lock) {
+            if (projectDirContents != null && projectDirContents != dirContents) vmFactory.projectClassesChanged()
+            projectDirContents = dirContents
+        }
         val classLoader: ClassLoader = View::class.java.classLoader ?: javaClass.classLoader!!
         val tLoader = System.nanoTime()
         val pc = cachedContext(request, resourcesAp, classLoader, sig, vmFactory)
@@ -166,6 +189,7 @@ class AndroidRealViewRuntime(
         // (hidden-API exemptions are unreliable on device). Falls back to inflating the content alone if the
         // windowed path isn't usable here.
         notify?.invoke("Inflating")
+        vmFactory.beginRender()
         val stepsBefore = vmFactory?.steps ?: 0L
         var usedDecor = true
         var decorError: String? = null
@@ -205,8 +229,19 @@ class AndroidRealViewRuntime(
         val tInflate = System.nanoTime()
 
         notify?.invoke("Drawing")
-        val bmp = createBitmap(w, h)
-        root.draw(Canvas(bmp))
+        // Laid out at full size; drawn at the requested scale, so a zoomed-out design surface gets about the
+        // pixels it shows. The captured bounds below stay in full-size pixels.
+        val bw = RealViewRequest.scaledPx(w, request.renderScale)
+        val bh = RealViewRequest.scaledPx(h, request.renderScale)
+        val bmp = frameBitmap(bw, bh)
+        val canvas = Canvas(bmp)
+        if (bw != w || bh != h) canvas.scale(bw.toFloat() / w, bh.toFloat() / h)
+        root.draw(canvas)
+        // A view whose own code failed mid-frame drew with the framework's fallback; mark it so the gap is seen.
+        for ((view, why) in vmFactory.brokenViews()) runCatching { drawBrokenOverlay(canvas, root, view, why) }
+        // A window's bars are only its colours: the clock, the status icons and the navigation handle come from
+        // System UI, which a preview has none of. Drawn here so the frame looks like the screen.
+        if (usedDecor) runCatching { SystemBars.draw(canvas, bmp, w, h, statusBarPx(ctx), navigationBarPx(ctx), ctx.resources.displayMetrics.density) }
         val tDraw = System.nanoTime()
 
         // Snapshot the inflated tree (class/id/bounds/attributes) for the Preview view's hierarchy +
@@ -214,6 +249,7 @@ class AndroidRealViewRuntime(
         val viewTree = runCatching { ViewHierarchyCapture.capture(root) }.getOrElse {
             log.warn("real-view hierarchy capture failed: ${it.message}"); null
         }
+        val tCapture = System.nanoTime()
         WindowLifecycleReplay.detach(attached)
 
         fun ms(a: Long, b: Long) = (b - a) / 1_000_000
@@ -226,11 +262,84 @@ class AndroidRealViewRuntime(
             ms(
                 tCtx, tInflate
             )
-        }ms draw=${ms(tInflate, tDraw)}ms${vmFactory?.let { " interpret-steps=${it.steps - stepsBefore}" } ?: ""}")
+        }ms draw=${ms(tInflate, tDraw)}ms capture=${ms(tDraw, tCapture)}ms image=${bw}x$bh${vmFactory?.let { " interpret-steps=${it.steps - stepsBefore}" } ?: ""}")
+
+        // A slow inflate is nearly always a first one: say what the VM did for the first time in it.
+        if (vmFactory != null && ms(tCtx, tInflate) >= 1_000) {
+            log.info("real-view '${request.layoutName}' slow inflate: ${dev.ide.jvm.VmProfile.snapshot()}; ${dev.ide.android.DexPeerFactory.snapshot()}; slowest static-init: ${dev.ide.jvm.VmProfile.slowestInits()}")
+        }
+        dev.ide.jvm.VmProfile.reset()
+        dev.ide.android.DexPeerFactory.reset()
 
         return RealViewResult(
-            pngBytes = null, width = w, height = h, nativeBitmap = bmp, viewTree = viewTree
+            pngBytes = null, width = bw, height = bh, nativeBitmap = bmp, viewTree = viewTree,
+            problems = vmFactory.problems().map { "${it.className}\t${it.message}" }.distinct(),
         )
+    }
+
+    /** The bitmap to draw a [w] x [h] frame into: cleared and reused when [reuseBitmap] allows, else new. */
+    private fun frameBitmap(w: Int, h: Int): Bitmap {
+        if (!reuseBitmap) return createBitmap(w, h)
+        lastBitmap?.takeIf { !it.isRecycled && it.width == w && it.height == h }?.let {
+            it.eraseColor(android.graphics.Color.TRANSPARENT)
+            return it
+        }
+        lastBitmap?.recycle()
+        return createBitmap(w, h).also { lastBitmap = it }
+    }
+
+    /** Whether anything is cached for [release] to drop (set by the first render). */
+    @Volatile private var holdsCaches = false
+
+    /**
+     * Drop the cached preview context, the VM view factory (every decoded library class) and the frame bitmap;
+     * the next render rebuilds them, a cold render. Queued on the render thread, so it never runs under a render
+     * in flight; returns at once.
+     */
+    fun release() {
+        if (!holdsCaches) return
+        renderHandler.post {
+            synchronized(lock) {
+                contextCache?.second?.let { runCatching { it.close() } }
+                contextCache = null
+                vmFactoryCache?.second?.let { runCatching { it.close() } }
+                vmFactoryCache = null
+                projectDirContents = null
+            }
+            lastBitmap?.recycle()
+            lastBitmap = null
+            holdsCaches = false
+            log.info("real-view: released the preview VM and context")
+        }
+    }
+
+    /** A red outline and a short label over [view], whose interpreted code failed while drawing this frame. */
+    private fun drawBrokenOverlay(canvas: Canvas, root: View, view: View, why: String) {
+        var x = 0f
+        var y = 0f
+        var v: View? = view
+        while (v != null && v !== root) {
+            x += v.left - v.scrollX + v.translationX
+            y += v.top - v.scrollY + v.translationY
+            v = v.parent as? View
+        }
+        if (v == null) return
+        val d = view.resources.displayMetrics.density
+        val stroke = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            style = android.graphics.Paint.Style.STROKE
+            color = android.graphics.Color.rgb(211, 47, 47)
+            strokeWidth = 2f * d
+        }
+        val wash = android.graphics.Paint().apply { color = android.graphics.Color.argb(36, 211, 47, 47) }
+        val rect = android.graphics.RectF(x, y, x + view.width, y + view.height)
+        canvas.drawRect(rect, wash)
+        canvas.drawRect(rect, stroke)
+        val text = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(183, 28, 28)
+            textSize = 10f * d
+        }
+        val label = android.text.TextUtils.ellipsize(why, text, (view.width - 8 * d).coerceAtLeast(0f), android.text.TextUtils.TruncateAt.END)
+        canvas.drawText(label, 0, label.length, x + 4 * d, y + 4 * d - text.ascent(), text)
     }
 
     /**
@@ -254,16 +363,20 @@ class AndroidRealViewRuntime(
         runCatching {
             val insets = WindowInsets.Builder().setInsets(
                 WindowInsets.Type.systemBars(),
-                Insets.of(
-                    0,
-                    systemDimenPx(ctx, "status_bar_height", 24),
-                    0,
-                    systemDimenPx(ctx, "navigation_bar_height", 48)
-                ),
+                Insets.of(0, statusBarPx(ctx), 0, navigationBarPx(ctx)),
             ).build()
             root.dispatchApplyWindowInsets(insets)
         }
     }
+
+    /** The status bar's height: the framework's own. */
+    private fun statusBarPx(ctx: Context): Int = systemDimenPx(ctx, "status_bar_height", 24)
+
+    /**
+     * The navigation bar's height: gesture navigation's handle bar (the default on current Android), not the
+     * framework's three-button bar, whatever this device happens to use itself.
+     */
+    private fun navigationBarPx(ctx: Context): Int = (GESTURE_NAV_BAR_DP * ctx.resources.displayMetrics.density).toInt()
 
     /** A framework dimen (e.g. `status_bar_height`) in px, or [defaultDp] converted to px if unavailable. */
     private fun systemDimenPx(ctx: Context, name: String, defaultDp: Int): Int {
@@ -310,6 +423,7 @@ class AndroidRealViewRuntime(
             vmFactoryCache?.takeIf { it.first == sig }?.second ?: run {
                 notify?.invoke("Interpreting")
                 vmFactoryCache?.second?.let { old -> runCatching { old.close() } }
+                projectDirContents = null
                 VmViewFactory(classpath, peerFactory, appPackage = appPackage).also { vmFactoryCache = sig to it }
             }
         }
@@ -358,6 +472,8 @@ class AndroidRealViewRuntime(
     }
 
     private companion object {
+        const val GESTURE_NAV_BAR_DP = 24
+
         /** The jars holding a module's `R` classes: the preview's own (its link's ids) or, without one, the
          *  build's. */
         val R_JAR_NAMES = setOf(dev.ide.android.support.PreviewResourceLinker.R_JAR_NAME, "R.jar")

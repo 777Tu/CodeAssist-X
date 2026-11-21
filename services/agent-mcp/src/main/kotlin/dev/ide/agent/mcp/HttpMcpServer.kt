@@ -1,6 +1,5 @@
 package dev.ide.agent.mcp
 
-import io.modelcontextprotocol.json.McpJsonDefaults
 import io.modelcontextprotocol.json.McpJsonMapper
 import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.spec.McpSchema
@@ -38,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference
  * sync server never sees interleaved calls.
  */
 class HttpStreamableServerTransportProvider(
-    private val mapper: McpJsonMapper = McpJsonDefaults.getMapper(),
+    private val mapper: McpJsonMapper = McpJson.mapper,
 ) : McpStreamableServerTransportProvider {
 
     private val sessions = ConcurrentHashMap<String, McpStreamableServerSession>()
@@ -272,6 +271,12 @@ private class HttpServerSocket(
             } catch (e: Exception) {
                 runCatching {
                     writeResponse(it.getOutputStream(), HttpResponse(500, body = "Internal error: ${e.message}"))
+                }
+            } catch (e: LinkageError) {
+                // A library call this device's runtime lacks, reached while serving a request. On a thread of
+                // its own an uncaught Error ends the whole process, so the IDE died because a client connected.
+                runCatching {
+                    writeResponse(it.getOutputStream(), HttpResponse(500, body = "Internal error: $e"))
                 }
             }
         }

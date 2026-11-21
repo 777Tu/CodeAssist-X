@@ -177,6 +177,8 @@ fun CodeEditor(
     wrapIndent: Boolean = true,
     /** Show a draggable bar along the bottom edge while a line runs past the view (Settings → Editor). */
     horizontalScrollbar: Boolean = true,
+    /** Let the line-number gutter scroll sideways with the code instead of staying pinned (Settings → Editor; off). */
+    scrollGutter: Boolean = false,
     /** Show who last changed the caret's line after its end, in a Git project (Settings → Editor; on). */
     inlineBlame: Boolean = true,
     /** Render programming ligatures (`->`, `!=`, …) when the code font provides them (Settings → Editor; on). */
@@ -217,6 +219,7 @@ fun CodeEditor(
             wordWrap,
             wrapIndent,
             horizontalScrollbar,
+            scrollGutter,
             inlineBlame,
             fontLigatures,
             caretStyle,
@@ -251,6 +254,7 @@ private fun CodeEditorContent(
     wordWrap: Boolean = false,
     wrapIndent: Boolean = true,
     horizontalScrollbar: Boolean = true,
+    scrollGutter: Boolean = false,
     inlineBlame: Boolean = true,
     fontLigatures: Boolean = true,
     caretStyle: CaretStyle = CaretStyle.Line,
@@ -279,6 +283,7 @@ private fun CodeEditorContent(
     val renderState =
         rememberEditorRenderState(session, measurer, density, colors, editorColors, typography, zoom, fontLigatures)
     val geometry = rememberEditorGeometry(session, renderState, editorIme, wordWrap, wrapIndent)
+    geometry.gutterScrolls = scrollGutter
     // Publish the visible lines for viewport-first work. Read in a snapshot flow, not in composition, so a
     // scroll frame does not recompose the editor.
     LaunchedEffect(session, geometry) {
@@ -1364,7 +1369,7 @@ private fun CodeEditorContent(
                         caretContent = interaction.caretContent,
                         vOff = geometry.vOffset.floatValue,
                         hOff = geometry.hOffset.floatValue,
-                        gutterWidth = gutterWidthPx,
+                        gutterWidth = geometry.gutterEdge(),
                         codeTop = caretClip.codeTop,
                         lineHeight = metrics.lineHeight,
                         color = drawColors.caret,
@@ -1373,7 +1378,7 @@ private fun CodeEditorContent(
                         flameTime = if (caretStyle == CaretStyle.Candle) flameTime.floatValue else 0f,
                     )
                     if (caretStyle == CaretStyle.Candle && !embers.isEmpty()) {
-                        clipRect(left = gutterWidthPx, top = caretClip.codeTop) {
+                        clipRect(left = geometry.gutterEdge(), top = caretClip.codeTop) {
                             with(embers) {
                                 draw(flameTime.floatValue, geometry.vOffset.floatValue, geometry.hOffset.floatValue, metrics.lineHeight)
                             }
@@ -1397,7 +1402,7 @@ private fun CodeEditorContent(
                     val y = top + (floating.line - line) * metrics.lineHeight
                     val w = 3.dp.toPx()
                     val h = metrics.lineHeight * 1.15f
-                    clipRect(left = gutterWidthPx, top = caretClip.codeTop) {
+                    clipRect(left = geometry.gutterEdge(), top = caretClip.codeTop) {
                         drawRoundRect(
                             drawColors.caret,
                             topLeft = Offset(x - w / 2f, y - (h - metrics.lineHeight) / 2f),
@@ -1455,6 +1460,7 @@ private fun CodeEditorContent(
             hOffset = geometry.hOffset,
             onOpenSheet = { acts.openSheet(it) },
             onChipExtent = { geometry.chipExtent.floatValue = it },
+            gutterEdge = geometry::gutterEdge,
             visibleLinesOf = { geometry.visibleLineRange() },
         )
 
@@ -1465,6 +1471,7 @@ private fun CodeEditorContent(
             vOffset = geometry.vOffset,
             docLength = docLength,
             onPreview = onPreview,
+            gutterShift = geometry::gutterShift,
         )
 
         PluginEditorLayers(
@@ -1488,6 +1495,7 @@ private fun CodeEditorContent(
             colors = colors,
             onInvoke = acts::invokeGutterAction,
             backend = backend,
+            gutterShift = geometry::gutterShift,
         )
 
         if (inlineBlame) {
@@ -1510,6 +1518,7 @@ private fun CodeEditorContent(
             vOffset = geometry.vOffset,
             gutterWidthPx = gutterWidthPx,
             color = colors.accent,
+            gutterShift = geometry::gutterShift,
         )
 
         ChangeMarkersLayer(
@@ -1520,6 +1529,7 @@ private fun CodeEditorContent(
             vOffset = geometry.vOffset,
             gutterWidthPx = gutterWidthPx,
             foldStripPx = renderState.foldStripPx,
+            gutterShift = geometry::gutterShift,
         )
 
         MergeConflictLayer(
@@ -1746,7 +1756,7 @@ private fun EditorCanvasLayer(
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         if (event.type == PointerEventType.Move || event.type == PointerEventType.Enter) {
-                            pointerOverGutter = event.changes.first().position.x < gutterWidthPx
+                            pointerOverGutter = event.changes.first().position.x < geometry.gutterEdge()
                         }
                     }
                 }
@@ -1776,6 +1786,7 @@ private fun EditorCanvasLayer(
                     session = editorSession,
                     metrics = metrics,
                     gutterWidth = gutterWidthPx,
+                    gutterEdge = geometry.gutterEdge(),
                     vOff = geometry.vOffset.floatValue,
                     hOff = geometry.hOffset.floatValue,
                     layoutFor = renderState::layoutFor,
@@ -1862,6 +1873,7 @@ private fun BoxScope.EditorDialogsLayer(
 
     // go-to-line prompt — a small centered card; jumps the caret (the into-view effect scrolls to it)
     if (gotoLineOpen) {
+        PlatformBackHandler(enabled = true) { gotoLineOpen = false; runCatching { focus.requestFocus() } }
         GoToLinePopup(
             lineCount = editorSession.doc.lineCount,
             onGo = { line, col ->
@@ -1900,6 +1912,8 @@ private fun BoxScope.EditorDialogsLayer(
 
     // rename prompt — a small centered card over the editor
     rename?.let { r ->
+        // System Back closes the prompt: the phone's Escape.
+        PlatformBackHandler(enabled = !renameBusy) { rename = null; renameError = null }
         RenamePopup(
             state = r,
             busy = renameBusy,
@@ -1929,6 +1943,7 @@ private fun BoxScope.EditorDialogsLayer(
                 onSelect = { acts.selectSheet(it) },
                 onPick = { acts.applySheetFix(it) },
                 onDismiss = { acts.closeSheet() },
+                onReport = { acts.reportSheetDiagnostic() },
                 position = rememberLinePosition(
                     anchor.coerceIn(0, editorSession.doc.length), { geometry.caretGeometry(it) },
                     metrics.lineHeight, gutterWidthPx,
@@ -1943,6 +1958,7 @@ private fun BoxScope.EditorDialogsLayer(
                 onSelect = { acts.selectSheet(it) },
                 onPick = { acts.applySheetFix(it) },
                 onDismiss = { acts.closeSheet() },
+                onReport = { acts.reportSheetDiagnostic() },
             )
         }
     }

@@ -146,6 +146,14 @@ interface EditorService {
     /** Persist the buffer [text] for [path] to disk (and keep it as the live buffer). */
     fun saveFile(path: String, text: String)
 
+    /**
+     * Bumped when the engine was asked to analyze the open files again (a plugin's findings depend on state
+     * that changed outside any file: `dev.ide.analysis.Reanalysis`). The editor answers each change with one
+     * pass over its tabs. Conflating, so a burst of requests is one pass. A backend with no such requests
+     * never bumps it.
+     */
+    val reanalysisRequests: StateFlow<Int> get() = MutableStateFlow(0)
+
     // --- Editor-session lifecycle notifications (fire-and-forget; default no-op like completionAccepted) -----
     // Pure notifications the UI pushes so the engine can publish editor-lifecycle events on the message bus for
     // plugins; nothing is awaited. A backend that doesn't care (test fakes, previews) inherits the no-op default.
@@ -327,6 +335,12 @@ interface BlockService {
      */
     fun blocksEnabled(): Boolean = false
 
+    /**
+     * Whether [path] is in a language the block editor can show. The Blocks segment is offered per file on
+     * this, so a file with no block form (a layout, a manifest) does not lead to an empty view.
+     */
+    fun blocksSupport(path: String): Boolean = blocksEnabled()
+
     /** Project the live buffer [text] of [path] into a block tree, or null when unsupported. */
     suspend fun projectBlocks(path: String, text: String): UiBlockNode? = null
 
@@ -381,36 +395,6 @@ interface PreviewService {
      *  (a number, string, char or boolean). Such an edit is applied to the rendered preview directly, so the
      *  pane renders it at once instead of waiting out its typing debounce. False when unsure. */
     suspend fun isLiveLiteralEdit(path: String, text: String): Boolean = false
-
-    // ---- Real-view layout attribute editor ----
-    // Backs the Preview's editable attribute sheet: it edits the layout XML source (the same buffer the Code
-    // view shows) driven by the SAME allowed-attribute metadata + completion the XML editor uses. [sourceOffset]
-    // comes from the tapped view's `PreviewViewNode.sourceOffset`.
-
-    // [id] (the tapped view's `@id/…` entry name, or null) anchors the element robustly: the raw [sourceOffset]
-    // from the captured tree can lag the live buffer after an edit shifts offsets, so an id'd element is
-    // re-located by id in the current [text]; un-id'd views fall back to the offset.
-
-    /** The editable model for the layout element at [sourceOffset] (or [id]) in [path]'s live buffer [text] — its
-     *  set attributes plus the allowed-but-unset attributes for that view. Null when it isn't an editable element. */
-    suspend fun layoutElementAt(path: String, text: String, sourceOffset: Int, id: String?): UiLayoutElement? = null
-
-    /** Value completion for [attrName] on the element at [sourceOffset]/[id], as if [fieldText] (caret at [caret])
-     *  were typed into the value — the same candidates the XML editor gives. Ranges are field-relative. */
-    suspend fun completeLayoutAttributeValue(
-        path: String, text: String, sourceOffset: Int, id: String?, attrName: String, fieldText: String, caret: Int
-    ): UiCompletionResult = UiCompletionResult(emptyList(), 0, 0)
-
-    /** Edits that set [attrName]="[value]" on the element at [sourceOffset]/[id] (replace if present, else insert +
-     *  auto-declare its `xmlns`). Apply them to the shared buffer to update both the Code view and the preview. */
-    suspend fun setLayoutAttribute(
-        path: String, text: String, sourceOffset: Int, id: String?, attrName: String, value: String
-    ): List<UiTextEdit> = emptyList()
-
-    /** Edits that remove [attrName] from the element at [sourceOffset]/[id]. */
-    suspend fun removeLayoutAttribute(
-        path: String, text: String, sourceOffset: Int, id: String?, attrName: String
-    ): List<UiTextEdit> = emptyList()
 }
 
 /** A stage of the real-view layout-render pipeline, shown in the floating status chip. [stage] is a short
@@ -851,6 +835,13 @@ interface ProjectService {
 
     /** The whole app storage root (projects + SDK + caches + sibling data). Defaults to [projectsRootPath]. */
     fun storageRootPath(): String? = projectsRootPath()
+
+    /**
+     * Whether an earlier version of the app left data on this device. The notices about older projects are
+     * for someone who has some; on a fresh install they describe a problem the reader does not have. True
+     * when the host cannot tell.
+     */
+    fun hasLegacyData(): Boolean = true
 
     /** The templates the Create-Project gallery offers. */
     fun projectTemplates(): List<UiProjectTemplate> = emptyList()
@@ -2170,6 +2161,19 @@ interface DiagnosticsService {
     /** Write the current logs to a shareable text file and return its path, or null. */
     suspend fun exportLogs(): String? = null
 
+    /**
+     * The report a user shares when the editor flags correct code: the diagnostic ([message], [severity], its
+     * range in [text]), the flagged file, and what the editor resolved it against (module, platform, classpath,
+     * and which entries declare the classes the file imports). Markdown, meant to be read before it is sent.
+     * Null when the host cannot build one.
+     */
+    suspend fun falseErrorReport(
+        path: String, text: String, startOffset: Int, endOffset: Int, message: String, severity: UiSeverity,
+    ): String? = null
+
+    /** Write [report] to a file the host can share (see [FileActions.share]) and return its path, or null. */
+    suspend fun saveFalseErrorReport(report: String): String? = null
+
     /** Whether this backend actually has analytics wired (a transport is configured). */
     fun analyticsAvailable(): Boolean = false
 
@@ -2251,6 +2255,12 @@ interface AgentService {
     /** Configure the custom OpenAI-compatible gateway (base URL + model name, and an optional extra CA
      *  certificate PEM to trust for an endpoint behind a private/regional CA — blank = system trust only). */
     fun setGateway(baseUrl: String, model: String, caCert: String)
+
+    /**
+     * The models the custom gateway reports serving, read with its saved base URL, key and certificate. Null
+     * when the list could not be read: no base URL yet, the endpoint is unreachable, or it has no model list.
+     */
+    suspend fun fetchGatewayModels(): List<UiAgentModel>? = null
 
     /** Whether this backend can run "Sign in with OpenRouter" (a browser sign-in that returns a key). */
     fun openRouterSignInSupported(): Boolean = false
@@ -2398,6 +2408,28 @@ interface AgentService {
     /** Start or stop the local FTP asset server (persisted under `settings.ai.ftpServer`). */
     fun setFtpServerEnabled(enabled: Boolean) {}
 
+    /**
+     * The MCP server CodeAssist itself hosts, which gives another AI app (Claude Code, Claude Desktop) the agent's
+     * tools over the open project. Off until the user turns it on: whoever reaches the port can edit the project.
+     */
+    val mcpHost: StateFlow<UiMcpHost> get() = MCP_HOST_NONE
+
+    /** Start or stop the hosted MCP server now, and remember the choice (`settings.ai.mcpServer`). */
+    fun setMcpHostEnabled(enabled: Boolean) {}
+
+    /**
+     * The hosted relay: a public address for [mcpHost]'s tools, so Claude on the web and on a phone (whose
+     * connectors call from Anthropic's servers, and so cannot reach a device's loopback) can work on the open
+     * project too. Needs a signed-in CodeAssist account.
+     */
+    val mcpRelay: StateFlow<UiMcpRelay> get() = MCP_RELAY_NONE
+
+    /** Connect to or leave the relay now, and remember the choice. */
+    fun setMcpRelayEnabled(enabled: Boolean) {}
+
+    /** Replace the link with a new one. The old address stops working at once, wherever it was pasted. */
+    fun resetMcpRelayLink() {}
+
     /** A no-op agent for backends that wire none. */
     object Unsupported : AgentService {
         override val chatState: StateFlow<UiAgentChatState> =
@@ -2492,6 +2524,41 @@ data class UiAgentSkill(
     val path: String,
     val enabled: Boolean,
 )
+
+/**
+ * The MCP server this app hosts for other AI apps (see [AgentService.mcpHost]). [url] is where a client on the
+ * same machine reaches it; on a phone that is the phone's own loopback, reached from a computer by forwarding
+ * [port] over adb. [error] says why turning it on did not start it (the port is usually taken).
+ */
+data class UiMcpHost(
+    val supported: Boolean = false,
+    val running: Boolean = false,
+    val port: Int = 0,
+    val url: String = "",
+    val error: String? = null,
+)
+
+private val MCP_HOST_NONE: StateFlow<UiMcpHost> = MutableStateFlow(UiMcpHost())
+
+/** Where the relay's connection stands. [REPLACED]: this account opened the same link in another CodeAssist. */
+enum class UiMcpRelayStatus { OFF, CONNECTING, CONNECTED, OFFLINE, SIGNED_OUT, IN_USE, REPLACED }
+
+/**
+ * The hosted relay (see [AgentService.mcpRelay]). [url] is the address to add to Claude as a custom connector
+ * with no sign-in; it is a secret, since holding it is all it takes to use the link. Empty until turned on.
+ */
+data class UiMcpRelay(
+    /** This build knows a relay to connect to. */
+    val supported: Boolean = false,
+    val signedIn: Boolean = false,
+    val enabled: Boolean = false,
+    val status: UiMcpRelayStatus = UiMcpRelayStatus.OFF,
+    val url: String = "",
+    /** Requests from Claude being answered right now: above zero, Claude is working on the project. */
+    val inFlight: Int = 0,
+)
+
+private val MCP_RELAY_NONE: StateFlow<UiMcpRelay> = MutableStateFlow(UiMcpRelay())
 
 data class UiAgentConnections(
     /** Whether this build can connect to MCP servers at all. */

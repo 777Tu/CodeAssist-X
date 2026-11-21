@@ -78,6 +78,8 @@ import dev.ide.ui.generated.resources.your_files
 import dev.ide.ui.generated.resources.your_files_content
 import dev.ide.ui.generated.resources.your_files_title
 import dev.ide.ui.icons.CaIcons
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import dev.ide.ui.platform.isMobilePlatform
 import dev.ide.ui.theme.Ca
 import dev.ide.ui.theme.Motion
@@ -173,6 +175,9 @@ private val STEPS: List<OnboardingStep> = listOf(
     ),
 )
 
+/** From this window width the tour is a centred card instead of a bottom sheet. */
+private val CardFromWidth = 600.dp
+
 /**
  * The first-launch feature tour: a glass bottom sheet (~74% on mobile, a
  * centered card on desktop) that pages through the full-bleed feature mocks with a segmented progress bar.
@@ -181,7 +186,10 @@ private val STEPS: List<OnboardingStep> = listOf(
  */
 @Composable
 fun OnboardingSheet(visible: Boolean, onGetStarted: () -> Unit, onFinish: () -> Unit) {
-    if (isMobilePlatform) {
+    // A sheet across a tablet or an unfolded foldable stretched every step to the full width and left the copy
+    // no height, so a wide window gets the centred card whatever the platform.
+    val windowWidth = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp() }
+    if (isMobilePlatform && windowWidth < CardFromWidth) {
         // At least tall enough for a step's 250dp illustration, its copy and the footer, so a small phone
         // (640dp tall) shows the whole step instead of the illustration alone.
         BottomSheet(visible = visible, onDismiss = onFinish, heightFraction = 0.74f, minRestingHeight = 560.dp) {
@@ -199,7 +207,9 @@ fun OnboardingSheet(visible: Boolean, onGetStarted: () -> Unit, onFinish: () -> 
                 Modifier
                     .width(400.dp)
                     .clip(shape)
-                    .background(Ide.colors.glassThick)
+                    // Glass needs the blur behind it that a desktop window has. On a tablet the home screen
+                    // read straight through the card, so there it is a solid surface.
+                    .background(if (isMobilePlatform) MaterialTheme.colorScheme.surfaceContainer else Ide.colors.glassThick)
                     .border(1.dp, Ide.colors.glassEdgeTop, shape)
                     .padding(top = 16.dp),
             ) {
@@ -242,7 +252,7 @@ private fun MarqueeBody(
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp),
         )
 
-        val pagerMod = (if (fillPager) Modifier.weight(1f) else Modifier.height(404.dp)).fillMaxWidth()
+        val pagerMod = (if (fillPager) Modifier.weight(1f) else Modifier.height(440.dp)).fillMaxWidth()
         HorizontalPager(state = pager, modifier = pagerMod, verticalAlignment = Alignment.Top) { i ->
             val s = STEPS[i]
             val active = i == page
@@ -250,8 +260,8 @@ private fun MarqueeBody(
             // alone filled the pager, and a weighted copy column below it got no height at all, so every step's
             // title and text were invisible.
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                Hero(kicker = stringResource(s.kicker), icon = s.icon, active = active, content = s.hero)
-                StepCopy(title = stringResource(s.title), body = stringResource(s.body), active = active)
+                Hero(active = active, content = s.hero)
+                StepCopy(kicker = stringResource(s.kicker), icon = s.icon, title = stringResource(s.title), body = stringResource(s.body), active = active)
             }
         }
 
@@ -286,9 +296,9 @@ private fun SegmentedProgress(count: Int, current: Int, onJump: (Int) -> Unit, m
     }
 }
 
-/** 250dp full-bleed hero: the feature mock + a bottom fade into the sheet + the overlaid kicker chip. */
+/** 250dp full-bleed hero: the feature mock and a bottom fade into the sheet. */
 @Composable
-private fun Hero(kicker: String, icon: ImageVector, active: Boolean, content: @Composable () -> Unit) {
+private fun Hero(active: Boolean, content: @Composable () -> Unit) {
     Box(Modifier.fillMaxWidth().height(250.dp).padding(top = 14.dp).clipToBounds()) {
         // ca-pop: scale 0.96 → 1, translateY 5 → 0 (transform-only; visible at rest if the clock is frozen).
         val pop by animateFloatAsState(if (active) 1f else 0f, tween(Motion.BASE, easing = Motion.spring), label = "pop")
@@ -304,7 +314,6 @@ private fun Hero(kicker: String, icon: ImageVector, active: Boolean, content: @C
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(56.dp)
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Ide.colors.glassThick))),
         )
-        KickerChip(kicker, icon, Modifier.align(Alignment.TopStart).padding(start = 20.dp, top = 12.dp))
     }
 }
 
@@ -326,13 +335,16 @@ private fun KickerChip(text: String, icon: ImageVector, modifier: Modifier) {
 }
 
 @Composable
-private fun StepCopy(title: String, body: String, active: Boolean) {
+private fun StepCopy(kicker: String, icon: ImageVector, title: String, body: String, active: Boolean) {
     // ca-fade-up: translateY 9 → 0 (transform-only).
     val up by animateFloatAsState(if (active) 1f else 0f, tween(Motion.BASE, easing = Motion.quiet), label = "fadeUp")
     Column(
         Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 6.dp)
             .graphicsLayer { translationY = (1f - up) * 9.dp.toPx() },
     ) {
+        // Above the headline it introduces. Laid over the mock, it ran through whatever the mock drew there.
+        KickerChip(kicker, icon, Modifier)
+        Spacer(Modifier.height(10.dp))
         Text(
             title,
             color = MaterialTheme.colorScheme.onSurface,

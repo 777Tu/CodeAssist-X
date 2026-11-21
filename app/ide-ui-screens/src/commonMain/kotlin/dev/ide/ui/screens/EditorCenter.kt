@@ -65,14 +65,12 @@ import dev.ide.ui.editor.core.isLarge
 import dev.ide.ui.editor.engine.EditorEngineDaemon
 import dev.ide.ui.editor.folding.FoldRegion
 import dev.ide.ui.editor.preview.ComposePreviewPane
-import dev.ide.ui.editor.preview.LayoutPreviewPane
 import dev.ide.ui.editor.preview.MarkdownPreviewPane
 import dev.ide.ui.editor.preview.PluginPreviewPane
 import dev.ide.ui.editor.preview.ResourcePreviewPane
 import dev.ide.ui.ext.EditorPreviewRegistry
 import dev.ide.ui.ext.ViewModeContext
 import dev.ide.ui.ext.ViewModeRegistry
-import dev.ide.ui.editor.preview.isLayoutPreviewable
 import dev.ide.ui.editor.preview.isMarkdownPreviewable
 import dev.ide.ui.editor.preview.isPreviewable
 import dev.ide.ui.ext.ToolWindowAnchor
@@ -123,6 +121,20 @@ internal fun EditorCenter(
     }
     val depsState by state.backend.deps.depsState.collectAsState()
     val depsScope = rememberCoroutineScope()
+    // "Report a false error" on a diagnostic: the report is built, shown in full, then shared or copied.
+    var falseErrorReport by remember { mutableStateOf<FalseErrorReportState?>(null) }
+    falseErrorReport?.let { report ->
+        val hostFiles = dev.ide.ui.LocalHostFileActions.current
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        FalseErrorReportDialog(
+            state = report,
+            onShare = if (hostFiles.canShare) ({ text ->
+                depsScope.launch { state.backend.diagnostics.saveFalseErrorReport(text)?.let(hostFiles::share) }
+            }) else null,
+            onCopy = { text -> clipboard.setText(androidx.compose.ui.text.AnnotatedString(text)) },
+            onDismiss = { falseErrorReport = null },
+        )
+    }
     val pluginNavigator = LocalPluginNavigator.current
     val pluginFileOpener = LocalPluginFileOpener.current
     // Gradle compatibility mode: non-null only for a project imported from Gradle. Drives the top-bar compat
@@ -439,6 +451,7 @@ internal fun EditorCenter(
                                 wordWrap = state.wordWrapEnabled,
                                 wrapIndent = state.wrapIndentEnabled,
                                 horizontalScrollbar = state.horizontalScrollbarEnabled,
+                                scrollGutter = state.scrollGutterEnabled,
                                 inlineBlame = state.inlineBlameEnabled,
                                 fontLigatures = state.fontLigaturesEnabled,
                                 caretStyle = CaretStyle.fromId(state.caretStyle),
@@ -467,7 +480,28 @@ internal fun EditorCenter(
                                         actionId.startsWith(RunGutter.ACTION_PREFIX) -> actionId.removePrefix(RunGutter.ACTION_PREFIX)
                                         else -> null
                                     }
-                                    if (runTask != null) state.startRun(RunGutter.option(runTask))
+                                    val falseError = dev.ide.ui.backend.FalseErrorReportAction.parse(actionId)
+                                    if (falseError != null) {
+                                        falseErrorReport = FalseErrorReportState.Building
+                                        val built = runCatching {
+                                            state.backend.diagnostics.falseErrorReport(
+                                                active.path, active.session.doc.text, selStart, selEnd, falseError.second, falseError.first,
+                                            )
+                                        }.getOrNull()
+                                        // Closed while it was building: leave it closed.
+                                        if (falseErrorReport != null) {
+                                            falseErrorReport = built?.let { FalseErrorReportState.Ready(it) } ?: FalseErrorReportState.Failed
+                                        }
+                                    } else if (runTask != null) {
+                                        // A plugin's run mark names a task its provider lists: run it under
+                                        // the provider's label. Looked up only then, and off the main thread,
+                                        // because listing tasks scans sources.
+                                        val option = RunGutter.option(runTask)
+                                        val listed = if (!RunGutter.isUnnamed(option)) null else withContext(Dispatchers.Default) {
+                                            runCatching { state.backend.build.runTasks().firstOrNull { it.id == runTask } }.getOrNull()
+                                        }
+                                        state.startRun(listed ?: option)
+                                    }
                                     else state.dispatchAction(
                                         actionId,
                                         UiActionContext(
@@ -499,15 +533,6 @@ internal fun EditorCenter(
                                     modifier = mod,
                                 )
 
-                                isLayoutPreviewable(active.path) -> LayoutPreviewPane(
-                                    path = active.path,
-                                    text = active.text,
-                                    backend = state.backend,
-                                    session = active.session,
-                                    modifier = mod,
-                                    onOpenFile = { file, line -> state.openAtLine(file, line, 1) },
-                                )
-
                                 isPreviewable(active.path) -> ResourcePreviewPane(
                                     path = active.path,
                                     text = active.text,
@@ -515,9 +540,9 @@ internal fun EditorCenter(
                                     modifier = mod,
                                 )
 
-                                // A plugin's own pane, for a file kind the four built-ins do not cover (a game
-                                // scene, a shader, a diagram). Consulted AFTER them on purpose: a plugin cannot take
-                                // `.xml` away from the layout preview by claiming it.
+                                // A plugin's own pane, for a file kind the built-ins do not cover: a game scene, a
+                                // shader, and the Android layout editor (itself a plugin). Consulted AFTER the
+                                // built-ins on purpose, so a plugin cannot take a drawable or Markdown away from them.
                                 pluginPreview != null -> PluginPreviewPane(
                                     preview = pluginPreview,
                                     path = active.path,
@@ -527,6 +552,8 @@ internal fun EditorCenter(
                                     onOpenFile = pluginFileOpener,
                                     onOpenScreen = pluginNavigator,
                                     modifier = mod,
+                                    session = active.session,
+                                    split = split,
                                 )
 
                                 else -> ComposePreviewPane(

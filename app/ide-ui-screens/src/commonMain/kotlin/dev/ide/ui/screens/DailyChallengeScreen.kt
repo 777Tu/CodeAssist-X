@@ -1,5 +1,6 @@
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -76,6 +77,7 @@ import dev.ide.ui.generated.resources.challenge_todays_top
 import dev.ide.ui.icons.CaSymbols
 import dev.ide.ui.itemsIndexedKeyed
 import dev.ide.ui.joinMeta
+import dev.ide.ui.platform.formatIsoDay
 import dev.ide.ui.platform.nowMillis
 import dev.ide.ui.theme.Ca
 import dev.ide.ui.theme.Motion
@@ -84,6 +86,7 @@ import dev.ide.ui.theme.cardShape
 import dev.ide.ui.theme.tileShape
 import dev.ide.ui.theme.tonalPair
 import org.jetbrains.compose.resources.stringResource
+import dev.ide.ui.theme.eyebrow
 
 /**
  * The Challenges tab.
@@ -114,7 +117,7 @@ fun DailyChallengeScreen(
             start = 20.dp, end = 20.dp, top = 12.dp, bottom = 28.dp,
         ),
         verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
+    ) { distinctKeys {
         item { ChallengeHeader(day, state.profile.streak.current) }
 
         if (!settled) {
@@ -159,7 +162,7 @@ fun DailyChallengeScreen(
             item { ChallengeSectionHeader(stringResource(Res.string.challenge_previous_days)) }
             item { ArchiveStrip(history, onOpenArchive) }
         }
-    }
+    } }
 }
 
 @Composable
@@ -173,7 +176,7 @@ private fun ChallengeHeader(day: UiChallengeDay, streak: Int) {
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                if (day.date.isBlank()) stringResource(Res.string.challenge_subtitle) else day.date,
+                if (day.date.isBlank()) stringResource(Res.string.challenge_subtitle) else formatIsoDay(day.date),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.outline,
             )
@@ -331,7 +334,7 @@ internal fun difficultyLabel(difficulty: String): String = when (difficulty.lowe
 private fun DifficultyPill(difficulty: String, onContainer: Color) {
     Text(
         difficultyLabel(difficulty).uppercase(),
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.eyebrow,
         fontWeight = FontWeight.Bold,
         color = onContainer,
         modifier = Modifier.clip(RoundedCornerShape(Ca.radius.pill))
@@ -501,9 +504,8 @@ private fun ArchiveStrip(history: List<UiChallengeHistoryEntry>, onOpen: (String
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        entry.date.takeLast(5),
+                        formatIsoDay(entry.date, short = true),
                         style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
                         color = pair.onContainer.copy(alpha = 0.7f),
                         modifier = Modifier.weight(1f),
                     )

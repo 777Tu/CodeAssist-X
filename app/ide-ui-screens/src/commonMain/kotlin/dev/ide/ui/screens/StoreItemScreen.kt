@@ -2,6 +2,7 @@
 
 package dev.ide.ui.screens
 
+import dev.ide.ui.distinctKeys
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -61,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.draw.blur
+import dev.ide.ui.platform.supportsBlur
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -157,7 +159,7 @@ import dev.ide.ui.generated.resources.profile_likes
 import org.jetbrains.compose.resources.stringResource
 import dev.ide.ui.backend.UiStoreUpdate
 import dev.ide.ui.backend.UiLocalChanges
-import androidx.compose.material3.AlertDialog
+import dev.ide.ui.dialog.AlertDialog
 import dev.ide.ui.generated.resources.store_update_to
 import dev.ide.ui.generated.resources.store_update_versions
 import dev.ide.ui.generated.resources.store_update_conflict_title
@@ -256,7 +258,7 @@ fun StoreItemScreen(
                     onToggleSaved = onToggleSaved,
                     onShare = onShare?.let { { it(item) } },
                 )
-                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) { distinctKeys {
                     item("hero") {
                         // The app's own icon, blurred into a wash of its colours: icons are made to be colourful,
                         // and the first try (the first screenshot) went near-black on every project with a dark UI,
@@ -346,7 +348,7 @@ fun StoreItemScreen(
                     item("ad") {
                         AdSlot(AdPlacement.STORE_ITEM, Modifier.padding(horizontal = 20.dp).padding(top = 24.dp))
                     }
-                }
+                } }
             }
         }
         if (lightbox >= 0) {
@@ -482,8 +484,8 @@ internal fun DetailTopBar(
  * For a published project it carries the project's own colour: its icon (or, without one, its first
  * screenshot) fills the card, blurred and darkened, and everything on it is drawn in white. Every listing
  * used to open on the same neutral card, which is most of why the page read as a form.
- * The blur is unavailable before Android 12, so the scrim alone has to keep the text legible; it is set
- * dark enough to.
+ * The blur is unavailable before Android 12, where the picture stays sharp and a white icon would sit
+ * straight under the white text, so there the scrim is much heavier and does the work alone.
  *
  * Without one it is the tonal card it always was, with the item's glyph as a watermark. The icon tile is
  * **inverted** against the card (the container's `on*` role as its background) so the one element that has
@@ -515,8 +517,8 @@ private fun DetailHero(
                 Box(
                     Modifier.matchParentSize().background(
                         Brush.verticalGradient(
-                            0f to Color.Black.copy(alpha = 0.30f),
-                            1f to Color.Black.copy(alpha = 0.72f),
+                            0f to Color.Black.copy(alpha = if (supportsBlur) 0.30f else 0.68f),
+                            1f to Color.Black.copy(alpha = if (supportsBlur) 0.72f else 0.86f),
                         ),
                     ),
                 )

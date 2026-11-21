@@ -37,6 +37,94 @@ class KotlinStaticMemberImportCallTest {
         assertTrue(errors.isEmpty(), "expected a clean file, got $errors")
     }
 
+    /**
+     * `import org.junit.Assert.*` is the other spelling of the same import, and the one a test file usually
+     * has. Every `assertEquals`/`assertTrue`/`assertNull` under it was "Unresolved reference": the by-name
+     * import is trusted without a lookup, and a star import names nothing to trust.
+     */
+    @Test
+    fun javaStaticsUnderAStarImportAreCallable() = runBlocking {
+        val junit = TestJars.onClasspath("org/junit/jupiter/api/Assertions.class")
+        val jdk = TestJars.jdkBaseJar(java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "codeassist-jdk-jar"))
+        val src = tempProject(
+            mapOf(
+                "Use.kt" to """
+                    package demo
+                    import org.junit.jupiter.api.Assertions.*
+                    import java.lang.Math.*
+                    class Info(val outputType: String?, val flag: Boolean)
+                    fun check(read: Info) {
+                        assertEquals("Exe", read.outputType)
+                        assertEquals(1L, 1L, "same")
+                        // `int` and `Integer` overloads are one Kotlin signature, not an ambiguity.
+                        assertEquals(1, 2)
+                        assertTrue(read.flag)
+                        assertFalse(!read.flag)
+                        assertNull(null)
+                        assertNotNull(read.outputType)
+                        val area: Double = PI * floorMod(7, 2)
+                    }
+                """.trimIndent(),
+            ),
+        )
+        val analyzer = KotlinSourceAnalyzer(fakeContext(src, listOfNotNull(stdlibJarPath(), junit, jdk)))
+        val errors = analyzer.errorsOf(src, "Use.kt")
+        assertTrue(errors.isEmpty(), "expected a clean file, got $errors")
+    }
+
+    /** A star import of a class is not a licence: a name the class has no static for is still unresolved. */
+    @Test
+    fun aNameTheStarImportedClassLacksIsStillUnresolved() = runBlocking {
+        val junit = TestJars.onClasspath("org/junit/jupiter/api/Assertions.class")
+        val src = tempProject(
+            mapOf(
+                "Use.kt" to """
+                    package demo
+                    import org.junit.jupiter.api.Assertions.*
+                    fun check() {
+                        assertNothing(1)
+                    }
+                """.trimIndent(),
+            ),
+        )
+        val analyzer = KotlinSourceAnalyzer(fakeContext(src, listOf(stdlibJarPath(), junit)))
+        val errors = analyzer.errorsOf(src, "Use.kt")
+        assertEquals(1, errors.size, "expected exactly the unresolved name, got $errors")
+        assertEquals(KotlinDiagnosticCodes.UNRESOLVED, errors.single().code, "got $errors")
+    }
+
+    /**
+     * `java.lang.Integer`, `Long`, `Boolean`, `Character` and `String` are the classes Kotlin maps to a
+     * built-in, and every member lookup answers for the built-in, which has none of the JVM statics. A star
+     * import of one names the JAVA class, so its statics come in, typed as the Java class declares them.
+     */
+    @Test
+    fun aStarImportOfAMappedJavaClassBringsItsStatics() = runBlocking {
+        val jdk = TestJars.jdkBaseJar(java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "codeassist-jdk-jar"))
+            ?: return@runBlocking
+        fun errorsFor(import: String, body: String) = runBlocking {
+            val src = tempProject(mapOf("Use.kt" to "package demo\nimport $import\nfun check() {\n    $body\n}\n"))
+            KotlinSourceAnalyzer(fakeContext(src, listOf(stdlibJarPath(), jdk))).errorsOf(src, "Use.kt")
+        }
+        for ((import, body) in listOf(
+            "java.lang.Integer.*" to "val s: String = toHexString(3)",
+            "java.lang.Integer.*" to "val n: Int = parseInt(\"3\") + MAX_VALUE",
+            "java.lang.Long.*" to "val n: Long = parseLong(\"3\")",
+            "java.lang.Boolean.*" to "val b: Boolean = parseBoolean(\"x\")",
+            "java.lang.Character.*" to "val b: Boolean = isDigit('3')",
+            "java.lang.String.*" to "val s: String = valueOf(3)",
+        )) {
+            val errors = errorsFor(import, body)
+            assertTrue(errors.isEmpty(), "import $import; $body: expected a clean file, got $errors")
+        }
+        // Resolved for real, not waved through: the static's own return type is checked.
+        val mismatch = errorsFor("java.lang.Integer.*", "val n: Int = toHexString(3)")
+        assertEquals(1, mismatch.size, "expected exactly the type mismatch, got $mismatch")
+        assertTrue("mismatch" in mismatch.single().message.lowercase(), "got $mismatch")
+        val missing = errorsFor("java.lang.Integer.*", "val n = nothingHere(3)")
+        assertEquals(KotlinDiagnosticCodes.UNRESOLVED, missing.single().code, "got $missing")
+    }
+
     @Test
     fun aKotlinObjectMemberImportedByNameIsCallable() = runBlocking {
         val src = tempProject(

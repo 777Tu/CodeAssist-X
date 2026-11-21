@@ -17,6 +17,8 @@ data class IdeSettings(
     // ---- appearance ----
     /** [THEME_LIGHT], [THEME_DARK], or [THEME_SYSTEM] (follow the OS). */
     val themeMode: String = THEME_DARK,
+    /** The interface language as a BCP 47 tag from [LANGUAGES], or [LANGUAGE_SYSTEM] to follow the device. */
+    val language: String = LANGUAGE_SYSTEM,
     /** [ACCENT_LIME] (the default), [ACCENT_VIOLET], [ACCENT_TEAL], [ACCENT_ORANGE], [ACCENT_PUMPKIN], or [ACCENT_CUSTOM]. */
     val accent: String = ACCENT_LIME,
     /** Seed for [ACCENT_CUSTOM] — an `0xAARRGGBB` ARGB long. Ignored unless [accent] is custom. */
@@ -51,6 +53,8 @@ data class IdeSettings(
     val wrapIndent: Boolean = true,
     /** Draggable bar along the editor's bottom edge while a line runs past the view; none when [wordWrap]. */
     val horizontalScrollbar: Boolean = true,
+    /** The line-number gutter scrolls sideways with the code instead of staying pinned at the left edge. */
+    val scrollGutter: Boolean = false,
     /** [CARET_LINE] (the default), [CARET_BLOCK], [CARET_UNDERLINE], or [CARET_CANDLE]. */
     val caretStyle: String = CARET_LINE,
     /** Free (two-axis) touch scrolling: a single drag pans both axes at once (off = orientation-locked). */
@@ -66,6 +70,8 @@ data class IdeSettings(
      *  doesn't get an auto-inserted space and identifiers aren't "corrected", at the cost of the suggestion
      *  strip (and a password-style keyboard on some IMEs). */
     val softKeyboardSuggestions: Boolean = true,
+    /** The coding-symbol bar that sits on the soft keyboard while typing, on the phone and the wide layout alike. */
+    val symbolBar: Boolean = true,
 
     // ---- completion ----
     /** Pop the completion list up automatically while typing; off = only on explicit trigger (Ctrl-Space). */
@@ -99,6 +105,23 @@ data class IdeSettings(
         const val THEME_LIGHT = "light"
         const val THEME_DARK = "dark"
         const val THEME_SYSTEM = "system"
+
+        const val LANGUAGE_SYSTEM = "system"
+        /**
+         * The languages the interface can be switched to, as BCP 47 tag to the language's name for itself.
+         *
+         * Indonesian is offered only where the runtime still reports it by its legacy code `in` (Android):
+         * its strings live in `values-in`, which a runtime reporting `id` (a current JDK) does not match.
+         */
+        val LANGUAGES: List<Pair<String, String>> = listOf(
+            "en" to "English",
+            "ar" to "العربية",
+            "es" to "Español",
+            "id" to "Bahasa Indonesia",
+            "pt-BR" to "Português (Brasil)",
+            "ru" to "Русский",
+            "zh" to "简体中文",
+        ).filter { (tag, _) -> tag != "id" || java.util.Locale.forLanguageTag("id").language == "in" }
         const val ACCENT_DYNAMIC = "dynamic"
         const val ACCENT_LIME = "lime"
         const val ACCENT_VIOLET = "violet"

@@ -1415,14 +1415,15 @@ A key is usable only if you can name its type, and that differs by tier:
 Resolution itself is available to both tiers: `reg.appServices` for APPLICATION scope, and
 `Module.service` / `Workspace.service` from the callbacks above. What differs is what you can *name*.
 
-Nine engine capabilities are nameable from the published SPI. `WORKSPACE_SERVICE` is the bound `Workspace`.
+Ten engine capabilities are nameable from the published SPI. `WORKSPACE_SERVICE` is the bound `Workspace`.
 Five are the promoted services (`BUILD_CONTROL`, `SYMBOL_SEARCH`, `MODULE_SOURCES`, `MODULE_ANALYSIS`,
 `MODULE_RESOURCES`), each declared in the api module whose types it already speaks, and each typed to a
 *narrowed* interface rather than to the engine class behind it. The seventh is `CODE_INTERPRETER`
 (`interp-api`), the only one at APPLICATION scope: it runs the code in the user's project, and it follows whichever project is open rather
 than being scoped to one (see section 14b). The eighth, `ANDROID_MODULES` (`project-model-api`), is a
 read-only view over the Android module settings with no engine service behind it (section 14d), and the ninth,
-`MODULE_DEPENDENCIES`, an adapter over the engine's dependency service, which speaks the UI's types (section 14e). `:ide-core` registers the narrow key
+`MODULE_DEPENDENCIES`, an adapter over the engine's dependency service, which speaks the UI's types (section 14e).
+The tenth, `REANALYSIS` (`analysis-api`), asks the editor to analyze the open files again (section 14f). `:ide-core` registers the narrow key
 alongside its own and resolves both to one instance, so a plugin and the IDE act on the same build, the same
 index, and the same module model.
 
@@ -1950,9 +1951,10 @@ carries `backend`, `filePath`, and the live `text`.
 
 ### 10.6b Editor preview panes
 
-The Preview (and Split) surface for a file kind the IDE has no pane for. The four built-in panes are the
-Compose `@Preview`, Android XML layouts, resources and Markdown; a plugin adds a fifth for something else
-entirely, such as a game scene or a shader.
+The Preview (and Split) surface for a file kind the IDE has no pane for. The three built-in panes are the
+Compose `@Preview`, drawable/color resources and Markdown; a plugin adds another for something else entirely,
+such as a game scene or a shader. Android layouts have no built-in pane: the layout editor is a plugin
+(`:layout-editor`), written against this SPI only, which makes it the largest worked example of one.
 
 ```kotlin
 ui.editorPreview(
@@ -1966,11 +1968,41 @@ ui.editorPreview(
 ```
 
 `appliesTo` is asked per open file during composition, so keep it cheap. The built-in panes are consulted
-first, which is what stops a plugin taking `.xml` away from the layout preview.
+first, which is what stops a plugin taking a drawable or a Markdown file away from them.
 
 `EditorPreviewContext` carries `path`, the live `text` (the editor buffer, not the file on disk, so the body
 recomposes as the user types), `dark` for the surface's scheme, and `reportProblems`. Problems go into the
 same chip the built-in previews use; report on every pass, since an empty list is what clears it.
+
+Since SPI 3.5.0 a pane can also **edit** what it shows, which is what turns a preview into a design surface:
+
+| Member | What it is for |
+| --- | --- |
+| `canEdit` | False where no editor is behind the pane (a headless render); show yourself read-only |
+| `applyEdits(edits)` | Replace ranges of the buffer as ONE undo step; the code view follows |
+| `caretOffset`, `selectionEnd` | Where the code editor's selection is, so a pane can follow it |
+| `select(start, end)` | Move the code editor's selection, e.g. to the element the user tapped |
+| `isSplit` | Whether the pane sits beside the code editor, the case where following the caret matters |
+| `reportRendering(busy)` | Say when an asynchronous render is in flight, so a frame is only captured once drawn |
+
+A pane the user works in rather than glances at can pass `fullScreen = true` to `EditorPreview`: while it is the
+tab's only surface (Preview, not Split), the host hides its phone bottom bar (Search, Source, AI, More) so the
+canvas gets that room. The editor's own toggle stays, so leaving is one tap.
+
+Edit ranges are in the `text` the context carries. Compute them against that buffer and apply them before the
+next recomposition hands you a new one; the layout editor serializes its edits behind a mutex for this.
+
+#### Android layouts: `android-layout-api`
+
+A pane over Android layout XML gets the host's own machinery through two services, resolved with
+`ctx.service(...)`: `LAYOUT_RENDERER` renders a buffer to an image plus the view tree that produced it (each
+view's bounds, and the offset of the element it came from, so a tap maps back to the XML), and
+`ANDROID_LAYOUT_MODEL` parses the buffer with the editor's tolerant parser, lists the attributes a view accepts
+inside its parent, completes attribute values, computes attribute edits in the element's own style, and lists
+the project's resources by type (`resources(path, "drawable")`, colors resolved to ARGB) and the app theme's
+color roles (`themeColors(path)`, as `?attr/colorPrimary`), which is what pickers are built from. Both
+are what the editor itself uses. The module is in-tree only for now (not in `plugin-bom`); it is published
+once the layout editor has settled its shape.
 
 Combined with the interpreter (section 16), this is how a plugin renders what the user's code actually
 produces rather than a description of it.
@@ -2023,6 +2055,27 @@ ui.newFileTemplate(NewFileTemplate(
 
 Throwing `IllegalArgumentException` refuses the name, with its message shown in the dialog. On a host before
 3.1.0 the call throws a `LinkageError`; catch it if the plugin supports such hosts.
+
+A template that starts more than one sort of file gives them as `kinds` instead of `files` (since SPI 3.6.0).
+The dialog then shows them as a row of choices above the name, the first one selected, the way the IDE's own
+**New Kotlin file** offers Class, Interface and the rest under one menu row:
+
+```kotlin
+ui.newFileTemplate(NewFileTemplate(
+    id = "my.csFile",
+    title = "C# File",
+    nameLabel = "Type name",
+    kinds = listOf(
+        NewFileKind("class", "Class") { _, name -> listOf(NewFileContent("$name.cs", csClass(name))) },
+        NewFileKind("interface", "Interface") { _, name -> listOf(NewFileContent("$name.cs", csInterface(name))) },
+        NewFileKind("enum", "Enum") { _, name -> listOf(NewFileContent("$name.cs", csEnum(name))) },
+    ),
+))
+```
+
+Each kind's function follows the same rules as `files`, including refusing a name. The `kinds` constructor does
+not exist on a host before 3.6.0, where the call throws a `LinkageError`; a plugin that supports such hosts
+catches it and registers one template per kind instead.
 
 ### 10.8 Icon ids
 
@@ -2083,7 +2136,8 @@ Three constraints come with the slot:
 `diagnostics` is the tab's last analysis result. Every open tab is analyzed, not just the focused one
 ([`OpenTabDiagnostics.kt`](../ide-ui/src/commonMain/kotlin/dev/ide/ui/editor/engine/OpenTabDiagnostics.kt)
 sweeps the rest when a tab opens and again whenever indexing or a build settles), but a background tab is not
-re-analyzed while it sits there, so its diagnostics are as old as the last of those events. A decoration that
+re-analyzed while it sits there, so its diagnostics are as old as the last of those events. A plugin whose own
+state changed can start a new sweep with `REANALYSIS` (section 14f). A decoration that
 needs more than that reads a source with it, the way the built-in build dot reads
 `backend.build.buildState`.
 
@@ -2831,6 +2885,36 @@ SDK and local jars are in the model already.
 Declare `PluginCapabilities.MODEL_DEPENDENCIES` (`model.dependencies`) if you add anything: it changes the
 user's build files and what their code compiles against, and the consent screen says so.
 
+## 14f. Ask for the open files to be analyzed again
+
+`REANALYSIS` (`dev.ide.analysis.Reanalysis`, WORKSPACE, since SPI 3.5.0) re-runs analysis on the files open in
+the editor. The editor re-analyzes a file when the user edits it, when indexing or a build settles, and when a
+file changes on disk. It cannot see your plugin's own state change: a setting your analyzer reads, a compile
+database it parses, a daemon it asks. Without this call, the diagnostics your analyzer produced from the old
+state stay on screen until the user next types in that file.
+
+```kotlin
+settings.onChanged { _, _ ->
+    myAnalyzerCache.clear()                                   // first drop what you derived from the old state
+    workspace.service(REANALYSIS).reanalyzeOpenFiles()        // then ask for a pass
+}
+
+// Or only the files the change touches; a path that is not open is ignored.
+workspace.service(REANALYSIS).reanalyze(listOf("/path/to/app/src/main/cpp/native-lib.cpp"))
+```
+
+The call returns at once and is safe from any thread. Requests coalesce, so a burst of them costs one pass: the
+focused editor runs every pass at once, and the other tabs are analyzed one at a time behind it. The results go
+out on `AnalysisTopics.ANALYSIS` like any others. A file that is not open shows no diagnostics, and it is
+analyzed when the user opens it, so naming one does nothing.
+
+It drops no cache. The IDE's analyzers drop theirs when the IDE calls `SourceAnalyzer.invalidateCaches`, which
+it does for the changes it can see (a file, the model, a synthetic class). Clear your own caches before you
+ask, or the pass will give the same answer as before. On a host older than 3.5.0 the key resolves to nothing,
+so use `serviceOrNull` if you support one.
+
+No capability: asking for analysis to run again shows the user nothing new.
+
 ## 15. Ship your plugin as its own app
 
 Everything above is the internal tier, where a plugin is a module inside the IDE. A plugin can instead be a
@@ -3370,6 +3454,7 @@ with `Module.service(key)` / `Workspace.service(key)` from an extension point ca
 | `dev.ide.model.ANDROID_MODULES` | WORKSPACE | `AndroidModules` | Each Android module's configuration as the build resolves it: SDK levels, namespace and application id, build features, build types, flavors, variants with their application ids, and the active variant (section 14d) |
 | `dev.ide.model.MODULE_RESOURCES` | WORKSPACE | `ModuleResources` | A module's resources: generate a file into a content root of any `ContentRole` and have the IDE see it, plus the Android resource model (query `@type/name`, write `res/values` entries and file resources) |
 | `dev.ide.analysis.MODULE_ANALYSIS` | MODULE | `ModuleAnalysis` | The module's `SourceAnalyzer` per language: resolution and diagnostics for code the plugin did not parse |
+| `dev.ide.analysis.REANALYSIS` | WORKSPACE | `Reanalysis` | Analyze the open files again, all of them or the ones named, after state your analyzer reads changed outside any file (section 14f) |
 | `dev.ide.interp.api.CODE_INTERPRETER` | APPLICATION | `CodeInterpreter` | Run the code in the user's project: lower its Kotlin with no compile step, or run its compiled classes on the bytecode VM (section 14b) |
 | `dev.ide.platform.settings.SETTINGS_ACCESS` | APPLICATION | `SettingsAccess` | Read your own settings page's stored values at any time, not only inside `onChanged` / `onAction` |
 | `dev.ide.platform.notify.USER_MESSAGES` | APPLICATION | `UserMessages` | Tell the user something from an engine facet, and show long work while it runs |

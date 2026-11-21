@@ -23,6 +23,9 @@
     <string name="chat_api_key_optional">Chave de API (opcional)</string>
     <string name="chat_base_url">URL base</string>
     <string name="chat_model">Modelo</string>
+    <string name="chat_fetch_models">Buscar modelos</string>
+    <string name="chat_fetching_models">Buscando modelos…</string>
+    <string name="chat_fetch_models_failed">Não foi possível ler a lista de modelos deste endpoint. Verifique a URL base e a chave ou digite o nome do modelo.</string>
     <string name="chat_connected">Conectado</string>
     <string name="chat_show">Mostrar</string>
     <string name="chat_hide">Ocultar</string>
@@ -283,4 +286,26 @@
     <string name="aihome_new_app">Novo app</string>
     <string name="aihome_run">Executar</string>
     <string name="aihome_open_editor">Abrir no editor</string>
+    <string name="conn_claude_title">Usar o CodeAssist pelo Claude</string>
+    <string name="conn_claude_toggle">Permitir que o Claude trabalhe neste projeto</string>
+    <string name="conn_claude_intro">Inicia um servidor MCP local com as ferramentas do agente, para que o Claude Code ou o Claude Desktop possam ler, editar e compilar o projeto aberto.</string>
+    <string name="conn_claude_warning">Enquanto estiver ativado, qualquer app que alcance a porta pode alterar o projeto aberto sem perguntar.</string>
+    <string name="conn_claude_step_adb">No computador, com o telefone conectado por USB:</string>
+    <string name="conn_claude_step_code">Claude Code: execute isto uma vez</string>
+    <string name="conn_claude_step_desktop">Claude Desktop: adicione isto ao claude_desktop_config.json</string>
+    <string name="conn_claude_desktop_note">O Claude Desktop precisa do Node.js para isso e depois ser reiniciado. Mantenha o CodeAssist aberto com o projeto em que o Claude deve trabalhar.</string>
+    <string name="conn_relay_toggle">Claude na web e no telefone</string>
+    <string name="conn_relay_intro">Dá a este projeto um endereço web privado pelo relay do CodeAssist, para que o Claude no claude.ai e no app do Claude possa trabalhar nele. O CodeAssist precisa ficar aberto.</string>
+    <string name="conn_relay_sign_in">Entre na sua conta do CodeAssist para usar isto.</string>
+    <string name="conn_relay_warning">Qualquer pessoa com o endereço pode alterar o projeto aberto sem perguntar. Não o compartilhe com ninguém e crie um novo link se ele vazar.</string>
+    <string name="conn_relay_status_connecting">Conectando…</string>
+    <string name="conn_relay_status_connected">Conectado. O Claude pode acessar este projeto.</string>
+    <string name="conn_relay_status_offline">Sem conexão com o relay. Tentando de novo…</string>
+    <string name="conn_relay_status_signed_out">Sua sessão expirou. Entre novamente.</string>
+    <string name="conn_relay_status_in_use">Este link pertence a outra conta. Crie um novo link.</string>
+    <string name="conn_relay_status_replaced">Este link foi aberto em outro CodeAssist. Ative-o aqui de novo para recuperá-lo.</string>
+    <string name="conn_relay_step">No Claude: Configurações, Conectores, Adicionar conector personalizado. Cole este endereço e escolha sem login.</string>
+    <string name="conn_relay_new_link">Criar um novo link</string>
+    <string name="chat_ca_cert">Certificado de CA (opcional)</string>
+    <string name="chat_ca_cert_hint">Cole um certificado de CA (PEM) somente se o endpoint usar uma CA privada ou regional em que o sistema não confia (ex.: GigaChat). Ele passa a ser confiável além das CAs do sistema; a cadeia continua sendo verificada.</string>
 </resources>

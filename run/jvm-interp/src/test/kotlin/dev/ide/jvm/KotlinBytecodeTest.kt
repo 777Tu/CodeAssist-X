@@ -35,6 +35,10 @@ class KotlinBytecodeTest {
 
     private fun call(name: String, desc: String, vararg args: Any?): Any? = vm.invokeStatic(KFX, name, desc, args.toList())
 
+    @Test fun proxyFakesAnInterpretedKotlinInterface() {
+        assertEquals(dev.ide.jvm.kfixtures.kotlinProxyFake(), vm.invokeStatic("dev/ide/jvm/kfixtures/KProxyKt", "kotlinProxyFake", "()Ljava/lang/String;"))
+    }
+
     /**
      * A `boolean`/`byte`/`char`/`short`-returning lambda linked via `LambdaMetafactory` (its impl returns the
      * primitive, adapted to the erased `Function0.invoke():Object`) must box to ITS OWN wrapper when its result
@@ -110,6 +114,15 @@ class KotlinBytecodeTest {
         assertEquals(tierValueOfName(), call("tierValueOfName", "()Ljava/lang/String;"))
         assertEquals(tierMapText(), call("tierMapText", "()Ljava/lang/String;"))
         assertEquals(tierSortedText(), call("tierSortedText", "()Ljava/lang/String;"))
+    }
+
+    @Test
+    fun aVarargOfLambdasCrossesTheBridgeAsRealFunctions() {
+        assertEquals(dev.ide.jvm.kfixtures.sortedByTwoSelectors(), call("sortedByTwoSelectors", "()Ljava/lang/String;"))
+        assertEquals(
+            dev.ide.jvm.kfixtures.selectorsSurviveTheCrossing(),
+            call("selectorsSurviveTheCrossing", "()Ljava/lang/String;"),
+        )
     }
 
     @Test

@@ -1,10 +1,12 @@
 package dev.ide.core.plugins
 
+import dev.ide.ui.ext.asUiPlugin
 import dev.ide.agent.ui.AgentUiPlugin
 import dev.ide.analysis.ACTION_PROVIDER_EP
 import dev.ide.analysis.ANALYZER_EP
 import dev.ide.analysis.MODULE_ANALYSIS
 import dev.ide.analysis.QUICK_FIX_PROVIDER_EP
+import dev.ide.analysis.REANALYSIS
 import dev.ide.android.support.ANDROID_RESOURCE_REPOSITORY
 import dev.ide.android.support.AndroidAidlProvider
 import dev.ide.android.support.AndroidBuildConfigProvider
@@ -111,6 +113,7 @@ import dev.ide.lang.java.index.JavaClassNamesIndex
 import dev.ide.lang.java.index.JavaMainIndex
 import dev.ide.lang.java.index.JavaMembersByOwnerIndex
 import dev.ide.lang.java.index.JavaMembersIndex
+import dev.ide.lang.java.index.JavaStaticMembersIndex
 import dev.ide.lang.java.index.JavaPackageTypesIndex
 import dev.ide.lang.java.index.JavaPackagesIndex
 import dev.ide.lang.java.index.JavaSourceAnnotationIndex
@@ -243,6 +246,16 @@ object BuiltInPlugins {
         BuiltInPlugin(AgentPlugin(), ui = AgentUiPlugin),
         // Version control: engine facet (settings page + VcsBackend wiring) + its Compose Git UI.
         BuiltInPlugin(VcsPlugin(), ui = VcsUiPlugin),
+        // The Android layout editor: written as an INSTALLED plugin would be (engine + UI facet, the plugin SPI
+        // only), so its UI facet is the published `dev.ide.plugin.ui.UiPlugin`, adapted exactly as an installed
+        // plugin's is and resolving the host's layout services through the same lookup.
+        BuiltInPlugin(
+            dev.ide.android.layouteditor.LayoutEditorPlugin(),
+            ui = dev.ide.android.layouteditor.LayoutEditorUiPlugin.asUiPlugin(
+                dev.ide.android.layouteditor.LayoutEditorPlugin.ID,
+                env.uiServices,
+            ),
+        ),
     )
 }
 
@@ -477,6 +490,9 @@ private class KotlinSupportPlugin : Plugin {
  * + `symbol-processing-api`, so the thin runner + processors resolve those parent-first. `jdkHome` is a real
  * JDK on desktop and null on ART (where android.jar on the module's compile classpath supplies `java.*`).
  */
+/** KSP runs' own diagnostics, mirrored into the app log. */
+private val kspLog = dev.ide.platform.log.Log.logger("ksp")
+
 private class KspSupportPlugin(private val env: ApplicationEnvironment) : Plugin {
     override val manifest = PluginManifest(
         id = "ksp-support", name = "KSP Source Generation",
@@ -510,6 +526,9 @@ private class KspSupportPlugin(private val env: ApplicationEnvironment) : Plugin
                 processorOptions = { req -> catalog.optionsFor(req.classpath, req.declaredDependencies) },
                 loader = loader,
                 jdkHome = jdkHome,
+                // Also into the app log (logcat, the in-app log viewer, crash reports): a processor crash's cause
+                // chain only went to the build console, where its frames are folded away as detail.
+                log = { kspLog.info(it) },
             ),
         )
     }
@@ -668,6 +687,7 @@ internal val BUILT_IN_INDEX_EXTENSIONS: List<dev.ide.index.IndexExtension<*, *>>
     JavaSourceSymbolsIndex,
     JavaMembersIndex,
     JavaMembersByOwnerIndex,
+    JavaStaticMembersIndex,
     KotlinClassNamesIndex,
     KotlinPackagesIndex,
     KotlinPackageTypesIndex,
@@ -808,6 +828,14 @@ private class MissingLibraryPlugin(private val env: ApplicationEnvironment) : Pl
             dev.ide.core.analysis.MissingLibraryFixProvider(
                 missing = { env.activeEngine?.dependencies?.missingLibraries },
                 diagnosticsOf = { file -> env.activeEngine?.publishedDiagnostics(file).orEmpty() },
+            ),
+        )
+        // A resource read through a library's R that does not declare it: point at the R that does.
+        reg.register(
+            QUICK_FIX_PROVIDER_EP,
+            dev.ide.core.analysis.LibraryRReferenceFixProvider(
+                rClasses = { module -> env.activeEngine?.rClassesFor(module).orEmpty() },
+                ownNamespace = { module -> module.facets.get(dev.ide.android.support.AndroidFacet.KEY)?.namespace?.takeIf { it.isNotBlank() } },
             ),
         )
     }
@@ -961,6 +989,13 @@ private class IdeCoreServicesPlugin : Plugin {
         }
         reg.service(ANDROID_MODULES, ServiceScopeLevel.WORKSPACE) {
             dev.ide.core.services.AndroidModulesService(getService(ENGINE_CONTEXT))
+        }
+        // Published only, like the two above: the engine's own callers ask the engine directly.
+        reg.service(REANALYSIS, ServiceScopeLevel.WORKSPACE) {
+            dev.ide.core.services.ReanalysisService(getService(ENGINE_CONTEXT))
+        }
+        reg.service(dev.ide.build.RUN_SETTINGS, ServiceScopeLevel.WORKSPACE) {
+            dev.ide.core.services.RunSettingsService(getService(ENGINE_CONTEXT))
         }
         reg.service(REFACTOR_SERVICE, ServiceScopeLevel.WORKSPACE) {
             RefactorService(getService(ENGINE_CONTEXT), getService(KOTLIN_EDITOR_SERVICE))

@@ -5,6 +5,8 @@ import android.util.AttributeSet
 import android.view.InflateException
 import android.view.LayoutInflater
 import android.view.View
+import dev.ide.jvm.PeerFailurePolicy
+import dev.ide.jvm.VmStepBudgetException
 import dev.ide.jvm.ClassAlias
 import dev.ide.jvm.ClassBytesSource
 import dev.ide.jvm.InterpretPolicy
@@ -71,6 +73,21 @@ internal class VmViewFactory(
         log.info("VM view factory: ${jarFiles.size} library jars, ${classDirs.size} class dirs on the interpret classpath")
     }
 
+    /** The classes the VM read from the project's class DIRECTORIES, forgotten by [projectClassesChanged]. */
+    private val projectClasses: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * The project's compiled classes changed on disk (a compile finished): forget the ones the VM loaded from
+     * them, so the next render reads the new bytes, and keep every library class decoded. Rebuilding the whole
+     * VM for this re-read and re-decoded every AppCompat/Material class, a cold render for a one-line edit to a
+     * custom view. Safe between renders: each render inflates a fresh tree, so nothing still runs old code.
+     */
+    fun projectClassesChanged() {
+        val stale = HashSet(projectClasses)
+        projectClasses.clear()
+        vm.forgetClasses { it in stale }
+    }
+
     /** `com/example/app/R`, the class every library `R` resolves to. */
     private val appR: String? = appPackage?.replace('.', '/')?.plus("/R")
 
@@ -78,6 +95,28 @@ internal class VmViewFactory(
      *  [useResourceClasses] without rebuilding the VM. */
     @Volatile private var rJar: JarFile? = null
     private var rJarKey: String? = null
+
+    /**
+     * Whether `androidx.graphics.shapes` runs as the app's own copy instead of being interpreted. It is pure
+     * geometry with no views or resources in it, and Material builds every one of its shapes and the morphs
+     * between them in a static initializer: 11 million instructions the first time a layout holds a
+     * `LoadingIndicator`, which interpreted was 22 s of a first render on a phone.
+     *
+     * Only when the app's copy has every class the project's does. A project on a newer library than the app
+     * bundles keeps its own, interpreted: slower, never a missing method.
+     */
+    private val hostShapes: Boolean by lazy {
+        runCatching {
+            val wanted = jarFiles.flatMap { jar ->
+                jar.entries().asSequence().map { it.name }
+                    .filter { it.startsWith(SHAPES_PACKAGE) && it.endsWith(".class") }.toList()
+            }
+            wanted.isNotEmpty() && wanted.all { entry ->
+                val name = entry.removeSuffix(".class").replace('/', '.')
+                runCatching { Class.forName(name, false, VmViewFactory::class.java.classLoader) }.isSuccess
+            }
+        }.getOrDefault(false).also { log.info("VM view factory: androidx.graphics.shapes runs ${if (it) "as the app's copy" else "interpreted"}") }
+    }
 
     private val vm = Vm(
         source = source ?: ClassBytesSource { internalName ->
@@ -87,14 +126,15 @@ internal class VmViewFactory(
             classDirs.firstNotNullOfOrNull { d ->
                 d.resolve("$internalName.class").takeIf { Files.isRegularFile(it) }
                     ?.let { runCatching { Files.readAllBytes(it) }.getOrNull() }
-            } ?: jarFiles.firstNotNullOfOrNull { jar ->
+            }?.also { projectClasses += internalName } ?: jarFiles.firstNotNullOfOrNull { jar ->
                 jar.getJarEntry("$internalName.class")
                     ?.let { e -> jar.getInputStream(e).use { it.readBytes() } }
             }
         },
         policy = InterpretPolicy { internalName ->
             !isBootLoadable(internalName.replace('/', '.')) &&
-                !internalName.startsWith("kotlin/") && !internalName.startsWith("kotlinx/")
+                !internalName.startsWith("kotlin/") && !internalName.startsWith("kotlinx/") &&
+                !(internalName.startsWith(SHAPES_PACKAGE) && hostShapes)
         },
         // A view can post an interpreted callback (a Runnable / offset listener) to the render Looper that runs
         // AFTER the snapshot is drawn, outside the render's error boundary. Guard those proxy invocations so a
@@ -110,7 +150,41 @@ internal class VmViewFactory(
             if (!isResourceClass(name) || name.startsWith("$app\$") || name == app) null
             else app + name.substring(name.lastIndexOf('/') + 2)
         },
+        // A view asking `isInEditMode()` is told it is in a design tool, the convention custom views use to
+        // skip what cannot run in one (network, databases, analytics).
+        constantMethods = mapOf("isInEditMode()Z" to true),
+        // One custom view's onMeasure/onLayout/onDraw failing (or looping) must not fail the frame: the call
+        // falls back to the framework's own implementation, and the view is marked for the overlay + problems.
+        peerFailure = PeerFailurePolicy { peer, className, method, error ->
+            if (peer is View) brokenViews[peer] = "$method: ${describe(error)}"
+            problems += Problem(className, "$method failed: ${describe(error)}")
+        },
+        peerStepBudget = PEER_STEP_BUDGET,
     )
+
+    /** One thing that went wrong this render: the class it happened in and what. */
+    class Problem(val className: String, val message: String)
+
+    /** This render's problems and the views whose code failed mid-frame, reset by [beginRender]. */
+    private val problems = java.util.Collections.synchronizedList(ArrayList<Problem>())
+    private val brokenViews = java.util.Collections.synchronizedMap(java.util.WeakHashMap<View, String>())
+
+    /** Start a render: forget the last one's problems and broken views. */
+    fun beginRender() {
+        problems.clear()
+        brokenViews.clear()
+    }
+
+    /** What went wrong in the current render, in order. */
+    fun problems(): List<Problem> = synchronized(problems) { problems.toList() }
+
+    /** The views whose interpreted code failed during the current render, each with what failed. */
+    fun brokenViews(): Map<View, String> = synchronized(brokenViews) { brokenViews.toMap() }
+
+    private fun describe(t: Throwable): String = when (t) {
+        is VmStepBudgetException -> "ran too long (stopped after ${t.budget / 1_000_000}M instructions)"
+        else -> (t.cause ?: t).let { c -> c.javaClass.simpleName + (c.message?.let { ": " + it.take(160) } ?: "") }
+    }
 
     /**
      * Reads `R` classes from [jar] from now on. When it is a different file (or the same one rewritten) the VM
@@ -154,13 +228,29 @@ internal class VmViewFactory(
      */
     fun createView(name: String, context: Context, attrs: AttributeSet?): View? {
         if ('.' !in name) return null
+        if (isBootLoadable(name)) return null
         if (!vm.hasInterpretedClass(name)) {
-            // A dotted tag the boot loader can't provide and the VM has no bytes for: the library jar isn't on
-            // the classpath (unresolved dependency, or a class dir not yet built). Defer to the default inflater
-            // (which will report the ClassNotFoundException) but note why here.
+            // A dotted tag the boot loader can't provide and the VM has no bytes for: a project class not compiled
+            // yet, or a library that is not resolved. A stand-in keeps the rest of the layout rendering.
             log.info("VM view factory: no interpreted bytes for <$name> — not on the preview classpath")
-            return null
+            return placeholder(name, context, attrs, MISSING_CLASS)
         }
+        return try {
+            vm.withStepBudget(CONSTRUCTOR_STEP_BUDGET) { construct(name, context, attrs) }
+        } catch (t: Throwable) {
+            if (t is dev.ide.jvm.VmInterruptedException) throw t
+            log.warn("VM view factory: <$name> could not be created: ${describe(t)}")
+            placeholder(name, context, attrs, "Could not be created: ${describe(t)}")
+        }
+    }
+
+    /** A stand-in for [name] that renders in its place (see [PreviewPlaceholderView]), recorded as a problem. */
+    private fun placeholder(name: String, context: Context, attrs: AttributeSet?, reason: String): View {
+        problems += Problem(name, reason)
+        return PreviewPlaceholderView(context, attrs, name, reason)
+    }
+
+    private fun construct(name: String, context: Context, attrs: AttributeSet?): View? {
         val ctors = vm.interpretedConstructors(name)
         fun ctor(vararg descs: String): VmMethodView? =
             ctors.firstOrNull { it.paramDescriptors == descs.toList() }
@@ -196,9 +286,20 @@ internal class VmViewFactory(
     }
 
     private companion object {
+        /** See [hostShapes]. */
+        private const val SHAPES_PACKAGE = "androidx/graphics/shapes/"
+
         const val CONTEXT = "Landroid/content/Context;"
         const val ATTRS = "Landroid/util/AttributeSet;"
         const val RECYCLER_VIEW = "androidx.recyclerview.widget.RecyclerView"
         const val TOOLS_LIST = "dev.ide.preview.tools.ToolsList"
+
+        /** Instructions a view's constructor may run before it is taken to be stuck (Material views run a lot). */
+        const val CONSTRUCTOR_STEP_BUDGET = 60_000_000L
+
+        /** Instructions one onMeasure/onLayout/onDraw call may run. */
+        const val PEER_STEP_BUDGET = 30_000_000L
+
+        const val MISSING_CLASS = "Not compiled yet, or its library is not resolved"
     }
 }

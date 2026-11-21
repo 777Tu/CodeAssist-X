@@ -48,6 +48,7 @@ import dev.ide.ui.backend.UiGutterMark
 import dev.ide.ui.backend.UiSeverity
 import dev.ide.ui.clipForClipboard
 import dev.ide.ui.editor.core.EditorDocument
+import dev.ide.ui.editor.core.MAX_RENDERED_LINE_COLS
 import dev.ide.ui.editor.core.EditorSession
 import dev.ide.ui.editor.folding.FoldModel
 import dev.ide.ui.ext.EditorAnchor
@@ -114,6 +115,8 @@ internal fun BoxScope.DiagnosticChipsLayer(
     hOffset: MutableFloatState,
     onOpenSheet: (UiDiagnostic) -> Unit,
     onChipExtent: (Float) -> Unit,
+    /** The x where the code area begins on screen, read in the draw phase; the pinned gutter's width by default. */
+    gutterEdge: () -> Float = { gutterWidthPx },
     /** The document lines on screen. Read through a derived, bucketed window (see [chipWindow]), so a scroll
      *  recomposes this layer only when it crosses a bucket, not per frame. */
     visibleLinesOf: () -> IntRange,
@@ -201,7 +204,7 @@ internal fun BoxScope.DiagnosticChipsLayer(
     // gutter instead of overlapping it. Draw-only clip; the chips keep their absolute positions.
     Box(
         Modifier.matchParentSize().drawWithContent {
-            clipRect(left = gutterWidthPx) { this@drawWithContent.drawContent() }
+            clipRect(left = gutterEdge()) { this@drawWithContent.drawContent() }
         },
     ) {
         for ((ln, g) in chipPerLine) {
@@ -264,7 +267,9 @@ private fun estimatedLineWidth(
 ): Float {
     val fold = fm.foldStartingAt(line)
     val cols = if (fold != null) {
-        (fold.prefixEnd - doc.lineStart(line)) + fold.placeholder.length + (doc.lineEnd(fold.endLine) - fold.suffixStart)
+        // Each side as the composite draws it: cut at the rendered limit.
+        (fold.prefixEnd - doc.lineStart(line)).coerceAtMost(MAX_RENDERED_LINE_COLS) + fold.placeholder.length +
+            (doc.lineEnd(fold.endLine) - fold.suffixStart).coerceAtMost(MAX_RENDERED_LINE_COLS)
     } else {
         render.renderCache.rawToVisual(line, doc.lineLength(line))
     }
@@ -344,6 +349,8 @@ internal fun PreviewGutterIconsLayer(
     vOffset: MutableFloatState,
     docLength: Int,
     onPreview: (String) -> Unit,
+    /** How far the gutter has scrolled off the left edge (0 while pinned); read in the layout or draw phase. */
+    gutterShift: () -> Float = { 0f },
 ) {
     val doc = session.doc
     val seenPreviewLines = HashSet<Int>()
@@ -355,7 +362,7 @@ internal fun PreviewGutterIconsLayer(
             onClick = { onPreview(p.variantId) },
             modifier = Modifier.offset {
                 IntOffset(
-                    1.dp.roundToPx(),
+                    1.dp.roundToPx() - gutterShift().roundToInt(),
                     (metrics.padTop + vlayout.topRow(ln) * metrics.lineHeight - vOffset.floatValue + (metrics.lineHeight - 20.dp.toPx()) / 2f).roundToInt(),
                 )
             },
@@ -385,6 +392,8 @@ internal fun PluginGutterMarksLayer(
     colors: CodeAssistColors,
     onInvoke: (actionId: String, line: Int) -> Unit,
     backend: IdeBackend? = null,
+    /** How far the gutter has scrolled off the left edge (0 while pinned); read in the layout or draw phase. */
+    gutterShift: () -> Float = { 0f },
 ) {
     val marks = session.gutterMarks
     if (marks.isEmpty()) return
@@ -418,7 +427,7 @@ internal fun PluginGutterMarksLayer(
                 onClick = mark.actionId?.let { id -> { onInvoke(id, line) } },
                 modifier = Modifier.offset {
                     IntOffset(
-                        1.dp.roundToPx(),
+                        1.dp.roundToPx() - gutterShift().roundToInt(),
                         (
                             metrics.padTop + vlayout.topRow(line) * metrics.lineHeight - vOffset.floatValue +
                                 (metrics.lineHeight - 20.dp.toPx()) / 2f

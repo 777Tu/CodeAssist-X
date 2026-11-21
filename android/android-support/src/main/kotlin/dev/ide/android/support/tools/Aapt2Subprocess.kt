@@ -9,7 +9,15 @@ import java.nio.file.Path
  * `resources.ap_` (a zip holding the binary manifest + `resources.arsc` + compiled res) and generates
  * `R.java`. `--auto-add-overlay` lets later source sets (build type / flavor) overlay the main set.
  */
-class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
+class Aapt2Subprocess(
+    private val aapt2: Path,
+    /** When set, commands go to this long-lived process first (see [Aapt2Daemon]); a fresh process is launched
+     *  for any command it cannot answer. For a caller that runs aapt2 per edit; a build leaves it unset. */
+    private val daemon: Aapt2Daemon? = null,
+) : Aapt2 {
+
+    /** Run [cmd] (the binary first): through the daemon when there is one and it answers, else as a process. */
+    private fun exec(cmd: List<String>): ToolResult = daemon?.run(cmd.drop(1)) ?: Subprocess.run(cmd)
 
     override fun compile(resDirs: List<Path>, outDir: Path): Aapt2CompileResult {
         Files.createDirectories(outDir)
@@ -17,7 +25,7 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
         val log = ArrayList<String>()
         resDirs.filter { Files.isDirectory(it) }.forEachIndexed { i, resDir ->
             val archive = outDir.resolve("res-$i.zip")
-            val r = Subprocess.run(listOf(aapt2.toString(), "compile", "--dir", resDir.toString(), "-o", archive.toString()))
+            val r = exec(listOf(aapt2.toString(), "compile", "--dir", resDir.toString(), "-o", archive.toString()))
             log += r.log
             if (!r.success) return Aapt2CompileResult(archives, ToolResult(false, log + selfTest()))
             if (Files.exists(archive)) archives.add(archive)
@@ -61,6 +69,8 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
         rTxt: Path?,
         includes: List<Path>,
         packageId: Int?,
+        stableIds: Path?,
+        emitIds: Path?,
     ): ToolResult {
         Files.createDirectories(genJavaDir)
         outApk.parent?.let { Files.createDirectories(it) }
@@ -89,6 +99,9 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
             if (protoFormat) add("--proto-format")
             // `--output-text-symbols` writes the R symbol table (`R.txt`) an AAR ships for its consumers.
             rTxt?.let { add("--output-text-symbols"); add(it.toString()) }
+            // Ids carried from one link to the next: a resource keeps the id it had, and a new one takes a free id.
+            stableIds?.let { add("--stable-ids"); add(it.toString()) }
+            emitIds?.let { add("--emit-ids"); add(it.toString()) }
             add("--min-sdk-version"); add(minSdk.toString())
             add("--target-sdk-version"); add(targetSdk.toString())
             add("--auto-add-overlay")
@@ -96,7 +109,7 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
             // `-R` marks an overlay: it overrides resources the base archives also define (and adds new ones).
             overlays.forEach { add("-R"); add(it.toString()) }
         }
-        val r = Subprocess.run(cmd)
+        val r = exec(cmd)
         return if (r.success) r else ToolResult(false, r.log + selfTest())
     }
 
@@ -122,7 +135,7 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
             add("--target-sdk-version"); add(targetSdk.toString())
             addAll(compiled.map { it.toString() })
         }
-        return Subprocess.run(cmd)
+        return exec(cmd)
     }
 
     override fun convert(input: Path, output: Path, toProto: Boolean): ToolResult {
@@ -133,7 +146,7 @@ class Aapt2Subprocess(private val aapt2: Path) : Aapt2 {
             "--output-format", if (toProto) "proto" else "binary",
             input.toString(),
         )
-        val r = Subprocess.run(cmd)
+        val r = exec(cmd)
         return if (r.success) r else ToolResult(false, r.log + selfTest())
     }
 }

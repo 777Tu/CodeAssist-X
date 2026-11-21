@@ -44,6 +44,11 @@ internal interface EngineContext {
      *  all read it too, so it stays engine-owned and is reached through here, not owned by the search service. */
     val indexService: IndexService
 
+    /** The library `res/` folder this workspace holds for index segment key [segmentKey] (`res-<content id>`), or
+     *  null. What turns a library resource declaration's portable path into a file here
+     *  (`ResourceDeclValue.located`). */
+    fun libraryResourceRoot(segmentKey: String): java.nio.file.Path?
+
     /** App-global signing-keystore registry. Shared infrastructure: the Android build's signing resolver
      *  reads it too, so it stays owned by the engine and is reached through here, not by the signing service. */
     val keystoreRegistry: KeystoreRegistry
@@ -99,6 +104,9 @@ internal interface EngineContext {
 
     /** Content roots to surface in the project tree (code + resources + assets) for [module]. */
     fun treeRoots(module: Module): List<Path>
+
+    /** Every file under [root] that is project content: derived-output directories inside it are skipped. */
+    fun contentFilesUnder(root: Path): List<Path>
 
     /** The live editor-buffer text for [path] (unsaved edits), or null when the file is not open. */
     fun overlayText(path: Path): String?
@@ -207,6 +215,10 @@ internal interface EngineContext {
 
     /** Re-run the background index build over the current scope. */
     fun resyncIndex()
+
+    /** Ask the editor to re-analyze the open files among [paths], or every open file when null. Drops no
+     *  cache: see [dev.ide.analysis.Reanalysis], the published face of this. */
+    fun requestReanalysis(paths: Collection<Path>?)
 
     /** The workspace change-notification spine. A service that mutated the world PUBLISHES the fact here
      *  (e.g. [WorkspaceEventHub.librariesChanged] after a finished resolution wrote `libraries.json`);

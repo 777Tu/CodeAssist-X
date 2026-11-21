@@ -134,9 +134,9 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="export_format_gradle">Gradle project</string>
     <string name="export_format_gradle_desc">A .zip holding your sources plus generated Gradle build files, for Android Studio or a gradle build.</string>
     <string name="export_gradle_title">What gets generated</string>
-    <string name="export_gradle_contents">settings.gradle.kts, a build.gradle.kts per module, gradle.properties, and the Gradle wrapper settings, all written from your project: modules, dependencies, SDK levels, build types, flavors and build features.</string>
+    <string name="export_gradle_contents">settings.gradle.kts, a build.gradle.kts per module, gradle.properties and the Gradle wrapper, all written from your project: modules, dependencies, SDK levels, build types, flavors and build features.</string>
     <string name="export_gradle_caveat">Best effort. The build files are generated from the project model rather than from a build that ran, so read them before you rely on them. Dependencies are declared as Maven coordinates and Gradle downloads them on the first sync, so that sync needs a connection.</string>
-    <string name="export_gradle_wrapper_note">The gradlew scripts are not included: Android Studio adds them on the first sync, or run gradle wrapper once.</string>
+    <string name="export_gradle_wrapper_note">A library module also gets a Maven publication and a jitpack.yml, so the export can be published as it is, JitPack included.</string>
     <string name="export_success_subtitle_gradle">Your Gradle project is ready.</string>
     <string name="export_notes_title">Worth checking</string>
     <string name="export_notes_desc">These are also in GRADLE-EXPORT.md inside the archive.</string>
@@ -442,6 +442,11 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="codeaction_severity_info">Info</string>
     <string name="codeaction_severity_hint">Hint</string>
     <string name="codeaction_quick_fixes">Quick fixes</string>
+    <string name="codeaction_report_false_error">Report a false error</string>
+    <string name="false_error_title">False error report</string>
+    <string name="false_error_intro">This is what will be shared: the problem, this file, and what the editor resolved it against. Review it before you send it.</string>
+    <string name="false_error_building">Building the report…</string>
+    <string name="false_error_failed">The report could not be built.</string>
     <string name="codeaction_same_span">%1$d on the same span</string>
     <plurals name="codeaction_problems_here">
         <item quantity="one">%1$d problem here</item>
@@ -1184,6 +1189,7 @@ We never collect your code, file or project names, what you type, or anything th
 
     <!-- run/preview/edoverlay — reuses copy(shared) -->
     <string name="run_no_active_run">No active run.</string>
+    <string name="run_program_window">Program window</string>
     <string name="run_back">Back</string>
     <string name="run_run_again">Run again</string>
     <string name="run_building">Building…</string>
@@ -1790,6 +1796,10 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="dep_version_conflict">Version conflict</string>
     <string name="dep_extra_auto_resolved">+%1$d auto-resolved</string>
     <string name="dep_repo_invalid">Enter a valid http(s) URL that isn't already added.</string>
+    <string name="dep_repo_quick_add">Quick add</string>
+    <string name="dep_repo_err_address">That is not a web address. Try something like https://repo.example.com/maven</string>
+    <string name="dep_repo_err_duplicate">%1$s already uses this address.</string>
+    <string name="dep_repo_warn_http">This address uses http, so downloads from it are not encrypted.</string>
     <string name="dep_subtitle_module">module</string>
     <string name="dep_subtitle_platform">platform (BOM)</string>
     <string name="dep_subtitle_local_aar">local aar</string>
@@ -2068,11 +2078,14 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="set_appearance_theme_light">Light</string>
     <string name="set_appearance_theme_dark">Dark</string>
     <string name="set_appearance_theme_system">System</string>
+    <string name="set_appearance_language">Language</string>
+    <string name="set_appearance_language_desc">The language of the interface. System default follows the device</string>
+    <string name="set_appearance_language_system">System default</string>
     <string name="set_appearance_accent">Accent</string>
     <string name="set_appearance_accent_desc">The interface highlight color</string>
     <string name="set_appearance_accent_violet">Violet</string>
     <string name="set_appearance_accent_teal">Teal</string>
-    <string name="set_appearance_accent_orange">Orange (Legacy)</string>
+    <string name="set_appearance_accent_orange">Orange (Classic)</string>
     <!-- Editor -->
     <string name="set_editor_font_size">Font size</string>
     <string name="set_editor_code_font">Code font</string>
@@ -2091,6 +2104,8 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="set_editor_wrap_indent_desc">Align a wrapped line's continuation rows to its indentation (when word wrap is on)</string>
     <string name="set_editor_hscrollbar">Horizontal scrollbar</string>
     <string name="set_editor_hscrollbar_desc">Show a draggable bar along the bottom edge while a line runs past the view (word wrap leaves nothing to scroll)</string>
+    <string name="set_editor_scroll_gutter">Scroll line numbers with the code</string>
+    <string name="set_editor_scroll_gutter_desc">Let the line number bar slide off screen when you scroll sideways, instead of staying pinned at the left edge</string>
     <string name="set_editor_two_axis">Two-axis scrolling</string>
     <string name="set_editor_two_axis_desc">Drag in any direction to scroll both axes at once (touch)</string>
     <string name="set_editor_pinch">Pinch to zoom</string>
@@ -2102,6 +2117,8 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="blame_uncommitted">Not committed yet</string>
     <string name="set_editor_kbd_suggest">Keyboard suggestions</string>
     <string name="set_editor_kbd_suggest_desc">Let the soft keyboard autocorrect, suggest, and auto-space (a normal keyboard). Turn off for raw code input, so a typed '.' doesn't get an auto-inserted space, at the cost of the suggestion strip.</string>
+    <string name="set_editor_symbol_bar">Symbol bar above the keyboard</string>
+    <string name="set_editor_symbol_bar_desc">Show a row of coding symbols on top of the soft keyboard while typing, on phones, foldables and tablets alike</string>
     <string name="set_editor_close_unsaved">Closing a tab with unsaved changes</string>
     <string name="set_editor_close_unsaved_desc">Ask first, or always save or discard the changes without asking</string>
     <string name="set_editor_close_unsaved_ask">Ask</string>

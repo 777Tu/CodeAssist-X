@@ -272,6 +272,19 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
                     }
                 },
                 platformFor = platformJarFor,
+                // Libraries we dexed and published ahead of time (signed, one file per library version), so a new
+                // project's first build downloads its Compose/AndroidX dex instead of dexing ~70 jars on the phone.
+                // The jars the IDE adds to every user app itself (no Maven coordinate) come pre-dexed in the APK;
+                // everything else is looked up in the repository.
+                dexPack = dev.ide.android.support.pack.DexPackSource.chain(
+                    dev.ide.android.support.pack.BundledDex(
+                        listOfNotNull(
+                            BundledKotlinStdlib.jar()?.let { j -> t.predexedJars["kotlin-stdlib"]?.let { j to it } },
+                            t.appLogRuntimeJar?.let { j -> t.predexedJars["applog-runtime"]?.let { j to it } },
+                        ).toMap(),
+                    ),
+                    dev.ide.android.support.pack.DexRepository.at(t.dexPackUrl),
+                ),
             )
         }
         val installed = BundledAndroidToolchain.installed()
@@ -329,7 +342,40 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
     private val dexWarmConnection: MessageBusConnection = ctx.store.bus.connect().also { conn ->
         // A throwing subscriber aborts the model commit that published the event (the bus rethrows), so this must
         // do nothing but arm a timer, and must not throw doing it.
-        conn.subscribe(ProjectModelTopics.CHANGES, ProjectModelListener { runCatching { scheduleDexWarm() } })
+        conn.subscribe(ProjectModelTopics.CHANGES, ProjectModelListener { runCatching { scheduleDexWarm(); scheduleDexPrefetch() } })
+    }
+
+    /**
+     * Download-only counterpart of the warm: once a project's dependencies are known (a resolution finished, or the
+     * project opened), install its libraries' prebuilt dex from the dex repository into the shared cache, so the
+     * first build doesn't wait for the download. No D8, so none of the warm's cost; the "Download prebuilt
+     * libraries" setting decides whether anything is fetched (the build system's repository source reads it). Skips
+     * while a build runs: that build fetches what it needs itself.
+     */
+    private var dexPrefetchJob: Job? = null
+
+    private fun scheduleDexPrefetch() {
+        val previous = dexPrefetchJob
+        dexPrefetchJob = buildScope.launch {
+            previous?.cancelAndJoin()
+            delay(DEX_PREFETCH_DELAY_MS)      // coalesce a burst of model commits into one pass
+            if (buildJob?.isActive == true || dev.ide.platform.BuildActivity.active.value) return@launch
+            val android = androidBuild ?: return@launch
+            for (module in ctx.modules()) {
+                if (module.facets.get(AndroidFacet.KEY)?.isApplication != true) continue
+                if (unresolvedBlocker(module) != null) continue
+                val n = runCatching {
+                    kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
+                        android.prefetchLibraryDex(
+                            module, ctx.activeVariant(module),
+                            log = { memLog.info("dex prefetch ${module.name}: $it") },
+                            checkCanceled = { if (dev.ide.platform.BuildActivity.active.value) throw kotlinx.coroutines.CancellationException("build started") },
+                        )
+                    }
+                }.getOrDefault(0)
+                if (n > 0) memLog.info("dex prefetch: ${module.name} — $n library(ies) ready before the build")
+            }
+        }
     }
 
     init {
@@ -337,6 +383,7 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         // dependency resolution already published — so arm once here too, or the project-open warm, the one that
         // matters most, would wait for some later model change.
         runCatching { scheduleDexWarm() }
+        runCatching { scheduleDexPrefetch() }
     }
 
     private val buildCache = BuildCache(ctx.store.rootPath.resolve(".platform/caches/build"))
@@ -1060,6 +1107,29 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
                     }
                 }
 
+                // Compile a module's sources (no dex, no packaging) so the layout preview, which interprets the
+                // compiled classes, shows the project's own views as they are now. Started by the preview when a
+                // layout uses a project view whose source is newer than its classes.
+                id.startsWith("compileViews:") -> {
+                    val parts = id.removePrefix("compileViews:").split(":")
+                    val module = ctx.modules().firstOrNull { it.name == parts[0] }
+                        ?: return fail("No module '${parts[0]}'.")
+                    val variant = parts.getOrNull(1) ?: ctx.activeVariant(module)
+                    unresolvedBlocker(module)?.let { return fail(it) }
+                    val android = androidBuild
+                        ?: return fail("Android SDK (platform + build-tools) not found — install one to compile the preview's views.")
+                    val project = ctx.projectOf(module)
+                        ?: return fail("Internal error: no project for module '${module.name}'.")
+                    val graph = android.createBuildGraph(
+                        project,
+                        BuildRequest(listOf(module.id), VariantSelector(variant), BuildGoal.COMPILE_ONLY),
+                        buildContext(),
+                    )
+                    launch(module.name, graph, "> compile project views for the layout preview $variant · ${module.name}", null) { log ->
+                        log("Project views compiled — the layout preview shows them as they are now.")
+                    }
+                }
+
                 // Build (assemble the jar of) a plain Java/Kotlin module — a library has no `main`, so this is
                 // the only way to build it from the Run picker.
                 id.startsWith("build:") -> {
@@ -1135,13 +1205,11 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
                         ?.let { AndroidVariants.applicationId(facet, it) } ?: facet.namespace
                     val project = ctx.projectOf(module)
                         ?: return fail("Internal error: no project for module '${module.name}'.")
-                    val graph = android.createBuildGraph(
-                        project,
-                        BuildRequest(
-                            listOf(module.id), VariantSelector(variant), BuildGoal.ASSEMBLE
-                        ),
-                        buildContext(),
-                    )
+                    // Installed on this device when the installer has no other to pick: dex for it, not for the minSdk.
+                    val request = BuildRequest(listOf(module.id), VariantSelector(variant), BuildGoal.ASSEMBLE)
+                    val graph =
+                        if (installer.choosesTarget) android.createBuildGraph(project, request, buildContext())
+                        else android.createRunGraph(project, request, buildContext())
                     val apk = AndroidBuildSystem.signedApkPath(module, variant)
                     // A plugin module installs like any app, but what happens next is different: the IDE
                     // reads installed plugins once at startup, so the newly installed code is not live until
@@ -1454,7 +1522,16 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
             }
             Guards.broker = null
             _permissionRequest.value = null
-            if (outcome?.succeeded == true && onSuccess != null) {
+            val succeeded = outcome?.succeeded == true
+            // The build's own time, taken before the post-build step: installing can wait minutes on the user
+            // (the "Install unknown apps" screen), and that read as a 13 minute build of up-to-date tasks.
+            val elapsed = System.currentTimeMillis() - start
+            // The line that tells the user how it went, in the shape every build tool closes with. Without
+            // it a finished build just stops producing output and the verdict lives only in the header pill.
+            _buildState.update { st ->
+                st.copy(log = st.log + buildVerdict(succeeded, elapsed, st.diagnostics))
+            }
+            if (succeeded && onSuccess != null) {
                 runCatching {
                     onSuccess { line ->
                         _buildState.update { st ->
@@ -1472,13 +1549,6 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
                         )
                     )
                 }
-            }
-            val succeeded = outcome?.succeeded == true
-            val elapsed = System.currentTimeMillis() - start
-            // The line that tells the user how it went, in the shape every build tool closes with. Without
-            // it a finished build just stops producing output and the verdict lives only in the header pill.
-            _buildState.update { st ->
-                st.copy(log = st.log + buildVerdict(succeeded, elapsed, st.diagnostics))
             }
             _buildState.update {
                 it.copy(
@@ -1828,6 +1898,9 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
          *  commits, then the finished resolution) arms it once, and that a user who immediately hits Run gets the
          *  machine to themselves. */
         private const val DEX_WARM_DELAY_MS = 15_000L
+
+        /** Short: the point of prefetching is to finish before a build the user may start right after resolving. */
+        private const val DEX_PREFETCH_DELAY_MS = 2_000L
 
         /** Coalesce console output into chunks up to this size; cap the retained transcript so an interactive
          *  program's output is otherwise unbounded. */

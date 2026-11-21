@@ -61,6 +61,14 @@ object BuiltInSettingsPages {
      *  forwards its logs to the Logcat tab. Read per build (device only); default on. */
     const val INJECT_APP_LOG = "injectAppLog"
 
+    /** Choice key on the [BUILD_RUNTIME] page: whether a debug build may download libraries already converted to
+     *  dex from the public dex repository instead of dexing them on the device. [PREBUILT_AUTO] (default) always,
+     *  [PREBUILT_WIFI] only on an unmetered connection, [PREBUILT_OFF] never. Read per build (device only). */
+    const val PREBUILT_LIBRARIES = "prebuiltLibraries"
+    const val PREBUILT_AUTO = "auto"
+    const val PREBUILT_WIFI = "wifi"
+    const val PREBUILT_OFF = "off"
+
     /** Action key on the [BUILD_RUNTIME] page (separate-process-capable hosts only): re-request the runtime
      *  notification permission the isolated build process needs. Handled UI-side (needs the platform permission
      *  launcher) — the SettingsScreen mirrors this key; there's no engine-side effect here. */
@@ -176,6 +184,12 @@ object BuiltInSettingsPages {
                 ),
             ),
             SettingControl.Choice(
+                "language", "Language", "The language of the interface. System default follows the device",
+                default = d.language,
+                options = listOf(SettingControl.Choice.Option(IdeSettings.LANGUAGE_SYSTEM, "System default")) +
+                    IdeSettings.LANGUAGES.map { (tag, name) -> SettingControl.Choice.Option(tag, name) },
+            ),
+            SettingControl.Choice(
                 "accent", "Accent", "The interface highlight color the whole expressive theme is generated from",
                 default = d.accent,
                 options = listOf(
@@ -264,6 +278,7 @@ object BuiltInSettingsPages {
             SettingControl.Toggle("wordWrap", "Word wrap", "Soft-wrap long lines at the viewport edge instead of scrolling horizontally", default = d.wordWrap),
             SettingControl.Toggle("wrapIndent", "Indent wrapped lines", "Align a wrapped line's continuation rows to its indentation (when word wrap is on)", default = d.wrapIndent),
             SettingControl.Toggle("horizontalScrollbar", "Horizontal scrollbar", "Show a draggable bar along the bottom edge while a line runs past the view (word wrap leaves nothing to scroll)", default = d.horizontalScrollbar),
+            SettingControl.Toggle("scrollGutter", "Scroll line numbers with the code", "Let the line number bar slide off screen when you scroll sideways, instead of staying pinned at the left edge", default = d.scrollGutter),
             SettingControl.Toggle("inlineBlame", "Who changed this line", "In a Git project, show who last changed the caret's line, when, and why, faded after its end", default = d.inlineBlame),
             SettingControl.Choice(
                 CLOSE_UNSAVED, "Closing a tab with unsaved changes", "Ask first, or always save or discard the changes without asking",
@@ -279,6 +294,7 @@ object BuiltInSettingsPages {
             SettingControl.Toggle("pinchZoom", "Pinch to zoom", "Pinch with two fingers to change the code font size", default = d.pinchZoom, group = "Gestures"),
             SettingControl.Toggle("volumeKeysMoveCaret", "Volume keys move the cursor", "While typing on a phone, volume up moves the cursor left and volume down moves it right, instead of changing the volume", default = d.volumeKeysMoveCaret, group = "Gestures"),
             SettingControl.Toggle("softKeyboardSuggestions", "Keyboard suggestions", "Let the soft keyboard autocorrect, suggest, and auto-space (a normal keyboard). Turn off for raw code input, so a typed '.' doesn't get an auto-inserted space, at the cost of the suggestion strip.", default = d.softKeyboardSuggestions, group = "Keyboard"),
+            SettingControl.Toggle("symbolBar", "Symbol bar above the keyboard", "Show a row of coding symbols on top of the soft keyboard while typing, on phones, foldables and tablets alike", default = d.symbolBar),
         )
     }
 
@@ -365,6 +381,16 @@ object BuiltInSettingsPages {
                 SEPARATE_PROCESS, "Build in a separate process",
                 "Run builds and your program in an isolated process so an out-of-memory crash can't take down the IDE. Off = build in-process (uses less memory, no isolation). Takes effect the next time you open a project.",
                 default = true,
+            ),
+            SettingControl.Choice(
+                PREBUILT_LIBRARIES, "Download prebuilt libraries",
+                "Download libraries that are already converted for Android and indexed for the editor, instead of doing both on this device. A new project builds several times faster and its code completion is ready sooner. Wi-Fi only does that work on this device while you're on mobile data. Applies on the next build.",
+                default = PREBUILT_AUTO,
+                options = listOf(
+                    SettingControl.Choice.Option(PREBUILT_AUTO, "Automatically"),
+                    SettingControl.Choice.Option(PREBUILT_WIFI, "Wi-Fi only"),
+                    SettingControl.Choice.Option(PREBUILT_OFF, "Off"),
+                ),
             ),
             SettingControl.Toggle(
                 INJECT_APP_LOG, "Forward app logs",
