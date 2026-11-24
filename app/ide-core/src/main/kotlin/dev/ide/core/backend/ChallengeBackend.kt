@@ -2,9 +2,11 @@ package dev.ide.core.backend
 
 import dev.ide.core.BackendContext
 import dev.ide.core.IdeServices
+import dev.ide.lang.hints.InlayHintKind
 import dev.ide.model.impl.rootPath
 import dev.ide.platform.JsonReader
 import dev.ide.store.DailyChallengeService
+import dev.ide.store.DailyJudgeEvent
 import dev.ide.store.DailyLanguage
 import dev.ide.store.StoreResult
 import dev.ide.ui.backend.ChallengeService
@@ -24,14 +26,22 @@ import dev.ide.ui.backend.UiCompletionResult
 import dev.ide.ui.backend.UiDiagnostic
 import dev.ide.ui.backend.UiFoldRegion
 import dev.ide.ui.backend.UiGrowthPoint
-import dev.ide.lang.hints.InlayHintKind
 import dev.ide.ui.backend.UiInlayHint
 import dev.ide.ui.backend.UiInlayKind
 import dev.ide.ui.backend.UiInlayPart
+import dev.ide.ui.backend.UiJudgeProgress
+import dev.ide.ui.backend.UiJudgeStep
+import dev.ide.ui.backend.UiJudgeStepState
 import dev.ide.ui.backend.UiLocalRun
 import dev.ide.ui.backend.UiSampleOutcome
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Files
@@ -56,6 +66,9 @@ internal class ChallengeBackend(
 ) : ChallengeService {
 
     override fun challengesAvailable(): Boolean = remote.challengesAvailable()
+
+    private val judgingFlow = MutableStateFlow<UiJudgeProgress?>(null)
+    override val judging: StateFlow<UiJudgeProgress?> = judgingFlow.asStateFlow()
 
     override suspend fun day(date: String?): UiChallengeDay = withContext(Dispatchers.IO) {
         when (val r = remote.day(date)) {
@@ -82,7 +95,16 @@ internal class ChallengeBackend(
         language: UiChallengeLanguage,
         source: String,
     ): UiChallengeVerdict = withContext(Dispatchers.IO) {
-        when (val r = remote.submit(date, language.toStore(), source)) {
+        judgingFlow.value = UiJudgeProgress(language = language, startedAtMs = System.currentTimeMillis())
+        val r = remote.submit(date, language.toStore(), source) { event -> judgingFlow.update { it?.apply(event) } }
+        // Steps the judge never reached stay Waiting; one it was in the middle of when the answer came is over.
+        judgingFlow.update { p ->
+            p?.copy(
+                finished = true,
+                steps = p.steps.map { if (it.state == UiJudgeStepState.Running) it.copy(state = UiJudgeStepState.Done) else it },
+            )
+        }
+        when (r) {
             is StoreResult.Ok -> r.value.toUi()
             // A refusal is not a verdict. Showing it as one would tell a solver their correct answer was
             // wrong because their connection dropped.
@@ -108,20 +130,23 @@ internal class ChallengeBackend(
         }
 
         val started = System.currentTimeMillis()
-        val services = try {
-            scratchFor(language) ?: return@withContext UiLocalRun(diagnostics = listOf("The runner isn't available."))
-        } catch (e: Throwable) {
-            return@withContext UiLocalRun(diagnostics = listOf("Couldn't prepare the runner: ${reason(e)}"))
-        }
+        // One run at a time: two would write the same harness file under each other.
+        val capture = runLock.withLock {
+            val services = try {
+                runScratchFor(language) ?: return@withContext UiLocalRun(diagnostics = listOf("The runner isn't available."))
+            } catch (e: Throwable) {
+                return@withContext UiLocalRun(diagnostics = listOf("Couldn't prepare the runner: ${reason(e)}"))
+            }
 
-        runCatching { writeSolution(services, language, material.harness.replace(USER_CODE, source)) }
-            .exceptionOrNull()
-            ?.let { return@withContext UiLocalRun(diagnostics = listOf("Couldn't save your code: ${reason(it)}")) }
+            runCatching { writeSolution(services, language, material.harness.replace(USER_CODE, source)) }
+                .exceptionOrNull()
+                ?.let { return@withContext UiLocalRun(diagnostics = listOf("Couldn't save your code: ${reason(it)}")) }
 
-        val capture = try {
-            services.runAndCapture("app", stdin = payloadFor(problem), timeoutMs = LOCAL_RUN_TIMEOUT_MS)
-        } catch (e: Throwable) {
-            return@withContext UiLocalRun(diagnostics = listOf("The runner failed: ${reason(e)}"))
+            try {
+                services.runAndCapture("app", stdin = payloadFor(problem), timeoutMs = LOCAL_RUN_TIMEOUT_MS)
+            } catch (e: Throwable) {
+                return@withContext UiLocalRun(diagnostics = listOf("The runner failed: ${reason(e)}"))
+            }
         }
 
         if (!capture.compiled) {
@@ -323,6 +348,8 @@ internal class ChallengeBackend(
 
     override suspend fun prepare(language: UiChallengeLanguage): Boolean = withContext(Dispatchers.Default) {
         val services = runCatching { scratchFor(language) }.getOrNull() ?: return@withContext false
+        // The run project too, so the first "Run examples" does not also pay for creating it.
+        runCatching { runScratchFor(language) }
         withTimeoutOrNull(PREPARE_TIMEOUT_MS) {
             services.indexStatus.first { !it.building }
             true
@@ -336,10 +363,11 @@ internal class ChallengeBackend(
     // ---- scratch -------------------------------------------------------------------------------------
 
     /**
-     * The hidden project a challenge is compiled in.
+     * The hidden project the challenge editor's intelligence (completion, diagnostics, hints, folds) works in.
      *
-     * Separate from the Learn scratches so a lesson in progress is never clobbered by a challenge run,
-     * and separate per language because the two need different module types.
+     * Separate from the Learn scratches so a lesson in progress is never clobbered by a challenge, and
+     * separate per language because the two need different module types. Runs do NOT happen here: see
+     * [runScratchFor].
      */
     private suspend fun scratchFor(language: UiChallengeLanguage): IdeServices? {
         val manager = ctx.manager ?: return null
@@ -348,6 +376,28 @@ internal class ChallengeBackend(
             UiChallengeLanguage.Java -> manager.scratch("challenge-java", "java-console")
         }
     }
+
+    /**
+     * The hidden project "Run examples" compiles and runs in, apart from the editor's [scratchFor].
+     *
+     * They used to share one: the editor's file and the runner's harness were the same `Solution` file. Every
+     * editor request (diagnostics, hints, folds, completion) puts the solver's snippet into the engine as that
+     * file's open buffer, and a run starts by flushing open buffers to disk. The player keeps making those
+     * requests while a run is going, so one landing between writing the harness and the flush put the snippet
+     * back on disk, and the run failed with "No runnable main() found in app" (the snippet has no entry point;
+     * the harness does). On a phone that was most runs. Nothing but a run ever opens this project, so there is
+     * no buffer here to race with.
+     */
+    private suspend fun runScratchFor(language: UiChallengeLanguage): IdeServices? {
+        val manager = ctx.manager ?: return null
+        return when (language) {
+            UiChallengeLanguage.Kotlin -> manager.scratch("challenge-kotlin-run", "kotlin-console")
+            UiChallengeLanguage.Java -> manager.scratch("challenge-java-run", "java-console")
+        }
+    }
+
+    /** Serializes runs; see [run]. */
+    private val runLock = Mutex()
 
     /**
      * Makes sure the solution file exists before the engine is asked about it.
@@ -370,17 +420,11 @@ internal class ChallengeBackend(
         ).resolve(if (language == UiChallengeLanguage.Kotlin) "Solution.kt" else "Solution.java")
 
     /**
-     * Writes the filled harness, clearing whatever the previous challenge left behind.
+     * Writes the filled harness into the run project, clearing whatever the previous challenge left behind.
      *
      * Written straight to disk rather than through the editor's save path, so the main-class detection
      * that follows has to scan the live sources rather than trust an index that still names yesterday's
-     * class.
-     *
-     * The engine's overlay for the same path is moved with it. [ensureSolution] points the editor at this
-     * very file, so completion and analysis leave the solver's bare snippet there as an open buffer, and a
-     * run begins by flushing every open buffer to disk. Leaving the overlay behind therefore puts the
-     * snippet back over the harness between this write and the run, and the run fails with "no runnable
-     * main() found" — the snippet is a function, the entry point lives in the harness.
+     * class. The engine's overlay for the path is moved with it, so a flush can only ever write the harness.
      */
     private fun writeSolution(services: IdeServices, language: UiChallengeLanguage, text: String) {
         val path = solutionPath(services, language)
@@ -549,3 +593,30 @@ private fun parseInstantMs(text: String?): Long {
         runCatching { java.time.Instant.parse(text).toEpochMilli() }.getOrDefault(0L)
     }
 }
+
+/** Folds one of the judge's step reports into the progress the screen shows. */
+private fun UiJudgeProgress.apply(event: DailyJudgeEvent): UiJudgeProgress {
+    val step = UiJudgeStep.of(event.step) ?: return this
+    val now = System.currentTimeMillis()
+    return copy(
+        live = true,
+        steps = steps.map { s ->
+            if (s.step != step) return@map s
+            when (event.state) {
+                "start" -> s.copy(state = UiJudgeStepState.Running, startedAtMs = now, detail = s.detail + event.detail)
+                // Each measured size replaces the last in the detail; the series is kept as well, so the
+                // display can draw every size measured so far.
+                "progress" -> {
+                    val series = event.detail["ops"]?.let { ops ->
+                        mapOf("opsSeries" to (s.detail["opsSeries"]?.let { "$it,$ops" } ?: ops))
+                    }.orEmpty()
+                    s.copy(detail = s.detail + event.detail + series)
+                }
+                "done" -> s.copy(state = UiJudgeStepState.Done, ms = event.ms, detail = s.detail + event.detail)
+                "fail" -> s.copy(state = UiJudgeStepState.Failed, ms = event.ms, detail = s.detail + event.detail)
+                else -> s
+            }
+        },
+    )
+}
+

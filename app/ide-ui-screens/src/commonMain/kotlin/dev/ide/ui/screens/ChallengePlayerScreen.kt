@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,7 +72,6 @@ import dev.ide.ui.generated.resources.challenge_examples_failed
 import dev.ide.ui.generated.resources.challenge_hidden_tests_decide
 import dev.ide.ui.generated.resources.challenge_indexing
 import dev.ide.ui.generated.resources.challenge_input
-import dev.ide.ui.generated.resources.challenge_judging
 import dev.ide.ui.generated.resources.challenge_output
 import dev.ide.ui.generated.resources.challenge_pane_code
 import dev.ide.ui.generated.resources.challenge_pane_problem
@@ -163,10 +163,13 @@ private fun Solver(
     }
 
     val scope = rememberCoroutineScope()
+    val holiday = dev.ide.ui.holiday.LocalHolidayLedger.current
     var localRun by remember(problem.id) { mutableStateOf<UiLocalRun?>(null) }
     var running by remember(problem.id) { mutableStateOf(false) }
     var submitting by remember(problem.id) { mutableStateOf(false) }
     var verdict by remember(problem.id) { mutableStateOf<UiChallengeVerdict?>(null) }
+    val judging by backend.challenges.judging.collectAsState()
+    var showJudging by remember(problem.id) { mutableStateOf(false) }
 
     val editorBackend = remember(backend, language) { ChallengeEditorBackend(backend, language) }
     // Resolved here because the run itself happens in a coroutine, where a resource cannot be read.
@@ -228,6 +231,7 @@ private fun Solver(
         ActionBar(
             running = running,
             submitting = submitting,
+            submittingLabel = judgeShortLabel(judging),
             canSubmit = day.you.signedIn,
             onRun = {
                 localRun = null
@@ -241,22 +245,36 @@ private fun Solver(
                 }
             },
             onSubmit = {
+                if (submitting) {
+                    showJudging = true
+                    return@ActionBar
+                }
                 submitting = true
+                showJudging = true
                 scope.launch {
                     val result = runCatching {
                         backend.challenges.submit(date, language, session.doc.text)
                     }.getOrElse { UiChallengeVerdict(error = it.message ?: "The judge could not be reached.") }
                     submitting = false
+                    showJudging = false
                     verdict = result
-                    if (result.accepted) onSolved()
+                    if (result.accepted) {
+                        onSolved()
+                        holiday?.record(dev.ide.ui.holiday.HolidayActivity.Challenge)
+                    }
                 }
             },
         )
     }
 
+    JudgeProgressSheet(progress = judging, visible = submitting && showJudging, onHide = { showJudging = false })
+
     ChallengeResultSheet(
         verdict = verdict,
         problem = problem,
+        // The steps belong to this verdict only when they finished in this language; a stale run from
+        // another problem or an older submission is never shown under a new answer.
+        judged = judging?.takeIf { it.finished && it.language == language },
         onDismiss = { verdict = null },
         onBackToTab = { verdict = null; onExit() },
     )
@@ -603,6 +621,7 @@ private fun LocalRunStrip(run: UiLocalRun) {
 private fun ActionBar(
     running: Boolean,
     submitting: Boolean,
+    submittingLabel: String,
     canSubmit: Boolean,
     onRun: () -> Unit,
     onSubmit: () -> Unit,
@@ -628,7 +647,8 @@ private fun ActionBar(
         }
         Button(
             onClick = onSubmit,
-            enabled = canSubmit && !running && !submitting,
+            // While judging it stays tappable: it reopens the progress sheet.
+            enabled = canSubmit && !running,
             shape = RoundedCornerShape(Ca.radius.pill),
             modifier = Modifier.weight(1f).height(50.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -644,7 +664,7 @@ private fun ActionBar(
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                stringResource(if (submitting) Res.string.challenge_judging else Res.string.challenge_submit),
+                if (submitting) submittingLabel else stringResource(Res.string.challenge_submit),
                 fontWeight = FontWeight.Bold,
             )
         }

@@ -8,6 +8,7 @@ import dev.ide.kotlin.syntax.psi.KtClass
 import dev.ide.kotlin.syntax.psi.KtClassBody
 import dev.ide.kotlin.syntax.psi.KtClassOrObject
 import dev.ide.kotlin.syntax.psi.KtDestructuringDeclaration
+import dev.ide.kotlin.syntax.psi.KtDoWhileExpression
 import dev.ide.kotlin.syntax.psi.KtElement
 import dev.ide.kotlin.syntax.psi.KtEnumEntry
 import dev.ide.kotlin.syntax.psi.KtExpression
@@ -24,12 +25,15 @@ import dev.ide.kotlin.syntax.psi.KtParameter
 import dev.ide.kotlin.syntax.psi.KtParenthesizedExpression
 import dev.ide.kotlin.syntax.psi.KtProperty
 import dev.ide.kotlin.syntax.psi.KtPropertyAccessor
+import dev.ide.kotlin.syntax.psi.KtCallExpression
 import dev.ide.kotlin.syntax.psi.KtQualifiedExpression
 import dev.ide.kotlin.syntax.psi.KtSecondaryConstructor
 import dev.ide.kotlin.syntax.psi.KtSuperTypeCallEntry
+import dev.ide.kotlin.syntax.psi.KtSuperTypeList
 import dev.ide.kotlin.syntax.psi.KtTokens
 import dev.ide.kotlin.syntax.psi.KtTypeParameterListOwner
 import dev.ide.kotlin.syntax.psi.KtUserType
+import dev.ide.kotlin.syntax.psi.containingClassOrObject
 import dev.ide.kotlin.syntax.psi.KtWhenExpression
 import dev.ide.kotlin.syntax.psi.getParentOfType
 import dev.ide.lang.completion.PrefixMatcher
@@ -65,39 +69,88 @@ internal fun KotlinResolver.computeImplicitReceiversAt(offset: Int): List<Kotlin
     var thisNarrowing: KotlinType? = null
     var child: KtElement? = null
     var node: KtElement? = elementAt(offset)
+    // Set once the walk leaves a nested (non-`inner`) class, an object or a companion: past that point the
+    // outer declarations' receivers have no `this` to be reached through (see [closesOuterInstanceScope]).
+    var outerInstanceClosed = false
+    // The labels of the receiver lambdas around the offset (`with(a) lambda1@{ ... }`): a check on `this@lambda1`
+    // further in narrows that lambda's receiver, found on the way up before the lambda itself is reached.
+    val labeledLambdas = HashMap<KtLambdaExpression, String>()
+    run {
+        var n: KtElement? = node
+        while (n != null) {
+            if (n is KtLambdaExpression) (n.parent as? dev.ide.kotlin.syntax.psi.KtLabeledExpression)?.getLabelName()
+                ?.removeSurrounding("`")?.let { labeledLambdas[n as KtLambdaExpression] = it }
+            n = n.parent
+        }
+    }
+    val labelNarrowing = HashMap<String, KotlinType>()
     while (node != null) {
         if (out.isEmpty() && thisNarrowing == null) {
             thisNarrowing = narrowingAtNode(node, child, offset, THIS_SUBJECT)
+        }
+        if (labeledLambdas.isNotEmpty()) for (label in labeledLambdas.values) {
+            if (label !in labelNarrowing) narrowingAtNode(node, child, offset, "this@$label")?.let { labelNarrowing[label] = it }
         }
         val hadReceiver = out.isNotEmpty()
         when (node) {
             // A receiver lambda's implicit `this` — both spellings of it: an extension function type
             // (`ColumnScope.() -> Unit`) and a `fun interface` whose abstract method is a member extension
             // (`MeasurePolicy` is `MeasureScope.measure(…)`, so `Layout { }`'s body has a `MeasureScope`).
-            is KtLambdaExpression -> lambdaReceiverType(node)?.let(out::add)
+            is KtLambdaExpression -> if (!outerInstanceClosed) lambdaReceiverType(node)?.let { recv ->
+                // Narrowed by an `is` check on `this@label` between here and the use, when it is not the innermost
+                // receiver there (that case is [thisNarrowing]).
+                out += labeledLambdas[node]?.let { labelNarrowing[it] } ?: recv
+            }
 
-            is KtNamedFunction -> node.receiverTypeReference?.text
-                ?.let { boundedTypeParameterReceiver(node, it) ?: service.typeFromText(it, fileContext) }?.let(out::add)
+            is KtNamedFunction -> if (!outerInstanceClosed) node.receiverTypeReference?.text
+                ?.let { boundedTypeParameterReceiver(node, it) ?: receiverTypeFromText(it, node) }?.let(out::add)
             // An extension PROPERTY's receiver is the implicit `this` of its accessors
             // (`val ColorScheme.codeBlockBackground get() = onSurface.copy(alpha = .15f)`): the same rule as an
-            // extension function. A local/plain property has no receiver type and adds nothing.
-            is KtProperty -> node.receiverTypeReference?.text
-                ?.let { service.typeFromText(it, fileContext) }?.let(out::add)
+            // extension function. A local/plain property has no receiver type and adds nothing. Only the accessors
+            // have it: an initializer (`val C.foo: C.D = D()`, EXTENSION_PROPERTY_WITH_BACKING_FIELD) runs with none.
+            is KtProperty -> if (!outerInstanceClosed && child is dev.ide.kotlin.syntax.psi.KtPropertyAccessor) node.receiverTypeReference?.text
+                ?.let { boundedTypeParameterReceiver(node, it) ?: receiverTypeFromText(it, node) }?.let(out::add)
             // An enclosing class/object receiver. An ANONYMOUS object (`object : Foo { }`) or a LOCAL
             // class/object has no reachable `fqName`, so use the synthetic classifier the source model
             // registered it under — its own + supertype members then become the implicit `this` in the body.
             // An enum entry with a body isn't a local type (it's excluded from that model bucket), so it keeps
             // to its own `fqName` and never borrows a synthetic key (which could collide with a real local type).
+            // Past a nested class only a singleton (an `object`, a companion) is still reachable: its members are
+            // read through the one instance, never through an outer `this`.
+            // A class's own `this` exists only in its BODY: its header (primary-constructor defaults, the
+            // supertype list and its constructor arguments) is evaluated before the instance exists.
             is KtClassOrObject -> {
-                val fqn = node.fqName?.asString()
-                    ?: (node as? KtObjectDeclaration)?.let {
-                        dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn(
-                            it
-                        )
+                val inHeader = child != null && child !is KtClassBody
+                if (!inHeader && (!outerInstanceClosed || isSingletonScope(node))) {
+                    // An enum entry's body is an anonymous subclass of its enum: `this` there also has the enum's
+                    // members (`E1 { override fun foo() = outerFun() }`), which the entry's own key does not list.
+                    val enumOfEntry = (node as? dev.ide.kotlin.syntax.psi.KtEnumEntry)
+                        ?.getParentOfType<KtClassOrObject>(strict = true)?.fqName?.asString()
+                    val fqn = node.fqName?.asString()
+                        ?: (node as? KtObjectDeclaration)?.let {
+                            dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn(
+                                it
+                            )
+                        }
+                        ?: (node as? KtClass)?.takeIf { it !is KtEnumEntry }
+                            ?.let { dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn(it) }
+                    // A generic class's `this` is the class over its own type parameters (`Outer<E>`), not raw.
+                    if (fqn != null) out += service.typeByFqn(fqn, (node as? KtClass)?.typeParameters.orEmpty().mapNotNull { tp ->
+                        tp.name?.let { KotlinType(it, emptyList(), false, service, isTypeParameter = true) }
+                    })
+                    if (enumOfEntry != null && enumOfEntry != fqn) out += service.typeByFqn(enumOfEntry)
+                }
+                // The class's companion object, then each superclass's, are implicit receivers after the instance:
+                // a `fun A.Companion.foo()` is a bare call inside `A` and inside a subclass. Singletons, so they
+                // stay reachable from the header and from nested classes, where the instance is not.
+                // Not from the class's own annotations, which are resolved outside it ([inClassHeaderScope]).
+                val inAnnotations = child is dev.ide.kotlin.syntax.psi.KtModifierList && child.parent === node
+                if (!(node is KtObjectDeclaration && node.isCompanion()) && !inAnnotations) node.fqName?.asString()?.let { fqn ->
+                    for (owner in listOf(fqn) + service.supertypesOf(fqn).map { it.qualifiedName }) {
+                        service.companionObjectFqn(owner)?.let { out += service.typeByFqn(it) }
                     }
-                    ?: (node as? KtClass)?.takeIf { it !is KtEnumEntry }
-                        ?.let { dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn(it) }
-                if (fqn != null) out += service.typeByFqn(fqn)
+                }
+                if (closesOuterInstanceScope(node)) outerInstanceClosed = true
             }
 
             else -> {}
@@ -112,13 +165,33 @@ internal fun KotlinResolver.computeImplicitReceiversAt(offset: Int): List<Kotlin
     return out
 }
 
+/**
+ * Whether [c] cuts code inside it off from the INSTANCE scope of everything around it: a nested class that is
+ * not `inner`, an `object`, a companion object. Inside one there is no outer `this`, so an enclosing class's
+ * instance members (and the receivers of enclosing extension functions and lambdas) are not in scope there,
+ * which is what the compiler says and what IntelliJ offers. An `inner` class, an anonymous object, a local
+ * class and an enum entry keep the outer instance scope.
+ */
+internal fun closesOuterInstanceScope(c: KtClassOrObject): Boolean {
+    if (c is KtEnumEntry) return false
+    if (c is KtObjectDeclaration && c.isObjectLiteral()) return false
+    if (c.fqName == null) return false // a local class: it captures what surrounds it
+    return !(c is KtClass && c.isInner())
+}
+
+/** A named `object` or companion: its members stay reachable from code nested inside it, through the instance. */
+internal fun isSingletonScope(c: KtClassOrObject): Boolean = c is KtObjectDeclaration && !c.isObjectLiteral()
+
 /** The implicit `this` of `fun <T : CharSequence> T.len() = length`: a receiver that is the function's own
  *  type parameter with an explicit upper bound has that bound's members, so `length` resolves. Null for a
  *  concrete receiver or an unbounded parameter (the caller keeps its plain text lookup). */
-private fun KotlinResolver.boundedTypeParameterReceiver(fn: KtNamedFunction, receiverText: String): KotlinType? {
+private fun KotlinResolver.boundedTypeParameterReceiver(fn: dev.ide.kotlin.syntax.psi.KtCallableDeclaration, receiverText: String): KotlinType? {
     val bare = receiverText.substringBefore('<').removeSuffix("?").trim()
     val tp = fn.typeParameters.firstOrNull { it.name == bare } ?: return null
-    val bound = tp.extendsBound?.text ?: return null
+    // An unbounded one (`val <T> T.u get() = id(this)`) is the type parameter itself, so `this` types as `T` and
+    // what is built from it (`id(this)`) stays in terms of `T` for a use site to bind.
+    val bound = tp.extendsBound?.text
+        ?: return KotlinType(bare, emptyList(), receiverText.trim().endsWith("?"), service, isTypeParameter = true)
     return service.typeFromText(bound, fileContext)
 }
 
@@ -238,6 +311,9 @@ fun KotlinResolver.localsAt(offset: Int, name: String? = null): List<KotlinSymbo
                     is KtDestructuringDeclaration -> if (wantedAny(st.entries.map { it.name })) {
                         out += destructuringLocals(st, inferType(st.initializer))
                     }
+                    // A labeled declaration (`L@ val fn = {}`) declares its local all the same.
+                    is dev.ide.kotlin.syntax.psi.KtLabeledExpression ->
+                        (st.baseExpression as? KtProperty)?.let { if (wanted(it.name)) out += localVar(it) }
 
                     else -> {}
                 }
@@ -247,7 +323,16 @@ fun KotlinResolver.localsAt(offset: Int, name: String? = null): List<KotlinSymbo
             // here — it IS a KtFunction, and adding its params via param() (type-from-text only) would
             // shadow the typed copy with an untyped one (`{ inner -> }`'s `inner` becomes null-typed first).
             is KtFunctionLiteral -> {}
-            is KtFunction -> node.valueParameters.forEach { if (wanted(it.name)) out += param(it) }
+            // Inside a parameter's DEFAULT value only the parameters declared before it exist yet
+            // (`fun f(a: Int, b: Int = a)`, never `= c` for a later `c`).
+            is KtFunction -> {
+                val params = node.valueParameters
+                val inDefault = params.indexOfFirst { p ->
+                    p.defaultValue?.textRange?.let { offset >= it.startOffset && offset <= it.endOffset } == true
+                }
+                (if (inDefault >= 0) params.subList(0, inDefault) else params)
+                    .forEach { if (wanted(it.name)) out += param(it) }
+            }
             is KtForExpression -> node.loopParameter?.let { lp ->
                 // The loop variable is in scope only in the BODY (not the `in` clause). Gating on that both
                 // matches Kotlin scoping AND breaks a recursion: inferring the loop range's type queries
@@ -266,6 +351,21 @@ fun KotlinResolver.localsAt(offset: Int, name: String? = null): List<KotlinSymbo
             }
 
             is KtCatchClause -> node.catchParameter?.let { if (wanted(it.name)) out += param(it) }
+            // `do { val more = next() } while (more)`: the body's locals are in scope in the condition, the one
+            // place a block's declarations are visible outside its braces.
+            is KtDoWhileExpression -> {
+                val body = node.body as? KtBlockExpression
+                val condition = node.condition
+                if (body != null && condition != null && offset >= condition.textRange.startOffset) {
+                    for (st in body.statements) when (st) {
+                        is KtProperty -> if (wanted(st.name)) out += localVar(st)
+                        is KtDestructuringDeclaration -> if (wantedAny(st.entries.map { it.name })) {
+                            out += destructuringLocals(st, inferType(st.initializer))
+                        }
+                        else -> {}
+                    }
+                }
+            }
             is KtWhenExpression -> node.subjectVariable?.let { if (wanted(it.name)) out += localVar(it) }
             is KtLambdaExpression -> run lambda@{
                 // Type the lambda's `it` / named params from the functional parameter it fills, so
@@ -394,6 +494,7 @@ internal fun KotlinResolver.localFunction(fn: KtNamedFunction): KotlinSymbol {
         paramTypes = params.map { (_, t) -> service.typeFromText(t, fileContext, owner) },
         paramNames = params.map { (n, _) -> n },
         paramHasDefault = fn.valueParameters.map { it.hasDefaultValue() },
+        isInfix = fn.hasModifier(KtTokens.INFIX_KEYWORD),
         varargParamIndex = fn.valueParameters.indexOfFirst { it.isVarArg },
         typeParameters = fn.typeParameters.mapNotNull { it.name },
         isComposable = fn.annotationEntries.any { it.shortName?.asString() == "Composable" },
@@ -417,8 +518,15 @@ internal fun KotlinResolver.accessorScopeLocals(offset: Int): List<KotlinSymbol>
     val propType =
         service.typeFromText(prop.typeReference?.text, fileContext, enclosingClassFqnOf(prop))
             ?: inferType(prop.initializer)
+            // `var x get() = 1; set(q) { … }`: the getter says what the property is, so what the setter takes.
+            ?: prop.getter?.takeIf { it !== accessor && !it.hasBlockBody() }?.bodyExpression?.let { inferType(it) }
     val out = ArrayList<KotlinSymbol>(2)
-    out += KotlinSymbol(
+    // An extension property has no backing field: `field` in its accessor is an ordinary name
+    // (`val String.x get() = field.foo()` reads the member extension `String.field`). Nor has a property
+    // whose type is inferred from its getter (no type, no initializer): `val u get() = field` names no field,
+    // so a member `field` of the class is what it reads.
+    val typedByGetter = prop.typeReference == null && prop.initializer == null && prop.delegate == null
+    if (prop.receiverTypeReference == null && !typedByGetter) out += KotlinSymbol(
         "field", SymbolKind.FIELD, type = propType, origin = SOURCE,
         declarationNode = runCatching { parsed.adapt(prop) }.getOrNull(),
     )
@@ -588,7 +696,18 @@ fun KotlinResolver.objectDenotationFqn(name: String, offset: Int): String? {
 fun KotlinResolver.isTypeParameterInScope(name: String, offset: Int): Boolean {
     var node: KtElement? = elementAt(offset)
     while (node != null) {
+        // An object expression may not declare type parameters (TYPE_PARAMETERS_IN_OBJECT), and K2 does not put
+        // the ones written there in scope of its body: `object<T> { fun f(t: T) }` leaves `T` unresolved. Only
+        // the list itself (`<T, K : Comparable<K>>`) sees them.
+        if (node is KtObjectDeclaration && node.isObjectLiteral() &&
+            node.typeParameterList?.textRange?.let { offset >= it.startOffset && offset < it.endOffset } != true
+        ) { node = node.parent; continue }
         if (node is KtTypeParameterListOwner && node.typeParameters.any { it.name == name }) return true
+        // A `where AA : …` naming no declared parameter makes `AA` one anyway (K2 reports only the constraint,
+        // NAME_IN_CONSTRAINT_IS_NOT_A_TYPE_PARAMETER, and the declaration then uses `AA` as a type parameter).
+        if (node is KtTypeParameterListOwner && node.typeParameterList != null &&
+            node.typeConstraints.any { it.subjectTypeParameterName?.getReferencedName() == name } &&
+            service.resolveTypeName(name, fileContext, null)?.let { service.isKnownType(it) } != true) return true
         node = node.parent
     }
     return false
@@ -702,6 +821,7 @@ fun KotlinResolver.bareNameResolves(name: String, offset: Int): Boolean {
     // why only the cross-file one read as unresolved. Suppression only, so a genuinely missing import of an
     // alias under-reports rather than the reverse.
     if (service.isProjectTypeAlias(name)) return true
+    if (service.isNestedTypeAliasInScope(name, enclosingClassFqn(offset))) return true
     // Members of an ENCLOSING class of the live buffer — the symbol service indexes disk, not the file
     // being edited, so a same-file member (`field`, `helper()`) won't appear in membersOf() below.
     if (enclosingClassMembersContain(offset, name)) return true
@@ -717,19 +837,32 @@ fun KotlinResolver.bareNameResolves(name: String, offset: Int): Boolean {
                 .any { !it.isExtension || extensionInScope(it) }
         }
     ) return true
+    // A function-typed implicit receiver (`fun Function1<Int, Unit>.f() { invoke(11) }`, `f.apply { invoke() }`) has
+    // the `invoke` its function type defines.
+    if (name == "invoke" && implicitReceiversAt(offset).any { dev.ide.lang.kotlin.symbols.TypeRendering.isFunctionType(it.qualifiedName) }) return true
+    // An `inner` class of an implicit receiver's class (or of a supertype): K2's receiver scope holds its
+    // constructor, so `fun A.B.f() = C()` builds `A.B.C` through the extension receiver.
+    if (name.firstOrNull()?.isUpperCase() == true && innerClassOfReceiver(name, offset) != null) return true
+    // An enclosing class's companion member, or an enclosing enum's `values()`/`valueOf()`/`entries`, read bare
+    // from a scope that has no instance of it (the enum's own companion object).
+    if (enclosingCompanionMember(name, offset) != null) return true
     // A LOCAL extension function called bare on an implicit `this` of its receiver type — in practice its own
     // recursive self-call (`fun String.twice(): String = if (n == 0) this else twice()`). Locals of that shape
     // are deliberately kept out of [localsAt] (an extension is not bare-callable in general), so without this
     // the recursion read as unresolved. Needs no import check: a local is always in its own scope.
     if (localFunctionsInScope(offset, name).any { it.receiverTypeReference != null } &&
-        implicitReceiversAt(offset).any { recv -> scopeMemberExtensions(offset, recv, name).any { it.name == name } }
+        implicitReceiversAt(offset).any { recv -> scopeMemberExtensions(offset, recv, name, exactName = true).any { it.name == name } }
     ) return true
     // A top-level callable (`remember`, `mutableStateOf`) resolves bare only when it is actually in
     // scope — explicitly imported, star-imported, same-package, or default-imported. A classpath
     // callable that was never imported stays unresolved, as Kotlin reports (mirrors the extension rule).
     // A `private` top-level from ANOTHER file is out of scope (this file's own privates already resolved above
     // via `ktFile.declarations`), so a cross-file private reference stays unresolved — as the compiler reports.
-    if (service.topLevelByName(name).any { Modifier.PRIVATE !in it.modifiers && topLevelInScope(it, fileContext) }) return true
+    if (service.topLevelByName(name).any {
+            Modifier.PRIVATE !in it.modifiers && topLevelInScope(it, fileContext) &&
+                !(it.packageName != null && aliasedAway("${it.packageName}.$name"))
+        }
+    ) return true
     // An explicit import brings [name] into scope, but ONLY as what it NAMES. A TYPE/object import, an
     // object/enum-entry MEMBER import (its owner is a type), or a non-extension top-level callable (line 501
     // usually resolved that) is usable bare. But an import of a pure EXTENSION
@@ -737,7 +870,9 @@ fun KotlinResolver.bareNameResolves(name: String, offset: Int): Boolean {
     // implicit receiver of the right type is in scope here (checked above) — so it stays unresolved, exactly
     // as Kotlin reports. Only a POSITIVELY-confirmed pure extension falls through; anything unrecognized
     // (a typealias, an unresolved category) resolves, so this never false-positives.
-    val matchingImports = fileContext.imports.filter { !it.isStar && it.simpleName == name }
+    // An import of another file's `private` top-level declaration names nothing visible here (the import line
+    // itself is flagged by [KotlinSemanticChecks.privateTopLevelImports]), so it brings nothing into scope.
+    val matchingImports = fileContext.imports.filter { !it.isStar && it.simpleName == name && !privateInAnotherFile(it.fqn) }
     if (matchingImports.isNotEmpty()) {
         val extPackages = service.extensionPackages(name)
         val hasNonExtensionTopLevel = service.topLevelByName(name).any { it.receiverTypeFqn == null }
@@ -754,13 +889,50 @@ fun KotlinResolver.bareNameResolves(name: String, offset: Int): Boolean {
     // bare only same-package), so an unimported same-module type is flagged by the bare-reference diagnostic. The
     // ENCLOSING class is passed so a NESTED-class constructor (`Plan(1)` inside `class Game { private class Plan }`)
     // resolves by simple name.
-    if (service.resolveTypeName(name, fileContext, enclosingClassFqn(offset))?.let { service.isKnownType(it) } == true) return true
+    if (service.resolveTypeName(name, fileContext, enclosingClassFqn(offset))?.let { service.isKnownType(it) && !privateInAnotherFile(it) && !aliasedAway(it) } == true) return true
     // A STAR import of a class puts its bare-callable members in scope: `import org.junit.Assert.*` makes
     // `assertEquals(…)` a call to a Java static. The by-name spelling (`import org.junit.Assert.assertEquals`)
     // was settled by the explicit-import rule above, which never looks the member up; a star import names
     // nothing, so only the container's own members can answer. Last, because it is the one probe here that
     // reads a container's members, and everything commoner has already had its say.
     return importedSingletonMembers(name, exactName = true).any { it.name == name }
+}
+
+/**
+ * Whether [fqn] names project-source top-level declarations that are ALL `private` to files other than this
+ * one: a `private` top-level declaration is visible only inside its own file, so here it names nothing usable.
+ * Files are compared by name, as [KotlinSemanticChecks.privateTopLevelImports] does.
+ */
+internal fun KotlinResolver.privateInAnotherFile(fqn: String): Boolean {
+    val files = service.privateTopLevelSourceFiles(fqn) ?: return false
+    val here = fileContext.path.substringAfterLast('/')
+    if (files.any { it.substringAfterLast('/') == here }) return false
+    // The same simple name may also reach a visible type through another import or this package
+    // (`import pack1.*` holding a private `SomeClass` beside `import pack2.*` holding a public one).
+    val name = fqn.substringAfterLast('.')
+    val others = ArrayList<String>()
+    fileContext.imports.forEach { imp ->
+        if (imp.isStar) others += "${imp.packageName}.$name" else if (imp.simpleName == name) others += imp.fqn
+    }
+    others += if (fileContext.packageName.isEmpty()) name else "${fileContext.packageName}.$name"
+    return others.none { it != fqn && service.isKnownType(it) && service.privateTopLevelSourceFiles(it) == null }
+}
+
+/**
+ * Whether [fqn] is imported only under ANOTHER name (`import a.y as AY`): the alias then replaces the original
+ * name in this file, which a star import or the file's own package no longer supplies.
+ */
+internal fun KotlinResolver.aliasedAway(fqn: String): Boolean {
+    val name = fqn.substringAfterLast('.')
+    // A NESTED declaration is still reached by its own name inside its outer class, whatever an import calls it.
+    if (service.isKnownType(fqn.substringBeforeLast('.', ""))) return false
+    var renamed = false
+    for (imp in fileContext.imports) {
+        if (imp.isStar || imp.fqn != fqn) continue
+        if (imp.alias == null || imp.alias == name) return false
+        renamed = true
+    }
+    return renamed
 }
 
 /**
@@ -777,20 +949,37 @@ internal fun KotlinResolver.topLevelInScope(sym: KotlinSymbol, ctx: FileContext)
     return ctx.imports.any { imp -> if (imp.isStar) imp.packageName == pkg else imp.fqn == "$pkg.${sym.name}" }
 }
 
+/**
+ * The scope level an in-scope top-level [sym] is reached through, lower first: an explicit import (0) outranks the
+ * file's own package (1), which outranks a star import (2) and the default imports (3). K2 stops at the first
+ * level that has the name, so `import a.X` with `import b.*` reads `a.X`.
+ */
+internal fun topLevelScopeRank(sym: KotlinSymbol, ctx: FileContext): Int {
+    val pkg = sym.packageName ?: sym.declaringClassFqn?.substringBeforeLast('.', "")?.ifEmpty { null } ?: return 1
+    val fqn = if (pkg.isEmpty()) sym.name else "$pkg.${sym.name}"
+    if (ctx.imports.any { !it.isStar && it.fqn == fqn }) return 0
+    if (pkg == ctx.packageName) return 1
+    if (ctx.imports.any { it.isStar && it.packageName == pkg }) return 2
+    return 3
+}
+
 /** Whether [name] is a member (function/property or a constructor `val/var` param) of any class enclosing
  *  [offset] in the live buffer — including an enclosing enum's own CONSTANTS, which are bare-accessible within
  *  its body (`fun opp() = LEFT`, `when (this) { LEFT -> … }`). Resolves same-file members the disk-based symbol
  *  service can't see yet. */
 internal fun KotlinResolver.enclosingClassMembersContain(offset: Int, name: String): Boolean {
     var node: KtElement? = elementAt(offset)
+    var child: KtElement? = null
     while (node != null) {
-        if (node is KtClassOrObject) {
+        // The class's own annotations are resolved outside it (see [inClassHeaderScope]).
+        if (node is KtClassOrObject && !(child is dev.ide.kotlin.syntax.psi.KtModifierList && child.parent === node)) {
             if (node.declarations.any {
                     (it is KtNamedFunction && it.name == name) || (it is KtProperty && it.name == name) ||
                         (it is KtEnumEntry && it.name == name)
                 }) return true
             if (node.primaryConstructorParameters.any { it.hasValOrVar() && it.name == name }) return true
         }
+        child = node
         node = node.parent
     }
     return false
@@ -867,13 +1056,51 @@ private fun KotlinResolver.supertypesResolvable(cls: KtClassOrObject): Boolean =
         val userType = entry.typeReference?.typeElement as? KtUserType ?: return@all true
         val name = userType.referenceExpression?.getReferencedName() ?: return@all true
         if (isTypeParameterInScope(name, entry.textRange.startOffset)) return@all true
-        service.resolveTypeName(name, fileContext)?.let { service.isKnownType(it) } == true
+        // The whole qualified spelling (`O.B`, not just `B`), resolved in the scope the supertype list sees: the
+        // classes around [cls], whose nested types a supertype may name bare (`companion object : Beta()` inside
+        // `class O { class Beta; class A }`). Resolving only the last segment at file level read every
+        // `class C : O.B()` as having an unknown supertype, which turned the unresolved-reference check off for
+        // the whole class body.
+        val qualified = buildString {
+            var t: KtUserType? = userType
+            val parts = ArrayList<String>(2)
+            while (t != null) { parts += t.referenceExpression?.getReferencedName() ?: return@all false; t = t.qualifier }
+            for (i in parts.indices.reversed()) { append(parts[i]); if (i > 0) append('.') }
+        }
+        val outer = cls.containingClassOrObject?.fqName?.asString()
+        service.resolveTypeName(qualified, fileContext, outer)?.let { service.isKnownType(it) } == true
     }
 
 /** Named LOCAL types in scope at [offset] (simple name → the synthetic FQN they were registered under): a
  *  `class`/`object` declared as a statement in this block or an enclosing one. So a `LocalClass()` / a local
  *  `object`'s member reference resolves + isn't false-flagged. Anonymous objects (nameless) aren't included —
  *  they're referenced by the `object … { }` expression, not by name. */
+/** An extension's receiver type [text] as [decl] sees it: a LOCAL class in scope there (`fun LocalA.LocalB.f()` in
+ *  the block declaring `class LocalA`) is keyed by its local classifier, which no file-level lookup can name. */
+private fun KotlinResolver.receiverTypeFromText(text: String, decl: KtElement): KotlinType? {
+    val head = text.substringBefore('<').substringBefore('.').substringBefore('?').trim()
+    if (head.firstOrNull()?.isUpperCase() == true && decl.parent is KtBlockExpression) {
+        localTypesInScope(decl.textRange.startOffset)[head]?.let { local ->
+            service.typeFromText(local + text.trim().removePrefix(head), fileContext)?.let { return it }
+        }
+    }
+    // A member extension's receiver may name a type nested in its class (`fun Base.hoo()` beside `inner class Base`).
+    return service.typeFromText(text, fileContext, enclosingClassFqnOf(decl))
+}
+
+/** The FQN of the `inner` class [name] an implicit receiver at [offset] can construct: declared by the receiver's
+ *  class or one of its supertypes. Null when none does. */
+internal fun KotlinResolver.innerClassOfReceiver(name: String, offset: Int): String? {
+    for (recv in implicitReceiversAt(offset)) {
+        val chain = sequenceOf(recv.qualifiedName) + service.supertypesOf(recv.qualifiedName).asSequence().map { it.qualifiedName }
+        for (fqn in chain) {
+            val cls = (service.classDeclaration(fqn) as? dev.ide.lang.kotlin.parse.KotlinDomNode)?.psi as? KtClassOrObject ?: continue
+            if (cls.declarations.any { it is dev.ide.kotlin.syntax.psi.KtClass && it.isInner() && it.name == name }) return "$fqn.$name"
+        }
+    }
+    return null
+}
+
 fun KotlinResolver.localTypesInScope(offset: Int): Map<String, String> {
     val out = HashMap<String, String>()
     var node: KtElement? = elementAt(offset)
@@ -902,9 +1129,21 @@ fun KotlinResolver.enclosingCompanionMember(name: String, offset: Int): KotlinSy
                     ?.let { return it }
             }
         }
+        enclosingEnumStatics(node, name).firstOrNull()?.let { return it }
         node = node.parent
     }
     return null
+}
+
+/** An enclosing `enum class`'s synthesized statics (`values()`, `valueOf()`, `entries`), which its body and
+ *  its companion reach without a qualifier, as they do a companion's members. Empty for anything else. */
+private fun KotlinResolver.enclosingEnumStatics(node: KtElement?, name: String?): List<KotlinSymbol> {
+    val cls = node as? KtClass ?: return emptyList()
+    if (!cls.isEnum()) return emptyList()
+    val fqn = cls.fqName?.asString() ?: return emptyList()
+    if (name != null && name != "values" && name != "valueOf" && name != "entries") return emptyList()
+    return service.membersNamed(fqn, emptyList(), name ?: "")
+        .filter { Modifier.STATIC in it.modifiers && (name == null || it.name == name) }
 }
 
 /** All bare-accessible members of every enclosing class's companion object — for completion of an unqualified
@@ -915,9 +1154,26 @@ internal fun KotlinResolver.enclosingCompanionMembers(offset: Int): List<KotlinS
     while (node != null) {
         if (node is KtClassOrObject && node.companionObjects.isNotEmpty())
             node.fqName?.asString()?.let { out += service.companionMembersFor(it) }
+        for (n in listOf("values", "valueOf", "entries")) out += enclosingEnumStatics(node, n)
         node = node.parent
     }
     return out
+}
+
+/** Whether a constructor of the LOCAL class [fqn] can take [call]'s arguments: one whose arity fits and whose
+ *  parameters accept the argument types that are known. */
+internal fun KotlinResolver.localConstructorTakes(fqn: String, call: KtCallExpression): Boolean {
+    val cls = service.sourceClass(fqn) ?: return true
+    if (cls.constructors.isEmpty()) return call.valueArguments.isEmpty()
+    val n = call.valueArguments.size
+    if (call.valueArguments.any { it.isNamed() || it.getSpreadElement() != null }) return true
+    return cls.constructors.any { c ->
+        c.varargParamIndex >= 0 || n in c.paramHasDefault.count { !it }..c.paramTexts.size && call.valueArguments.withIndex().all { (i, arg) ->
+            val pt = service.typeFromText(c.paramTexts.getOrNull(i)?.second, c.ctx, fqn) ?: return@all true
+            val at = arg.getArgumentExpression()?.let { inferType(it) } ?: return@all true
+            pt.isTypeParameter || at.isTypeParameter || pt.isAssignableFrom(at) || !service.isKnownType(pt.qualifiedName) || !service.isKnownType(at.qualifiedName)
+        }
+    }
 }
 
 /** A [name] used as a constructor call (a simple `Foo` or a qualified `pkg.Foo`/`Outer.Inner`, its last
@@ -926,7 +1182,14 @@ internal fun KotlinResolver.enclosingCompanionMembers(offset: Int): List<KotlinS
 fun KotlinResolver.constructorTypeFqn(name: String, offset: Int): String? {
     if (name.substringAfterLast('.').firstOrNull()?.isUpperCase() != true) return null
     if ('.' !in name && localsAt(offset, name).isNotEmpty()) return null
-    if ('.' !in name) localTypesInScope(offset)[name]?.let { return it } // a local `class Foo` in scope
+    if ('.' !in name) localTypesInScope(offset)[name]?.let { local ->
+        // A local class that cannot take the call leaves it to a same-named class further out that can (K2's tower
+        // moves on: `class X(y: Int)` in a function, `X("")` constructs the top-level `X(x: String)`).
+        val call = elementAt(offset)?.getParentOfType<KtCallExpression>(strict = false)?.takeIf { it.calleeExpression?.textRange?.startOffset == offset }
+        if (call == null || localConstructorTakes(local, call)) return local
+        val outer = service.resolveTypeName(name, fileContext, null)?.takeIf { it != local && service.isKnownType(it) }
+        return outer ?: local
+    }
     // A different-package project type isn't a resolvable bare constructor call until imported, so `Foo()` for
     // such a type is flagged unresolved (and arg-validation backs off) rather than silently resolving.
     // The ENCLOSING class is passed so a NESTED type constructed by its simple name from inside the enclosing
@@ -949,11 +1212,43 @@ fun KotlinResolver.enclosingClassFqn(offset: Int): String? = elementAt(offset)?.
  *  the `elementAt` offset lookup. */
 internal fun enclosingClassFqnOf(element: KtElement): String? {
     var node: KtElement? = element
+    var child: KtElement? = null
     while (node != null) {
+        // A class's header is resolved outside the class: its supertype types and its own annotations see the
+        // outer scope and the type parameters, not the class's nested classifiers (K2's class-header scopes;
+        // `class MyClass(...) : Base by prop { interface Base }` names the outer `Base`). The arguments of a
+        // supertype constructor call are not header types and keep the class's static scope.
+        if (node is KtClassOrObject && child != null && inClassHeaderScope(node, child, element)) {
+            child = node
+            node = node.parent
+            continue
+        }
+        // A local class or an anonymous `object` has no FQN of its own, but the source model registers it under
+        // a synthetic one ([dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn]) nested under the named
+        // owner. Returning that keeps the scope walk going: its own nested types, its supertypes' nested types
+        // (`object : Outer() { fun f(n: Nested) }`), and the named classes around it (a `private class Private`
+        // of the class whose member declares the object). Returning null here cut the walk off at the first
+        // unnamed class, and all of those read as unresolved.
         if (node is KtClassOrObject) return node.fqName?.asString()
+            ?: if (node is dev.ide.kotlin.syntax.psi.KtEnumEntry) null
+            else dev.ide.lang.kotlin.symbols.SourceIndexBuilder.localTypeFqn(node)
+        child = node
         node = node.parent
     }
     return null
+}
+
+/**
+ * Whether [element], reached through [child] (a direct child of [cls]), stands in [cls]'s header proper: the type
+ * of a supertype entry, or an annotation of the class itself. Those are resolved in the scope around the class.
+ */
+internal fun inClassHeaderScope(cls: KtClassOrObject, child: KtElement, element: KtElement): Boolean = when (child) {
+    is dev.ide.kotlin.syntax.psi.KtSuperTypeList -> child.entries.any { e ->
+        val t = e.typeReference ?: return@any false
+        t.textRange.startOffset <= element.textRange.startOffset && element.textRange.endOffset <= t.textRange.endOffset
+    }
+    is dev.ide.kotlin.syntax.psi.KtModifierList -> cls !is dev.ide.kotlin.syntax.psi.KtEnumEntry && child.parent === cls
+    else -> false
 }
 
 /** The candidate set for a bare name-reference completion: locals, enclosing members, top-level.
@@ -962,7 +1257,15 @@ internal fun enclosingClassFqnOf(element: KtElement): String? {
 fun KotlinResolver.scopeSymbolsAt(
     offset: Int,
     namePrefix: String = "",
-    exactName: Boolean = false
+    exactName: Boolean = false,
+    /** Completion's own name filter for the local part (locals, receivers' members, this file's declarations),
+     *  in place of the prefix one: IntelliJ matches those at any word of a name. The top-level part is still
+     *  looked up by prefix. */
+    localNameFilter: ((String) -> Boolean)? = null,
+    /** False leaves the classpath's top-level callables out (the project's own stay): for a caller that keeps
+     *  only values a user declares. With an empty prefix that query is uncapped, every top-level function of
+     *  every library materialized. */
+    classpathTopLevel: Boolean = true,
 ): List<KotlinSymbol> {
     val out = ArrayList<KotlinSymbol>()
     // The resolution probe wants one name, and only completion needs every local typed.
@@ -973,9 +1276,14 @@ fun KotlinResolver.scopeSymbolsAt(
     // [bareNameResolves] so a reference that ISN'T flagged unresolved also COMPLETES.
     out += sameFileScopeSymbols(offset, if (exactName && namePrefix.isNotEmpty()) namePrefix else null)
     // Members of every implicit `this` (apply/with/run block, extension fn, enclosing class).
+    // A resolution probe asks for ONE name, so the receivers' members are looked up by it: listing every member
+    // and extension of each receiver (every `Any` extension on the classpath, each bound to the receiver) only
+    // for the exact-name filter below to keep one was the largest allocation of a diagnostics pass. The
+    // name-filtered lookup keeps the same symbols in the same order.
+    val probe = exactName && namePrefix.isNotEmpty()
     implicitReceiversAt(offset).forEach { recv ->
-        out += service.membersOf(recv.qualifiedName, recv.typeArguments, null)
-            .filterIsInstance<KotlinSymbol>()
+        out += if (probe) service.membersForCompletion(recv.qualifiedName, recv.typeArguments, namePrefix, exactName = true)
+        else service.membersOf(recv.qualifiedName, recv.typeArguments, null).filterIsInstance<KotlinSymbol>()
     }
     // Bare-accessible members of an enclosing class's companion object (`CONST`, a companion `factory()`).
     out += enclosingCompanionMembers(offset)
@@ -998,13 +1306,16 @@ fun KotlinResolver.scopeSymbolsAt(
     val scoped = when {
         namePrefix.isEmpty() -> out
         exactName -> out.filter { it.name == namePrefix }
+        localNameFilter != null -> out.filter { m.matches(it.name) || localNameFilter(it.name) }
         else -> out.filter { m.matches(it.name) }
     }
     // A `private` top-level declaration is file-scoped: from ANOTHER file it must not be offered. Same-file
     // privates are already in `out`/`scoped` (added by [sameFileScopeSymbols] from the live buffer), so dropping
     // private from the project-wide top-level results here removes exactly the cross-file ones without losing the
     // current file's. (The symbol service stays unfiltered so RESOLUTION of a same-file private still works.)
-    val topLevel = (if (exactName) service.topLevelByName(namePrefix) else service.topLevelCallables(namePrefix))
+    val topLevel = (if (exactName) service.topLevelByName(namePrefix)
+        else if (!classpathTopLevel) service.sourceTopLevelCallables(namePrefix)
+        else service.topLevelCallables(namePrefix))
         .filterNot { Modifier.PRIVATE in it.modifiers }
     return scoped + topLevel
 }
@@ -1027,21 +1338,39 @@ internal fun KotlinResolver.sameFileScopeSymbols(offset: Int, name: String? = nu
         else -> {}
     }
     var node: KtElement? = elementAt(offset)
+    // See [computeImplicitReceiversAt]: once the walk leaves a nested class, an object or a companion, the
+    // instance members of the classes further out are not in scope. Their nested CLASSIFIERS still are.
+    var outerInstanceClosed = false
+    var child: KtElement? = null
     while (node != null) {
         if (node is KtClassOrObject) {
             val ownerFqn = node.fqName?.asString()
+            // In the class HEADER (a primary-constructor default, the supertype list) there is no instance yet.
+            val inHeader = child != null && child !is KtClassBody
+            val outerClosedBefore = outerInstanceClosed && !isSingletonScope(node)
+            val instanceVisible = !inHeader && !outerClosedBefore
             for (d in node.declarations) when (d) {
-                is KtNamedFunction -> if (d.receiverTypeReference == null && wanted(d.name)) {
+                is KtNamedFunction -> if (instanceVisible && d.receiverTypeReference == null && wanted(d.name)) {
                     out += cachedSameFileSymbol(d, ownerFqn) { sameFileFunction(d, ownerFqn) }
                 }
 
-                is KtProperty -> if (d.receiverTypeReference == null && wanted(d.name)) {
+                is KtProperty -> if (instanceVisible && d.receiverTypeReference == null && wanted(d.name)) {
                     out += cachedSameFileSymbol(d, ownerFqn) { sameFileProperty(d, ownerFqn) }
                 }
 
+                // A nested class, object or interface of an enclosing class is in scope by its simple name
+                // anywhere inside that class (`class C { class Nested; fun f() = Nested() }`).
+                is KtClassOrObject -> if (d !is KtEnumEntry && !(d is KtObjectDeclaration && d.isCompanion()) &&
+                    d.name != null && wanted(d.name)
+                ) out += cachedSameFileSymbol(d, ownerFqn) { sameFileType(d) }
+
                 else -> {}
             }
-            node.primaryConstructorParameters.filter { it.hasValOrVar() && wanted(it.name) }.forEach { p ->
+            if (closesOuterInstanceScope(node)) outerInstanceClosed = true
+            // The primary constructor's properties are still readable in the supertype list, as the constructor's
+            // parameters they are there (`class L(val d: Named) : Named by d`, `: Base(d)`).
+            val ctorPropertiesVisible = instanceVisible || (inHeader && child is KtSuperTypeList && !outerClosedBefore)
+            if (ctorPropertiesVisible) node.primaryConstructorParameters.filter { it.hasValOrVar() && wanted(it.name) }.forEach { p ->
                 out += KotlinSymbol(
                     p.name ?: "_", SymbolKind.FIELD,
                     type = paramType(p), origin = SOURCE,
@@ -1056,6 +1385,7 @@ internal fun KotlinResolver.sameFileScopeSymbols(offset: Int, name: String? = nu
                 )
             }
         }
+        child = node
         node = node.parent
     }
     return out
@@ -1098,6 +1428,7 @@ internal fun KotlinResolver.sameFileFunction(fn: KtNamedFunction, ownerFqn: Stri
         paramTypes = params.map { (_, t) -> service.typeFromText(t, fileContext, ownerFqn) },
         paramNames = params.map { (n, _) -> n },
         paramHasDefault = fn.valueParameters.map { it.hasDefaultValue() },
+        isInfix = fn.hasModifier(KtTokens.INFIX_KEYWORD),
         varargParamIndex = fn.valueParameters.indexOfFirst { it.isVarArg },
         isComposable = fn.annotationEntries.any { it.shortName?.asString() == "Composable" },
         isInline = fn.hasModifier(KtTokens.INLINE_KEYWORD),
@@ -1159,7 +1490,18 @@ private fun KotlinResolver.inferredSameFilePropertyType(p: KtProperty): KotlinTy
         return null
     }
     return try {
-        inferType(p.initializer) ?: p.delegateExpression?.let(::delegatedValueType)
+        // With neither, a getter's expression body is the value (`val x get() = 1`), or its declared return type.
+        (inferType(p.initializer) ?: p.delegateExpression?.let(::delegatedValueType)
+            ?: p.getter?.takeIf { p.initializer == null && p.delegateExpression == null }?.let { g ->
+                g.typeReference?.text?.let { service.typeFromText(it, fileContext, enclosingClassFqnOf(p)) }
+                    ?: g.takeIf { !it.hasBlockBody() }?.bodyExpression?.let { body ->
+                        // A getter that returns `null` makes the property a `Nothing?`.
+                        if (unwrapParens(body).let { it is dev.ide.kotlin.syntax.psi.KtConstantExpression && it.text == "null" }) service.typeByFqn("kotlin.Nothing").withNullable(true)
+                        else inferType(body)
+                    }
+            })
+            // The anonymous-object escape rule, as for a member read through the symbol service.
+            ?.let { approximateEscapingLocalType(it, p) }
     } finally {
         guard.remove(p)
     }

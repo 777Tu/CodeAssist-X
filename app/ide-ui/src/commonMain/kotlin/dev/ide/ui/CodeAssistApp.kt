@@ -2,6 +2,7 @@ package dev.ide.ui
 
 import dev.ide.ui.platform.AppLanguage
 import dev.ide.ui.components.BuildSuccessBats
+import dev.ide.ui.components.WinterBuildFx
 import dev.ide.ui.components.HalloweenBuildFx
 import dev.ide.ui.theme.LocalSeason
 import dev.ide.ui.theme.Season
@@ -49,6 +50,9 @@ import dev.ide.ui.theme.CodeAssistTheme
 import dev.ide.ui.theme.rememberJetBrainsMono
 import dev.ide.ui.theme.rememberUiFont
 import org.jetbrains.compose.resources.stringResource
+
+/** How long a project is open before the notification prompt comes up (see `IdeUiState.offerNotifications`). */
+private const val NOTIFICATION_PROMPT_DELAY_MS = 6_000L
 
 /**
  * Root of the reusable IDE UI. Hosts pick the toolkit (Compose Desktop window, Android activity) and
@@ -130,6 +134,14 @@ fun CodeAssistApp(
         openNotificationTarget?.let { app.openNotificationTarget(it); onNotificationTargetHandled() }
     }
     LaunchedEffect(app.projectOpen) { onProjectOpenChange(app.projectOpen) }
+    // The notification prompt, a moment into a project and not on top of its opening. Leaving the project
+    // before then cancels it, and it comes up the next time one is opened.
+    LaunchedEffect(app.projectOpen, state) {
+        if (app.projectOpen) {
+            kotlinx.coroutines.delay(NOTIFICATION_PROMPT_DELAY_MS)
+            state.offerNotifications()
+        }
+    }
 
     // The chosen interface language, around everything that reads a string. The state above is kept across a
     // language change; the content below is rebuilt in the new language.
@@ -174,12 +186,13 @@ fun CodeAssistApp(
             // then inset by `safeDrawing`. On desktop these insets are empty, so this is a no-op there.
             // Read once per composition of the root: a session that crosses midnight into the season picks it up
             // on the next settings change or launch, which is soon enough for a decoration.
-            val season = if (app.settings.seasonalTouches) Season.current() else null
+            val season = if (app.settings.seasonalTouches) app.calendarSeason() else null
             // Translations of the text the backend writes in English (lessons, templates, settings pages).
             val backendText = dev.ide.ui.screens.rememberBackendText()
             CompositionLocalProvider(
                 dev.ide.ui.screens.LocalBackendText provides backendText,
                 LocalSeason provides season,
+                dev.ide.ui.holiday.LocalHolidayLedger provides app.holidayLedger,
                 LocalAds provides app.adController,
                 LocalHostFileActions provides fileActions,
                 LocalPluginNavigator provides app::openPluginScreen,
@@ -226,6 +239,10 @@ fun CodeAssistApp(
                                 )
                                 // Boo on a failed build, candy when a program starts; nothing outside the season.
                                 HalloweenBuildFx(backend = backend)
+                                // Snow and a star on success, frost on failure, gold when a program starts.
+                                WinterBuildFx(backend = backend)
+                                // The first successful build of each day adds a star to the sky.
+                                if (season == Season.Winter) HolidayBuildRecorder(backend, app.holidayLedger)
                             }
                         }
                         AppOverlays(

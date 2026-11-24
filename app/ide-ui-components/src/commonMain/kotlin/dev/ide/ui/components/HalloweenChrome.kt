@@ -126,25 +126,29 @@ fun HauntedGhost(size: Dp, modifier: Modifier = Modifier) {
 }
 
 /**
- * The empty-state illustration: [HauntedGhost] during Halloween, [fallback] (the screen's usual glyph) on
- * every other day.
+ * The empty-state illustration: [HauntedGhost] during Halloween, [FrostySnowman] in winter, [fallback] (the
+ * screen's usual glyph) on every other day.
  */
 @Composable
 fun SeasonalEmptyArt(size: Dp, modifier: Modifier = Modifier, fallback: @Composable () -> Unit) {
-    if (LocalSeason.current == Season.Halloween) HauntedGhost(size, modifier) else Box(modifier) { fallback() }
+    when (LocalSeason.current) {
+        Season.Halloween -> HauntedGhost(size, modifier)
+        Season.Winter -> FrostySnowman(size, modifier)
+        null -> Box(modifier) { fallback() }
+    }
 }
 
-/** The three nav destinations that dress up for Halloween. */
-enum class HalloweenGlyph { Pumpkin, Bat, WitchHat }
+/** The glyphs nav destinations wear for a season: Halloween's three, then winter's three. */
+enum class SeasonalGlyph { Pumpkin, Bat, WitchHat, Snowflake, Snowman, Star }
 
 /**
- * A Halloween nav glyph at [size], drawn where the destination's usual glyph would be. Selected, it is in full
+ * A seasonal nav glyph at [size], drawn where the destination's usual glyph would be. Selected, it is in full
  * color (the pumpkin) or in [tint] (the bat and the hat, which have no color of their own). Unselected, the
  * pumpkin is drawn desaturated and dimmed, and the others in [tint], so the selected tab still stands out the
  * way a filled glyph does.
  */
 @Composable
-fun HalloweenNavGlyph(glyph: HalloweenGlyph, selected: Boolean, size: Dp, tint: Color, modifier: Modifier = Modifier) {
+fun SeasonalNavGlyph(glyph: SeasonalGlyph, selected: Boolean, size: Dp, tint: Color, modifier: Modifier = Modifier) {
     val dimmed = remember {
         Paint().apply {
             colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
@@ -155,18 +159,27 @@ fun HalloweenNavGlyph(glyph: HalloweenGlyph, selected: Boolean, size: Dp, tint: 
         val s = this.size.minDimension
         val c = Offset(this.size.width / 2f, this.size.height / 2f)
         when (glyph) {
-            HalloweenGlyph.Pumpkin -> {
+            SeasonalGlyph.Pumpkin -> {
                 if (!selected) drawContext.canvas.saveLayer(Rect(Offset.Zero, this.size), dimmed)
                 drawPumpkin(Offset(c.x, c.y + s * 0.06f), s * 0.9f)
                 if (!selected) drawContext.canvas.restore()
             }
-            HalloweenGlyph.Bat -> drawBat(Offset(c.x, c.y + s * 0.04f), s * 1.05f, flap = 0.35f, color = tint)
-            HalloweenGlyph.WitchHat -> drawWitchHat(
+            SeasonalGlyph.Bat -> drawBat(Offset(c.x, c.y + s * 0.04f), s * 1.05f, flap = 0.35f, color = tint)
+            SeasonalGlyph.WitchHat -> drawWitchHat(
                 Offset(c.x, c.y + s * 0.38f),
                 s * 0.92f,
                 tint,
                 band = if (selected) Color(0xFFFF9A3C) else tint.copy(alpha = 0.45f),
             )
+            // Winter: the snowflake and the star take the theme's tint when not selected and a color of their own
+            // when selected; the snowman is snow either way, dimmed when not selected.
+            SeasonalGlyph.Snowflake -> drawSnowflake(c, s * 0.44f, if (selected) AuroraTeal else tint, 10f)
+            SeasonalGlyph.Snowman -> {
+                if (!selected) drawContext.canvas.saveLayer(Rect(Offset.Zero, this.size), dimmed)
+                drawSnowman(Offset(c.x, c.y + s * 0.47f), s * 0.98f, outline = tint.copy(alpha = 0.5f))
+                if (!selected) drawContext.canvas.restore()
+            }
+            SeasonalGlyph.Star -> drawStar(Offset(c.x, c.y + s * 0.04f), s * 0.46f, if (selected) StarGold else tint)
         }
     }
 }

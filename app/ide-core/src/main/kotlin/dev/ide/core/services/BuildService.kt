@@ -307,8 +307,9 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
         // No SDK on this machine: the desktop app's own android.jar + aapt2, with D8 and apksigner in-process
         // (the desktop launcher bundles both libraries), so a fresh install builds an APK with nothing to set up.
         val bundled = BundledAndroidToolchain.bundled() ?: return@lazy null
-        val signing =
-            DebugKeystore.getOrCreate(ctx.store.rootPath.resolve(".platform/debug.ks"), bundled.keytool)
+        val signing = BundledAndroidToolchain.debugKeystore()
+            ?.let { SigningConfig(it, DebugKeystore.STORE_PASS, DebugKeystore.KEY_ALIAS, DebugKeystore.KEY_PASS) }
+            ?: DebugKeystore.getOrCreate(ctx.store.rootPath.resolve(".platform/debug.ks"), bundled.keytool)
         AndroidBuildSystem.inProcess(
             bundled,
             signing,
@@ -320,6 +321,11 @@ internal class BuildService(private val ctx: EngineContext) : Disposable, BuildC
             dexCacheRoot = dexCache,
             signingResolver = signingResolver,
             platformFor = platformJarFor,
+            // A host that dexes slowly (a JVM that only interprets, which an iOS app embeds) asks for the
+            // libraries we published already dexed, as a phone does, instead of dexing each one itself.
+            dexPack = if (System.getProperty("codeassist.dexpack") == "true") {
+                dev.ide.android.support.pack.DexRepository.at { dev.ide.android.support.pack.LibraryPack.DEFAULT_BASE_URL }
+            } else null,
         )
     }
 

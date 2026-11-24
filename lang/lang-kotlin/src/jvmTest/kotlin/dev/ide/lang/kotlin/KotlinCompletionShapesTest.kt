@@ -35,7 +35,9 @@ class KotlinCompletionShapesTest {
 
     @Test
     fun aFunctionValueOffersInvoke() {
-        assertEquals("invoke(p1: Int)", labels("fun g() { val f: (Int) -> String = { it.toString() }; f.| }").first())
+        // The invoke operator comes first as IntelliJ's `()` bracket item, then the plain call.
+        val onValue = labels("fun g() { val f: (Int) -> String = { it.toString() }; f.| }")
+        assertEquals(listOf("()(p1: Int)", "invoke(p1: Int)"), onValue.take(2), "got $onValue")
         assertTrue(labels("typealias Cb = (String) -> Unit\nfun g(cb: Cb?) { cb?.inv| }").offers("invoke"))
     }
 
@@ -49,9 +51,9 @@ class KotlinCompletionShapesTest {
 
     @Test
     fun aClassWithNoSupertypeListCanOverrideAnysMembers() {
-        assertEquals(listOf("override fun toString(): String"), labels("class A {\n    override fun toS|\n}"))
+        assertEquals(listOf("override fun toString(): String {...}"), labels("class A {\n    override fun toS|\n}"))
         val all = labels("class A : Runnable {\n    override fun |\n}")
-        assertEquals("override fun run()", all.first(), "the declared supertype's member leads; got ${all.take(5)}")
+        assertEquals("override fun run() {...}", all.first(), "the declared supertype's member leads; got ${all.take(5)}")
         assertTrue(all.any { it.startsWith("override fun equals") } && all.any { it.startsWith("override fun hashCode") })
     }
 

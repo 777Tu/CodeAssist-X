@@ -4,6 +4,7 @@ import dev.ide.platform.FileSource
 import dev.ide.kotlin.classfile.KotlinBuiltins
 import dev.ide.kotlin.classfile.KotlinClassInfo
 import dev.ide.kotlin.classfile.KotlinClassKind
+import dev.ide.kotlin.classfile.KotlinContractCodec
 import dev.ide.kotlin.classfile.KotlinDeclaration
 import dev.ide.kotlin.classfile.KotlinModality
 import dev.ide.kotlin.classfile.KotlinParameter
@@ -59,7 +60,24 @@ class BuiltinsReader(private val jars: List<String>) {
     private fun load(): Map<String, TypeShape> {
         val out = HashMap<String, TypeShape>()
         forEachFragment { _, bytes -> out.putAll(shapesFrom(bytes)) }
+        forEachModuleFile { bytes -> for ((k, v) in shapesFromModule(bytes)) out.getOrPut(k) { v } }
         return out
+    }
+
+    /** Hand every module file (`META-INF/<name>.kotlin_module`) in every jar to [block]. */
+    private inline fun forEachModuleFile(block: (ByteArray) -> Unit) {
+        for (jar in jars) {
+            val source: FileSource = openFile(jar) ?: continue
+            try {
+                val archive = ZipArchive.open(source) ?: continue
+                for (entry in archive.entries) {
+                    if (!entry.name.startsWith("META-INF/") || !entry.name.endsWith(MODULE_SUFFIX)) continue
+                    block(archive.read(entry) ?: continue)
+                }
+            } finally {
+                source.close()
+            }
+        }
     }
 
     /** Hand every `.kotlin_builtins` entry in every jar to [block], as (entry path, bytes). */
@@ -85,6 +103,7 @@ class BuiltinsReader(private val jars: List<String>) {
 
     companion object {
         private const val SUFFIX = ".kotlin_builtins"
+        private const val MODULE_SUFFIX = ".kotlin_module"
 
         private val BINARY = SymbolOrigin(fromSource = false, file = null)
 
@@ -93,7 +112,14 @@ class BuiltinsReader(private val jars: List<String>) {
          *  as a `Type.` reference sees them. The shared producer for the live reader AND the persistent index. */
         fun shapesFrom(bytes: ByteArray): Map<String, TypeShape> {
             val fragment = KotlinBuiltins.read(bytes) ?: return emptyMap()
-            val classes = fragment.classes
+            return shapesFromClasses(fragment.classes)
+        }
+
+        /** The optional annotation classes a `.kotlin_module` keeps (`kotlin.js.JsName` on the JVM), as shapes. */
+        fun shapesFromModule(bytes: ByteArray): Map<String, TypeShape> =
+            shapesFromClasses(dev.ide.kotlin.classfile.KotlinModuleFile.optionalAnnotationClasses(bytes))
+
+        private fun shapesFromClasses(classes: Map<String, KotlinClassInfo>): Map<String, TypeShape> {
             val out = HashMap<String, TypeShape>(classes.size)
             for ((fqn, cls) in classes) {
                 val owner = KotlinSymbol(fqn.substringAfterLast('.'), SymbolKind.CLASS, origin = BINARY)
@@ -117,6 +143,27 @@ class BuiltinsReader(private val jars: List<String>) {
                         origin = BINARY,
                         signature = ": ${TypeRendering.render(fqn, emptyList(), false)}",
                         declaringClassFqn = fqn,
+                    )
+                }
+                // CONSTRUCTORS, as the classpath @Metadata path records them: `Array(size) { … }`, `String()`,
+                // `Any()` are callable, and K2 picks a default-imported constructor when a same-named class nearer in
+                // scope cannot take the arguments (kt15161), which needs this list to be real.
+                for (d in cls.declarations) {
+                    if (d.kind != KotlinDeclaration.Kind.CONSTRUCTOR) continue
+                    members += KotlinSymbol(
+                        name = owner.name,
+                        kind = SymbolKind.CONSTRUCTOR,
+                        type = KotlinType(fqn, cls.typeParameters.map { KotlinType(it.name, context = null, isTypeParameter = true) }, context = null),
+                        owner = owner,
+                        modifiers = visibilityMods(d.visibility),
+                        origin = BINARY,
+                        signature = "(" + d.parameters.joinToString(", ") { "${it.name}: ${typeText(it.effectiveType)}" } + ")",
+                        paramTypes = d.parameters.map { typeRef(it.effectiveType) },
+                        paramNames = d.parameters.map { it.name },
+                        declaringClassFqn = fqn,
+                        isInternal = d.visibility == KotlinVisibility.INTERNAL,
+                        varargParamIndex = d.parameters.indexOfFirst { it.isVararg },
+                        paramHasDefault = d.parameters.map { it.declaresDefaultValue },
                     )
                 }
                 // Companion object: its members behave like statics (`Int.MAX_VALUE`).
@@ -147,7 +194,7 @@ class BuiltinsReader(private val jars: List<String>) {
             return out
         }
 
-        /** A class MEMBER: a function or a property. A constructor or a nested type alias is not one. */
+        /** A class MEMBER: a function or a property. A constructor (decoded separately) or a nested type alias is not one. */
         private fun member(d: KotlinDeclaration, owner: KotlinSymbol, static: Boolean): KotlinSymbol? = when (d.kind) {
             KotlinDeclaration.Kind.FUNCTION -> func(d, owner, static)
             KotlinDeclaration.Kind.PROPERTY -> prop(d, owner, static)
@@ -224,6 +271,7 @@ class BuiltinsReader(private val jars: List<String>) {
                 paramNames = f.parameters.map { it.name },
                 receiverTypeArgs = receiverArgs(receiver),
                 receiverTypeParam = receiver?.let(::receiverTypeParamOf),
+                receiverNullable = receiver?.isNullable == true,
                 packageName = pkg,
                 isInternal = f.visibility == KotlinVisibility.INTERNAL,
                 isInline = f.isInline,
@@ -231,6 +279,7 @@ class BuiltinsReader(private val jars: List<String>) {
                 isSuspend = f.isSuspend,
                 varargParamIndex = f.parameters.indexOfFirst { it.isVararg },
                 paramHasDefault = f.parameters.map { it.declaresDefaultValue },
+                contract = f.contract.takeIf { it.isNotEmpty() }?.let(KotlinContractCodec::encode),
             )
         }
 
@@ -247,6 +296,7 @@ class BuiltinsReader(private val jars: List<String>) {
                 typeParameters = p.typeParameters.map { it.name },
                 receiverTypeArgs = receiverArgs(receiver),
                 receiverTypeParam = receiver?.let(::receiverTypeParamOf),
+                receiverNullable = receiver?.isNullable == true,
                 packageName = pkg,
                 isInternal = p.visibility == KotlinVisibility.INTERNAL,
             )

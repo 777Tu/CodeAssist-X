@@ -94,12 +94,32 @@ class KotlinSymbol(
      *  may omit it. EMPTY means "unknown" (Java bytecode, an old cache): callers that validate required
      *  arguments must back off rather than guess. When non-empty its size matches [paramTypes]. */
     val paramHasDefault: List<Boolean> = emptyList(),
+    /** A LIBRARY function's `contract { }`, in `KotlinContractCodec` text, as its @Metadata records it (null
+     *  when it declares none). A source function's contract is read off its body instead. */
+    val contract: String? = null,
+    /** An extension declared on a NULLABLE receiver (`String?.plus`, `Any?.toString`): it takes a nullable value
+     *  where a member of the non-null type would not. Only binary symbols set it; a source one is read off PSI. */
+    val receiverNullable: Boolean = false,
     private val declarationNode: DomNode? = null,
     private val doc: String? = null,
 ) : Symbol {
     val isExtension: Boolean get() = receiverTypeFqn != null
     override fun declaration(): DomNode? = declarationNode
     override fun documentation(): String? = doc
+
+    /** A copy under another [name] (an `import a.b.c as d` alias), every other fact kept. */
+    fun renamed(name: String): KotlinSymbol =
+        KotlinSymbol(
+            name = name, kind = kind, type = type, owner = owner, modifiers = modifiers, origin = origin,
+            receiverTypeFqn = receiverTypeFqn, signature = signature, typeParameters = typeParameters,
+            typeParameterBounds = typeParameterBounds, typeParamBoundNames = typeParamBoundNames,
+            typeParamLowerBounds = typeParamLowerBounds, paramTypes = paramTypes, paramNames = paramNames,
+            receiverTypeArgs = receiverTypeArgs, receiverTypeParam = receiverTypeParam, packageName = packageName,
+            declaringClassFqn = declaringClassFqn, isInternal = isInternal, isComposable = isComposable,
+            isInline = isInline, isInfix = isInfix, isSuspend = isSuspend, isDeprecated = isDeprecated,
+            annotationFqns = annotationFqns, varargParamIndex = varargParamIndex, paramHasDefault = paramHasDefault,
+            contract = contract, receiverNullable = receiverNullable, declarationNode = declarationNode, doc = doc,
+        )
 
     /** A copy with source-recovered facts spliced in (real parameter [names], rebuilt [sig], [docText]) — used
      *  to enrich a binary symbol from attached sources without re-reading its shape. Other fields are preserved. */
@@ -136,6 +156,8 @@ class KotlinSymbol(
             annotationFqns = annotationFqns,
             varargParamIndex = varargParamIndex,
             paramHasDefault = paramHasDefault,
+            contract = contract,
+            receiverNullable = receiverNullable,
             declarationNode = declarationNode,
             doc = docText,
         )
@@ -170,6 +192,8 @@ class KotlinSymbol(
             annotationFqns = annotationFqns,
             varargParamIndex = varargParamIndex,
             paramHasDefault = paramHasDefault,
+            contract = contract,
+            receiverNullable = receiverNullable,
             declarationNode = declarationNode,
             doc = doc,
         )
@@ -198,15 +222,36 @@ class KotlinType(
      *  `"in"` (`Comparator<in T>`... a `MutableList<in E>`), `"*"` (star, `List<*>`), or `""` (no projection).
      *  Combined with the classifier's declaration-site variance to decide subtyping direction per argument. */
     val projection: String = "",
+    /** A type parameter made DEFINITELY non-null (`T & Any`, what `t!!` is on a `t: T`): substituting a nullable
+     *  argument for it drops the `?` (`T & Any` with `T = String?` is `String`). Only meaningful when
+     *  [isTypeParameter]. */
+    val definitelyNonNull: Boolean = false,
+    /** The OTHER components of an intersection type this one heads (`B & A`, what a smart cast of an `A` to an
+     *  unrelated `B` leaves): the value is each of them too, so it is assignable to anything one of them is and
+     *  has their members. Empty for an ordinary type. */
+    val intersection: List<KotlinType> = emptyList(),
 ) : TypeRef {
+
+    /** This type intersected with [others] (`this & others…`). */
+    fun withIntersection(others: List<KotlinType>): KotlinType =
+        if (others.isEmpty() && intersection.isEmpty()) this
+        else KotlinType(qualifiedName, typeArguments, nullable, context, isTypeParameter, isExtensionFunctionType, isComposable, projection, definitelyNonNull, others)
+
+    /** `T & Any` for a type parameter, otherwise this type made non-null: the type of `x!!`. */
+    fun definitelyNotNull(): KotlinType =
+        if (!isTypeParameter) withNullable(false)
+        else if (definitelyNonNull && !nullable) this
+        else KotlinType(qualifiedName, typeArguments, false, context, isTypeParameter, isExtensionFunctionType, isComposable, projection, true, intersection)
 
     /** A copy carrying the use-site [p]rojection (`out`/`in`/`*`/``) for when this type sits as a type argument. */
     fun withProjection(p: String): KotlinType =
         if (p == projection) this
-        else KotlinType(qualifiedName, typeArguments, nullable, context, isTypeParameter, isExtensionFunctionType, isComposable, p)
+        else KotlinType(qualifiedName, typeArguments, nullable, context, isTypeParameter, isExtensionFunctionType, isComposable, p, definitelyNonNull, intersection)
 
     override fun isAssignableFrom(other: TypeRef): Boolean {
         if (other.qualifiedName == qualifiedName) return true
+        // An intersection is assignable wherever one of its components is.
+        if (other is KotlinType && other.intersection.any { isAssignableFrom(it) }) return true
         if (qualifiedName == "kotlin.Any" || qualifiedName == "java.lang.Object") return true
         // A Kotlin typealias and its JVM target are one classifier under two names (`kotlin.Comparator` is
         // `java.util.Comparator`), and either side may carry either spelling: a checker canonicalizes the
@@ -239,7 +284,10 @@ class KotlinType(
             isTypeParameter,
             isExtensionFunctionType,
             isComposable,
-            projection
+            projection,
+            definitelyNonNull && !n,
+            // `(A & B)?` stays an intersection (the join of a `C?` and a `D?` that are both `A` and `B`).
+            intersection,
         )
 
     /** A copy with the classifier [fqn] (same arguments, nullability, context) — for canonicalizing a JVM
@@ -255,7 +303,9 @@ class KotlinType(
             isTypeParameter,
             isExtensionFunctionType,
             isComposable,
-            projection
+            projection,
+            definitelyNonNull,
+            intersection,
         )
 
     /** Rebind the resolution [context] through the whole tree (used when reloading a context-free cache). */
@@ -268,7 +318,9 @@ class KotlinType(
             isTypeParameter,
             isExtensionFunctionType,
             isComposable,
-            projection
+            projection,
+            definitelyNonNull,
+            intersection.map { it.withContext(ctx) },
         )
 
     override fun toString(): String {
@@ -286,7 +338,9 @@ class KotlinType(
             isTypeParameter,
             isExtensionFunctionType
         )
+        val shown = (if (definitelyNonNull && isTypeParameter) "$base & Any" else base) +
+            intersection.joinToString("") { " & $it" }
         // A use-site projection prefixes the argument: `out Number`, `in T`.
-        return if (projection.isEmpty()) base else "$projection $base"
+        return if (projection.isEmpty()) shown else "$projection $shown"
     }
 }

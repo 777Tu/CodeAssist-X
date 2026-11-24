@@ -179,6 +179,8 @@ import dev.ide.lang.jdt.JdtSourceAnalyzer
 import dev.ide.lang.jdt.compile.JdtBatchCompiler
 import dev.ide.lang.jdt.rename.JdtRename
 import dev.ide.lang.jdt.synthetic.SyntheticJavaSource
+import dev.ide.lang.kotlin.KotlinExplicitApiMode
+import dev.ide.lang.kotlin.build.KotlinFacet
 import dev.ide.lang.kotlin.KotlinLanguageBackend
 import dev.ide.lang.kotlin.KotlinPackageRewrite
 import dev.ide.lang.kotlin.KotlinSourceAnalyzer
@@ -422,6 +424,8 @@ class IdeServices private constructor(
     /** The host's Kotlin compiler backend (on device: the persistent forked VM). Absent → in-process. */
     private val kotlinCompilerBackend: KotlinCompilerBackend? =
         env.container.getServiceOrNull(KOTLIN_COMPILER_BACKEND)
+            // A host that carries the compiler compiled ahead of time (an iOS app, whose JVM only interprets).
+            ?: dev.ide.lang.kotlin.compile.KotlincNative.backend()
     private val realViewRuntime: RealViewRuntime? = env.container.getServiceOrNull(REAL_VIEW_RUNTIME)
 
     /** The build/run seam ([BuildRunner]): today an in-process runner; a future remote runner swaps in for
@@ -1187,6 +1191,8 @@ class IdeServices private constructor(
                 indexService.ensureUpToDate(scope)
             }
             if (DeviceMemory.isLow) prewarmResourceRepositories()
+            // After the pass, not beside it: the editor waits for the indexes, nothing waits for this.
+            prewarmLayoutPreview()
             val end = System.nanoTime()
             val pass = (indexService as? IndexServiceImpl)?.lastPass
             val kinds = pass?.built.orEmpty().map { it to builtKind(it, store.rootPath, sharedCachesRoot) }
@@ -1294,7 +1300,8 @@ class IdeServices private constructor(
      * the Kotlin compiler warm-up all read it, so it stays engine-owned and is reached via [EngineContext].
      */
     val compileBootClasspath: List<Path> =
-        listOfNotNull(androidTools?.androidJar) + (androidTools?.desugarStubs ?: emptyList())
+        if (androidTools != null) listOfNotNull(androidTools.androidJar) + androidTools.desugarStubs
+        else BundledAndroidToolchain.bootClasspathWithoutHostJdk()
 
     /**
      * The compile boot classpath for a SINGLE module — its resolved platform SDK ([SdkResolution]) rather
@@ -2573,6 +2580,17 @@ class IdeServices private constructor(
      * own, its Android library modules', and every AAR's on its classpath (a library may declare the permission
      * its API needs). Re-read at most every couple of seconds, since the check asks once per call it looks at.
      */
+    /** The module [id]'s explicit API mode as its Kotlin facet holds it now (`kotlin { explicitApi() }`). */
+    private fun explicitApiMode(id: ModuleId): KotlinExplicitApiMode {
+        val module = store.workspace.projects.asSequence().flatMap { it.modules.asSequence() }.firstOrNull { it.id == id }
+            ?: return KotlinExplicitApiMode.DISABLED
+        return when (module.facets.get(KotlinFacet.KEY)?.explicitApi) {
+            "strict" -> KotlinExplicitApiMode.STRICT
+            "warning" -> KotlinExplicitApiMode.WARNING
+            else -> KotlinExplicitApiMode.DISABLED
+        }
+    }
+
     private fun permissionContext(id: ModuleId): PermissionContext? {
         val now = System.nanoTime()
         permissionContexts[id]?.let { (at, ctx) -> if (now - at < PERMISSION_CONTEXT_TTL_NANOS) return ctx }
@@ -2708,6 +2726,7 @@ class IdeServices private constructor(
                     it.javaMemberLocator = { fqn, member, paramTypes -> javaSourceTarget(module, fqn, member, paramTypes) }
                     it.apiContext = { apiLevelContext(module.id) }
                     it.permissionContext = { permissionContext(module.id) }
+                    it.explicitApiMode = { explicitApiMode(module.id) }
                     it.extensionCacheDir = store.rootPath.resolve(".platform/caches/kotlin-ext")
                     // Lowered Compose-preview declarations persist across launches, so the first preview after
                     // a reopen decodes instead of re-running overload resolution over the reachable closure.
@@ -4619,17 +4638,21 @@ class IdeServices private constructor(
         if (realView) {
             // realViewPreview publishes its pipeline stage to _realViewProgress (the status chip); clear it
             // here so every exit path (success or owned fallback) leaves the chip idle.
+            // One at a time: the link works in the module's own folders, and a render the user is waiting for
+            // that arrives during the warm-up ([prewarmLayoutPreview]) waits for it and then finds its work done.
             return try {
-                realViewPreview(
-                    module,
-                    repo,
-                    cached.fingerprint,
-                    themeName,
-                    title,
-                    file,
-                    text,
-                    request
-                )
+                synchronized(realViewLock) {
+                    realViewPreview(
+                        module,
+                        repo,
+                        cached.fingerprint,
+                        themeName,
+                        title,
+                        file,
+                        text,
+                        request
+                    )
+                }
             } finally {
                 _realViewProgress.value = null
             }
@@ -4699,6 +4722,8 @@ class IdeServices private constructor(
 
     @Volatile private var previewAapt2Daemon: dev.ide.android.support.tools.Aapt2Daemon? = null
 
+    private val realViewLock = Any()
+
     /** Relinks the build's compiled resources with the live editor buffer for the real-view preview, so the
      *  edited (or newly added) layout renders. Null when no Android tooling is wired (desktop). */
     private val previewResourceLinker: PreviewResourceLinker? by lazy {
@@ -4709,6 +4734,8 @@ class IdeServices private constructor(
         PreviewResourceLinker(
             // A long-lived aapt2: the preview relinks one layout per edit, and two process launches were most of that.
             Aapt2Subprocess(sdk.aapt2, dev.ide.android.support.tools.Aapt2Daemon(sdk.aapt2).also { previewAapt2Daemon = it }), t.androidJar, cache,
+            // The cache is every project's: two with an `app` module must not link into one folder.
+            projectId = Integer.toHexString(store.rootPath.toAbsolutePath().normalize().toString().hashCode()),
         )
     }
 
@@ -4856,7 +4883,32 @@ class IdeServices private constructor(
         // is NOT required and edits to other resources show. It also generates a preview `R.jar` with ids matching
         // the relinked arsc (every library's `R` resolves to the app's in the renderer), so the preview no longer
         // depends on a prior build's (id-mismatched, possibly absent) R.jar.
-        val linked = previewResourceLinker?.link(
+        // A runtime that reads the resource folders itself (layoutlib, on a host with no Android framework)
+        // needs no linked table and no R.jar: nothing is linked for it.
+        val sourceResources = runtime.readsSourceResources
+        val compileLibraryResDirs = runCatching { AndroidResources.libraryResourceDirs(module, store.workspace) }.getOrDefault(emptyList())
+        // A runtime that reads the folders itself also makes each library's `R` from them, and what runs is the
+        // RUNTIME set of libraries: one that is only there at run time (Compose's `customview-poolingcontainer`)
+        // has an `R` its classes ask for all the same, so its resources are read too.
+        // Such a library may have been unpacked for its classes alone (nothing compiled against its
+        // resources): the rest of it is then unpacked here, from the archive beside it.
+        val libraryResDirs = if (!sourceResources) compileLibraryResDirs else (compileLibraryResDirs + resolvedDexJars.orEmpty()
+            .filter { it.fileName?.toString() == "classes.jar" }
+            .mapNotNull { jar ->
+                val unpacked = jar.parent ?: return@mapNotNull null
+                val res = unpacked.resolve("res")
+                if (Files.isDirectory(res)) return@mapNotNull res
+                val archive = unpacked.resolveSibling(unpacked.fileName.toString().removeSuffix("-exploded") + ".aar")
+                if (!Files.isRegularFile(archive)) return@mapNotNull null
+                runCatching {
+                    dev.ide.android.support.tools.AarExtractor.explode(
+                        archive,
+                        store.rootPath.resolve(".platform").resolve("caches").resolve("preview-aar")
+                            .resolve(dev.ide.android.support.tools.AarExtractor.explodeDirName(archive)),
+                    ).resDir
+                }.getOrNull()
+            }).distinct()
+        val linked = if (sourceResources) null else previewResourceLinker?.link(
             module,
             variant,
             resDirs,
@@ -4866,7 +4918,7 @@ class IdeServices private constructor(
             facet.minSdk,
             facet.targetSdk,
             progress = { _realViewProgress.value = PreviewProgress(it) },
-            libraryResDirs = runCatching { AndroidResources.libraryResourceDirs(module, store.workspace) }.getOrDefault(emptyList()),
+            libraryResDirs = libraryResDirs,
         )
         val tLinked = System.nanoTime()
         // Broken project resources: report them. Rendering the build's last resources.ap_ (or owned rendering)
@@ -4883,7 +4935,7 @@ class IdeServices private constructor(
             )
         }
         // The resources.ap_ to render against: the live relink, else the build's own, else owned rendering.
-        val resourcesAp = linked?.resourcesAp
+        val resourcesAp = if (sourceResources) null else linked?.resourcesAp
             ?: AndroidBuildSystem.resourcesApPath(module, variant)
                 .takeIf { Files.exists(it) }
             ?: return owned(
@@ -4891,7 +4943,7 @@ class IdeServices private constructor(
             )
         // The R.jar: prefer the relink's (ids match the relinked arsc AND it covers every lib package); fall
         // back to the build's if the relink didn't produce one (e.g. it used the build's compiled-flats base).
-        val rJar = linked?.rJar?.takeIf { Files.exists(it) }
+        val rJar = if (sourceResources) null else linked?.rJar?.takeIf { Files.exists(it) }
             ?: AndroidBuildSystem.rJarPath(module, variant)
                 .takeIf { Files.exists(it) }
         val runtimeLibs = resolvedDexJars ?: emptyList()
@@ -4907,7 +4959,8 @@ class IdeServices private constructor(
                     AndroidBuildSystem.classesPath(it, variant),
                     AndroidBuildSystem.kotlinClassesPath(it, variant),
                 )
-            }.filter { Files.isDirectory(it) }
+            }.filter { Files.isDirectory(it) } +
+                listOfNotNull(if (sourceResources) sourceViewClasses(text) else null)
         // EXTERNAL libraries (the maven/AAR runtime set) are dexed via the shared cache; the project's own code
         // arrives PRE-DEXED (above) and needs no re-dex. The readiness gate + the render must key the shared cache
         // the SAME way the build does — an external lib desugars against the external set alone. A single combined
@@ -4955,6 +5008,10 @@ class IdeServices private constructor(
             smallestWidthDp = config.smallestWidthDp,
             rtl = config.rtl,
             renderScale = request.renderScale,
+            resourceDirs = if (sourceResources) libraryResDirs + resDirs else emptyList(),
+            resourcePackages = if (sourceResources) listOf(facet.namespace) + libraryPackages(libraryResDirs) else emptyList(),
+            layoutFile = if (sourceResources) liveLayoutFile(module, file, text) else null,
+            builtResourceIds = if (sourceResources) AndroidBuildSystem.rJarPath(module, variant).resolveSibling("R.txt").takeIf { Files.isRegularFile(it) } else null,
         ).apply {
             stageListener = { _realViewProgress.value = PreviewProgress(it) }
         }
@@ -4967,7 +5024,8 @@ class IdeServices private constructor(
         // The render is a live native Bitmap on device (no PNG round-trip) or PNG bytes as the portable form.
         val nativeImage = result?.nativeBitmap
         val png = result?.pngBytes
-        if (nativeImage == null && png == null) {
+        val argb = result?.argb
+        if (nativeImage == null && png == null && argb == null) {
             return owned(
                 "Real-view render unavailable (${result?.error ?: "no result"}). Showing Legacy Rendering"
             )
@@ -5005,6 +5063,9 @@ class IdeServices private constructor(
             request.density,
             renderedImage = png,
             renderedNativeImage = nativeImage,
+            renderedArgb = argb,
+            renderedArgbWidth = if (argb != null) result.width else 0,
+            renderedArgbHeight = if (argb != null) result.height else 0,
             viewTree = viewTree,
             // The views that rendered as a stand-in or failed mid-frame (the rest of the frame rendered).
             problems = result.problems.map { line ->
@@ -5012,6 +5073,26 @@ class IdeServices private constructor(
             },
         )
     }
+
+    /**
+     * The package of each library whose resources are in [libraryResDirs], read from the manifest beside its
+     * `res/` (an exploded AAR keeps both in one folder). These are the packages library code reads `R` from.
+     */
+    private fun libraryPackages(libraryResDirs: List<Path>): List<String> = libraryResDirs.mapNotNull { res ->
+        val manifest = res.resolveSibling("AndroidManifest.xml")
+        if (!Files.isRegularFile(manifest)) return@mapNotNull null
+        runCatching { Regex("package=\"([^\"]+)\"").find(manifest.readText())?.groupValues?.get(1) }.getOrNull()
+    }.distinct()
+
+    /**
+     * The live buffer as a file, for a runtime that reads layouts from disk: beside nothing of the project's,
+     * under the module's preview cache, and named as the layout is so errors name the file the user knows.
+     */
+    private fun liveLayoutFile(module: Module, file: Path, text: String): Path? = runCatching {
+        val dir = workspaceRoot.resolve(".platform/preview/live-layout/${module.name}")
+        Files.createDirectories(dir)
+        dir.resolve(file.fileName.toString()).also { it.writeText(text) }
+    }.getOrNull()
 
     /** [node] and its subtree with every id in [aliases] replaced by the name it stands for. */
     private fun renameIds(node: dev.ide.preview.PreviewViewNode, aliases: Map<String, String>): dev.ide.preview.PreviewViewNode =
@@ -5132,7 +5213,10 @@ class IdeServices private constructor(
      */
     internal fun projectViewsToCompile(file: Path, text: String): Triple<String, String, Long>? {
         // Only the real-view runtime reads compiled classes; the approximate renderer compiles its own.
-        if (realViewRuntime == null) return null
+        val runtime = realViewRuntime ?: return null
+        // A runtime that reads the project's sources has no build behind it: its views are compiled for the
+        // preview alone (see sourceViewClasses).
+        if (runtime.readsSourceResources) return null
         val module = moduleForResourceFile(file) ?: return null
         val refs = projectCustomViewRefs(text)
         val fqns = refs.javaTags + refs.kotlinOnlyTags
@@ -5573,6 +5657,76 @@ class IdeServices private constructor(
         }
     }
 
+    /** What [prewarmLayoutPreview] last rendered for (the module and its libraries), so a pass that changed neither does not render again. */
+    @Volatile private var warmedLayoutPreview: String? = null
+
+    /**
+     * Render one of the project's layouts in the background once it has opened, so the first layout the user
+     * opens does not pay for what only the first render does: the libraries' resources compiled and the table
+     * linked, the `R` jar made, the preview process started, the libraries' jars opened and their view classes
+     * read (3.3 s of a first render on an emulator, against 40 ms for the next). What is rendered is thrown away;
+     * what it left behind is what the user's layout needs, whichever one it is.
+     *
+     * Only for the runtime that links a table (a device's) and only for a project that has a layout. Where
+     * memory is tight the table is linked and nothing is rendered: that is half of the first render's time and
+     * starts no process, where the render starts the preview's, which a project that never shows a layout
+     * would not. Not before the project's libraries are there (a new project's are still being downloaded when
+     * its first pass ends, and the pass that follows them comes back here). Again when the libraries change,
+     * since most of that work is theirs.
+     */
+    private fun prewarmLayoutPreview() {
+        val runtime = realViewRuntime ?: return
+        if (runtime.readsSourceResources) return
+        indexScope.launch(Dispatchers.IO) {
+            runCatching {
+                for (m in modules()) {
+                    val facet = m.facets.get(AndroidFacet.KEY) ?: continue
+                    if (!facet.isApplication) continue
+                    val layout = AndroidResources.projectResourceDirs(m, store.workspace).asReversed().firstNotNullOfOrNull { res ->
+                        val dir = res.resolve("layout")
+                        if (!Files.isDirectory(dir)) null
+                        else Files.list(dir).use { files -> files.filter { it.toString().endsWith(".xml") }.sorted().findFirst().orElse(null) }
+                    } ?: continue
+                    val selected = AndroidVariants.select(m, activeVariant(m)) ?: AndroidVariants.defaultVariant(m)
+                    val variant = selected?.name ?: "debug"
+                    val libraries = AndroidResources.libraryResourceDirs(m, store.workspace)
+                    val declaresLibraries = m.dependencies.any { it is dev.ide.model.LibraryDependency }
+                    if (declaresLibraries && previewRuntimeLibs(m, AndroidBuildSystem.explodedAarPath(m, variant), selected?.configurations).isNullOrEmpty()) {
+                        return@runCatching
+                    }
+                    val key = m.id.value + "|" + libraries.joinToString("|")
+                    // Claimed before it is rendered: two passes that end together must not both render.
+                    synchronized(realViewLock) {
+                        if (key == warmedLayoutPreview) return@runCatching
+                        warmedLayoutPreview = key
+                    }
+                    val started = System.nanoTime()
+                    val text = layout.readText()
+                    val how = if (DeviceMemory.isLow) {
+                        synchronized(realViewLock) {
+                            previewResourceLinker?.link(
+                                m, variant, AndroidResources.resourceDirs(m, store.workspace), layout, text,
+                                facet.namespace, facet.minSdk, facet.targetSdk, libraryResDirs = libraries,
+                            )
+                        }
+                        "linked"
+                    } else {
+                        val warmed = layoutPreview(
+                            layout, text,
+                            dev.ide.preview.PreviewRequest(widthPx = 1080, heightPx = 2140, density = 2.75f, realViews = true),
+                        )
+                        if (warmed?.renderedNativeImage == null && warmed?.renderedImage == null) "tried (it did not render)" else "rendered"
+                    }
+                    Log.logger("ide.preview").info(
+                        "layout preview warmed: '${layout.fileName}' $how in ${(System.nanoTime() - started) / 1_000_000}ms"
+                    )
+                    // One module: the process, the libraries' classes and their compiled resources are shared.
+                    return@runCatching
+                }
+            }.onFailure { Log.logger("ide.preview").info("layout preview not warmed: $it") }
+        }
+    }
+
     private fun resourceRepository(module: Module): CachedRepo? {
         val key = module.id.value
         val resDirs = runCatching { AndroidResources.resourceDirs(module, store.workspace) }.getOrDefault(emptyList())
@@ -5831,6 +5985,89 @@ class IdeServices private constructor(
         "string" -> dev.ide.preview.ValueFormat.STRING
         "reference" -> dev.ide.preview.ValueFormat.REFERENCE
         else -> dev.ide.preview.ValueFormat.ANY
+    }
+
+    /** The last [sourceViewClasses] compile: the sources' stamp it was made from, and its classes (null: failed). */
+    @Volatile
+    private var sourceViews: Pair<Long, Path?>? = null
+    private val sourceViewsLock = Any()
+
+    /**
+     * The project's Java classes, compiled for a preview that has no build to take them from, or null when the
+     * layout ([text]) names no view of the project, or they do not compile.
+     *
+     * A host that renders from the resource folders (layoutlib, where there is no Android framework and so no
+     * build either) still has to run a project's own view, and a view is code. This is the build's Java compile
+     * without the build: the project's sources and the editor's own `R` against `android.jar`. It is made again
+     * when a source is saved, into a folder named for that state of the sources, so the renderer (which keeps
+     * its class loader for as long as its class path reads the same) sees a new one.
+     *
+     * The `R` it compiles against is not the one that runs: the renderer numbers resources itself. So `R`'s
+     * fields are not constants here, or javac would copy this `R`'s numbers into the classes. A source that
+     * needs them constant (`case R.id.x:`) is compiled again with them so, which runs with the wrong numbers
+     * in that one place and is better than not at all. Kotlin sources are not compiled: a Kotlin class is
+     * here in outline only, enough for the Java that names it.
+     */
+    private fun sourceViewClasses(text: String): Path? {
+        val refs = projectCustomViewRefs(text)
+        if (refs.javaTags.isEmpty() && refs.kotlinOnlyTags.isEmpty()) return null
+        val androidJar = previewAndroidJar() ?: return null
+        val javaSources = modules().flatMap { m -> sourceRoots(m).flatMap { root -> contentFilesUnder(root).filter { it.toString().endsWith(".java") } } }
+        var stamp = javaSources.size.toLong()
+        for (f in javaSources) stamp = stamp * 31 + runCatching { Files.getLastModifiedTime(f).toMillis() }.getOrDefault(0L) + f.toString().hashCode()
+        sourceViews?.let { if (it.first == stamp) return it.second }
+        synchronized(sourceViewsLock) {
+            sourceViews?.let { if (it.first == stamp) return it.second }
+            val started = System.nanoTime()
+            val work = store.rootPath.resolve(".platform/caches/preview-views")
+            val classes = runCatching {
+                work.toFile().deleteRecursively()
+                val srcDir = work.resolve("src")
+                val outDir = work.resolve(java.lang.Long.toHexString(stamp))
+                Files.createDirectories(outDir)
+                val deps = dedupeJarsForAndroidDex(
+                    modules().flatMap { m ->
+                        runCatching {
+                            ModuleCompilationContext.create(store.workspace, m, activeConfigs(m)).classpath.entries.map { Paths.get(it.root.path) }
+                        }.getOrDefault(emptyList())
+                    }.filter { Files.exists(it) }.distinct()
+                )
+                val boot = listOf(androidJar) + (androidTools?.desugarStubs ?: emptyList()) +
+                    listOfNotNull(androidJar.resolveSibling("core-lambda-stubs.jar").takeIf { Files.isRegularFile(it) })
+                val overlay = syntheticOverlay()
+                fun compile(constantIds: Boolean): JdtBatchCompiler.Result {
+                    val sources = ArrayList<Path>(javaSources)
+                    for ((fqn, src) in overlay) {
+                        val f = srcDir.resolve(fqn.replace('.', '/') + ".java")
+                        Files.createDirectories(f.parent)
+                        val java = String(src)
+                        val isR = fqn == "R" || fqn.endsWith(".R")
+                        Files.write(f, (if (isR && !constantIds) java.replace("static final int ", "static int ") else java).toByteArray())
+                        sources.add(f)
+                    }
+                    // Java 8 for the reason the build compiles at it: android.jar is the boot library, and ecj
+                    // takes a boot class path at no higher level.
+                    return JdtBatchCompiler.compile(sources, deps, outDir, sourceLevel = "8", bootClasspath = boot)
+                }
+                var result = compile(constantIds = false)
+                if (!result.success) result = compile(constantIds = true)
+                if (!result.success) {
+                    Log.logger("ide.preview").info("project views did not compile for the preview:\n${formatCompileErrors(result)}")
+                    return@runCatching null
+                }
+                // The renderer's own R is the one that runs.
+                Files.walk(outDir).use { w ->
+                    w.filter { val n = it.fileName.toString(); n == "R.class" || n.startsWith("R$") && n.endsWith(".class") }
+                        .forEach { runCatching { Files.delete(it) } }
+                }
+                outDir
+            }.onFailure { Log.logger("ide.preview").info("project views did not compile for the preview: $it") }.getOrNull()
+            Log.logger("ide.preview").info(
+                "project views for the preview: ${javaSources.size} sources in ${(System.nanoTime() - started) / 1_000_000}ms, ${if (classes != null) "compiled" else "failed"}"
+            )
+            sourceViews = stamp to classes
+            return classes
+        }
     }
 
     /** The `android.jar` for the preview compile: the device's bundled jar, else a desktop SDK's or the desktop
@@ -6170,10 +6407,16 @@ class IdeServices private constructor(
          * Android SDK so `android.*` resolves; with no SDK it falls back to a JDK (Java resolves, `android.*`
          * does not). Not used by the launchers — the IDE no longer seeds a demo on first run.
          */
-        fun bootstrapDemo(root: Path, sharedCachesRoot: Path? = null): IdeServices {
+        fun bootstrapDemo(
+            root: Path,
+            sharedCachesRoot: Path? = null,
+            /** A real-view renderer for the sample's layouts, as a host would register one. */
+            realViewRuntime: RealViewRuntime? = null,
+        ): IdeServices {
             if (Files.exists(root)) root.toFile().deleteRecursively()
             Files.createDirectories(root)
             val env = ApplicationEnvironment()
+            realViewRuntime?.let { runtime -> env.container.registerServiceIfAbsent(REAL_VIEW_RUNTIME) { runtime } }
             val (platform, store) = openStore(root, env)
             ensureSdks(
                 store,
@@ -6274,7 +6517,16 @@ class IdeServices private constructor(
 
         private fun ensureSdks(store: ProjectModelStore, primary: SdkData?, baseDir: Path) {
             val current = store.data.sdks.toMutableList()
-            if (current.isEmpty()) primary?.let { current.add(it) }
+            // A table written where the app no longer is names jars that are gone: an iOS app's bundle and
+            // container move on every update, a desktop JDK is uninstalled. Kept, every file of the project
+            // would resolve nothing ("Cannot resolve symbol 'String'"). The two SDKs this function installs are
+            // installed again; the per-platform ones are syncPlatformSdks' to look after.
+            val gone = current.filter { sdk ->
+                (sdk.name == primary?.name || sdk.name == CorePlatformProvider.SDK_NAME) &&
+                    sdk.bootClasspath.firstOrNull()?.let { Files.isRegularFile(Paths.get(it)) } != true
+            }
+            current.removeAll(gone)
+            if (current.isEmpty() || gone.any { it.name == primary?.name }) primary?.let { current.add(0, it) }
             if (current.none { it.kind == PlatformKind.JVM }) {
                 val androidLike = current.firstOrNull { it.kind == PlatformKind.ANDROID } ?: primary
                 coreJavaSdkFor(androidLike, baseDir)?.let { core ->
@@ -6316,8 +6568,13 @@ class IdeServices private constructor(
         }
 
         /** Open an existing workspace at [root] (used by the "Open Project…" picker). */
-        fun open(root: Path): IdeServices {
+        fun open(
+            root: Path,
+            /** The host's real-view renderer, for one that has it but is not built through a ProjectManager. */
+            realViewRuntime: RealViewRuntime? = null,
+        ): IdeServices {
             val env = ApplicationEnvironment()
+            realViewRuntime?.let { runtime -> env.container.registerServiceIfAbsent(REAL_VIEW_RUNTIME) { runtime } }
             val (platform, store) = openStore(root, env)
             ensureSdks(store, defaultDesktopSdk(), root)
             return IdeServices(platform, store, env = env)

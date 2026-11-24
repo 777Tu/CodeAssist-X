@@ -1,6 +1,8 @@
 package dev.ide.lang.kotlin.resolve
 
+import dev.ide.kotlin.syntax.psi.KtTypeParameterListOwner
 import dev.ide.kotlin.syntax.psi.KtBlockExpression
+import dev.ide.kotlin.syntax.psi.KtTokens
 import dev.ide.kotlin.syntax.psi.KtCallableDeclaration
 import dev.ide.kotlin.syntax.psi.KtClassOrObject
 import dev.ide.kotlin.syntax.psi.KtElement
@@ -52,12 +54,20 @@ internal fun KotlinResolver.extensionInScope(sym: KotlinSymbol): Boolean {
 fun KotlinResolver.scopeMemberExtensions(
     offset: Int,
     receiverType: KotlinType,
-    namePrefix: String = ""
+    namePrefix: String = "",
+    /** [namePrefix] is the whole name (a resolution probe): only that name is looked up, where a prefix would
+     *  fuzzy-match and receiver-bind every extension starting with it for the caller to drop. */
+    exactName: Boolean = false,
 ): List<KotlinSymbol> {
-    if (receiverType.isTypeParameter) return emptyList()
+    // A type-parameter receiver (`x: T`) reaches only member extensions declared on that same type parameter by
+    // an enclosing class (`abstract class A<T : Any> { abstract fun T.foo() }`, called as `x.foo()` in `A`): it
+    // has no supertype chain to key a library or imported extension on.
+    if (receiverType.isTypeParameter || ('.' !in receiverType.qualifiedName && isTypeParameterInScope(receiverType.qualifiedName, offset))) {
+        return typeParameterMemberExtensions(offset, receiverType, namePrefix, exactName)
+    }
     val recvTargets = receiverTargetsOf(receiverType)
 
-    fun matches(n: String) = namePrefix.isEmpty() || n.startsWith(namePrefix, ignoreCase = true)
+    fun matches(n: String) = namePrefix.isEmpty() || (if (exactName) n == namePrefix else n.startsWith(namePrefix, ignoreCase = true))
     val out = ArrayList<KotlinSymbol>()
     val liveOwners = HashSet<String>()
     // A declared extension whose receiver matches → a bound symbol in [out]. Shared by the class-member and
@@ -66,6 +76,14 @@ fun KotlinResolver.scopeMemberExtensions(
         val recvRef = d.receiverTypeReference ?: return
         val name = d.name ?: return
         if (!matches(name)) return
+        // A receiver that is the declaration's OWN type parameter (`operator fun <T> T.invoke(…)`) takes any
+        // receiver within its bound.
+        val recvText = recvRef.text.trim().removeSuffix("?").trim()
+        (d as? dev.ide.kotlin.syntax.psi.KtTypeParameterListOwner)?.typeParameters?.firstOrNull { it.name == recvText }?.let { tp ->
+            val bound = tp.extendsBound?.text?.let { service.resolveTypeName(it.substringBefore('<').removeSuffix("?").trim(), fileContext) }
+            if (bound == null || bound == "kotlin.Any" || bound in recvTargets) sameFileMemberExtension(d, recvText)?.let { out += bindMemberExtensionReceiver(it, receiverType) }
+            return
+        }
         val recvFqn = service.resolveTypeName(recvRef.text, fileContext) ?: return
         if (recvFqn !in recvTargets) return
         sameFileMemberExtension(d, recvFqn)?.let { out += bindMemberExtensionReceiver(it, receiverType) }
@@ -95,9 +113,13 @@ fun KotlinResolver.scopeMemberExtensions(
     // (b) Model implicit-receiver types (an extension-fn receiver, a `with`/`apply` block receiver, or a
     //     saved / cross-file enclosing class) — query their members for matching extensions.
     for (scope in implicitReceiversAt(offset)) {
-        if (scope.qualifiedName in liveOwners) continue // already covered from the live buffer above
-        service.membersForCompletion(scope.qualifiedName, scope.typeArguments, namePrefix)
-            .filter { it.isExtension && it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets }
+        // A class of the live buffer had its OWN member extensions collected above; what it inherits from its
+        // supertypes (`abstract class A : Context`, where `Context` declares `val Variable.value`) is still in
+        // scope there and only the model lists it, so those are kept.
+        val live = scope.qualifiedName in liveOwners
+        service.membersForCompletion(scope.qualifiedName, scope.typeArguments, namePrefix, exactName && namePrefix.isNotEmpty())
+            .filter { it.isExtension && (it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets || genericReceiverAccepts(it, recvTargets)) }
+            .filter { c -> !live || out.none { it.name == c.name && it.receiverTypeFqn == c.receiverTypeFqn && it.kind == c.kind } }
             .forEach { out += bindMemberExtensionReceiver(it, receiverType) }
     }
     // (c) IMPORTED through a singleton: `import okhttp3.MediaType.Companion.toMediaType`, then
@@ -106,7 +128,7 @@ fun KotlinResolver.scopeMemberExtensions(
     //     does reach (a regular class's member extension can never be imported). Cases (a)/(b) are
     //     import-free by construction, which is why the seam had no import path at all and the whole OkHttp /
     //     Retrofit idiom read as an unresolved reference.
-    out += importedSingletonExtensions(recvTargets, receiverType, namePrefix, liveOwners)
+    out += importedSingletonExtensions(recvTargets, receiverType, namePrefix, liveOwners, exactName)
     // (d) An enclosing class's COMPANION object, an implicit receiver throughout that class's body, by the same
     //     rule that makes `companion object { const val TAG }` bare-accessible. So a member extension
     //     declared in it applies here with NO import: `class H { companion object { fun String.c() … }; fun
@@ -118,12 +140,58 @@ fun KotlinResolver.scopeMemberExtensions(
     for (ownerFqn in enclosingClasses) {
         for (fqn in listOf(ownerFqn) + sourceSupertypeFqns(ownerFqn)) {
             val comp = service.sourceCompanionFqn(fqn)?.takeIf { it !in liveOwners } ?: continue
-            service.membersForCompletion(comp, emptyList(), namePrefix)
-                .filter { it.isExtension && it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets }
+            service.membersForCompletion(comp, emptyList(), namePrefix, exactName && namePrefix.isNotEmpty())
+                .filter { it.isExtension && (it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets || genericReceiverAccepts(it, recvTargets)) }
                 .forEach { out += bindMemberExtensionReceiver(it, receiverType) }
         }
     }
     return out
+}
+
+/** [scopeMemberExtensions] for a type-parameter receiver: the enclosing classes' member extensions whose receiver
+ *  is written as that same type parameter (`T.foo()`, `T?.foo()`). */
+private fun KotlinResolver.typeParameterMemberExtensions(
+    offset: Int,
+    receiverType: KotlinType,
+    namePrefix: String,
+    exactName: Boolean,
+): List<KotlinSymbol> {
+    val tp = receiverType.qualifiedName
+    fun matches(n: String) = namePrefix.isEmpty() || (if (exactName) n == namePrefix else n.startsWith(namePrefix, ignoreCase = true))
+    val out = ArrayList<KotlinSymbol>()
+    var node: KtElement? = elementAt(offset)
+    while (node != null) {
+        if (node is KtClassOrObject && node is KtTypeParameterListOwner && node.typeParameters.any { it.name == tp }) {
+            // A parameter bounded by another of the class's (`E1 : T`) is a `T` too, so `fun T.bar()` applies.
+            val chain = LinkedHashSet<String>()
+            var cur: String? = tp
+            while (cur != null && chain.add(cur)) {
+                val bound = node.typeParameters.firstOrNull { it.name == cur }?.extendsBound?.text?.trim()?.removeSuffix("?")?.trim()
+                cur = bound?.takeIf { b -> node.typeParameters.any { it.name == b } }
+            }
+            for (d in node.declarations) {
+                if (d !is KtCallableDeclaration) continue
+                val name = d.name ?: continue
+                if (!matches(name)) continue
+                val recv = d.receiverTypeReference?.text?.trim()?.removeSuffix("?")?.trim() ?: continue
+                if (recv !in chain) continue
+                sameFileMemberExtension(d, recv)?.let { out += it }
+            }
+            break
+        }
+        node = node.parent
+    }
+    return out
+}
+
+/** Whether [ext]'s receiver is its own type parameter (`fun <T> T.invoke`) whose bound admits a receiver of [recvTargets]. */
+private fun genericReceiverAccepts(ext: KotlinSymbol, recvTargets: Set<String>): Boolean {
+    val tp = ext.receiverTypeParam ?: return false
+    if (tp !in ext.typeParameters) return false
+    val bound = ext.typeParameterBounds.getOrNull(ext.typeParameters.indexOf(tp)) as? dev.ide.lang.kotlin.symbols.KotlinType
+    // No recorded bound means "unbounded" only for a source declaration; a library symbol may simply not carry it.
+    if (bound == null) return ext.origin.fromSource
+    return bound.qualifiedName == "kotlin.Any" || bound.qualifiedName in recvTargets
 }
 
 /** The receiver FQNs a member extension may be declared on to apply to [receiverType]: the type itself plus
@@ -174,25 +242,28 @@ private fun KotlinResolver.importedSingletonExtensions(
     receiverType: KotlinType,
     namePrefix: String,
     liveOwners: Set<String>,
+    exactName: Boolean = false,
 ): List<KotlinSymbol> {
     val out = ArrayList<KotlinSymbol>()
     for (imp in fileContext.imports) {
-        val container = if (imp.isStar) imp.fqn else imp.fqn.substringBeforeLast('.', "")
+        if (!imp.containerCapitalized) continue
+        val container = imp.container
         if (container.isEmpty() || container in liveOwners) continue
-        if (container.substringAfterLast('.').firstOrNull()?.isUpperCase() != true) continue
         // A non-star import names ONE member, so a prefix that can't match it skips the lookup entirely.
-        val member = if (imp.isStar) null else imp.fqn.substringAfterLast('.')
-        if (member != null && namePrefix.isNotEmpty() && !member.startsWith(namePrefix, ignoreCase = true)) continue
+        val member = if (imp.isStar) null else imp.lastSegment
+        if (member != null && namePrefix.isNotEmpty() &&
+            !(if (exactName) member == namePrefix else member.startsWith(namePrefix, ignoreCase = true))) continue
+        val exact = exactName && namePrefix.isNotEmpty() && member == null
         val candidates =
-            if (service.isSingletonObject(container)) service.membersForCompletion(container, emptyList(), member ?: namePrefix)
+            if (service.isSingletonObject(container)) service.membersForCompletion(container, emptyList(), member ?: namePrefix, exact)
             // Not a singleton itself: the import may still reach its COMPANION's member (`import Foo.bar`),
             // or, for a Java container, its statics.
             else service.companionMembersFor(container, member ?: namePrefix)
-                .ifEmpty { service.membersForCompletion(container, emptyList(), member ?: namePrefix)
+                .ifEmpty { service.membersForCompletion(container, emptyList(), member ?: namePrefix, exact)
                     .filter { Modifier.STATIC in it.modifiers } }
         candidates.asSequence()
             .filter { member == null || it.name == member }
-            .filter { it.isExtension && it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets }
+            .filter { it.isExtension && (it.receiverTypeFqn != null && it.receiverTypeFqn in recvTargets || genericReceiverAccepts(it, recvTargets)) }
             .forEach { out += bindMemberExtensionReceiver(it, receiverType) }
     }
     return out
@@ -226,12 +297,12 @@ internal fun KotlinResolver.importedSingletonMembers(
 ): List<KotlinSymbol> {
     var out: ArrayList<KotlinSymbol>? = null
     for (imp in fileContext.imports) {
-        if (imp.alias != null) continue
-        val container = if (imp.isStar) imp.fqn else imp.fqn.substringBeforeLast('.', "")
+        if (imp.alias != null || !imp.containerCapitalized) continue
+        // An import through a project typealias (`import testPack.MyTypeAlias.*`) reaches the aliased class.
+        val container = imp.container.let { c -> if (c.isEmpty()) c else service.typeAliasClassifierByFqn(c) ?: c }
         if (container.isEmpty()) continue
-        if (container.substringAfterLast('.').firstOrNull()?.isUpperCase() != true) continue
         // A non-star import names ONE member, so a name that can't match it skips the lookup entirely.
-        val member = if (imp.isStar) null else imp.fqn.substringAfterLast('.')
+        val member = if (imp.isStar) null else imp.lastSegment
         if (member != null && namePrefix.isNotEmpty()) {
             if (exactName) {
                 if (member != namePrefix) continue
@@ -262,6 +333,17 @@ internal fun KotlinResolver.importedSingletonMembers(
             if (member == null && c.name in IMPORTED_OBJECT_NOISE) continue // a star import shouldn't shadow these
             (out ?: ArrayList<KotlinSymbol>().also { out = it }) += c
         }
+        // An ENUM's entries are neither object nor companion members, but `import pkg.Color.*` (or
+        // `import kotlin.annotation.AnnotationTarget.*` for `@Target(CLASS)`) puts them in scope by name all the
+        // same, and `import pkg.Color.RED` names one.
+        if (candidates.isEmpty() || member != null) {
+            val wanted = member ?: namePrefix
+            for (c in service.enumConstantsOf(container)) {
+                val hit = if (member != null || exactName) wanted.isEmpty() || c.name == wanted
+                else c.name.startsWith(wanted, ignoreCase = true)
+                if (hit) (out ?: ArrayList<KotlinSymbol>().also { out = it }) += c
+            }
+        }
     }
     return out ?: emptyList()
 }
@@ -278,10 +360,17 @@ internal fun KotlinResolver.bindMemberExtensionReceiver(
 ): KotlinSymbol {
     val bindings = HashMap<String, TypeRef>()
     ext.receiverTypeParam?.let { bindings[it] = receiverType }
+    // Through nested arguments too: `val <X> Property<LoadingValue<X>>.liveLoaded: X` on a
+    // `Property<LoadingValue<AsyncModule>>` binds `X` to `AsyncModule`.
+    fun unify(declared: KotlinType, actual: TypeRef?) {
+        val a = actual as? KotlinType ?: return
+        if (declared.isTypeParameter) { bindings.getOrPut(declared.qualifiedName) { a }; return }
+        if (declared.qualifiedName != a.qualifiedName) return
+        declared.typeArguments.forEachIndexed { j, d -> (d as? KotlinType)?.let { unify(it, a.typeArguments.getOrNull(j)) } }
+    }
     ext.receiverTypeArgs.forEachIndexed { i, ra ->
         val k = ra as? KotlinType ?: return@forEachIndexed
-        if (k.isTypeParameter && i < receiverType.typeArguments.size) bindings[k.qualifiedName] =
-            receiverType.typeArguments[i]
+        if (i < receiverType.typeArguments.size) unify(k, receiverType.typeArguments[i])
     }
     return if (bindings.isEmpty()) ext else service.substituteSymbol(ext, bindings)
 }
@@ -293,10 +382,13 @@ internal fun KotlinResolver.sameFileMemberExtension(
     receiverFqn: String
 ): KotlinSymbol? {
     val name = d.name ?: return null
-    val recvArgs = service.typeFromText(
-        d.receiverTypeReference?.text,
-        fileContext
-    )?.typeArguments ?: emptyList()
+    // The declaration's OWN type parameters (`fun <T, R> Parser<T, R>.getValue(…): Parser<T, R>`) are marked as
+    // such, so a receiver binds them as it does an indexed extension's.
+    val tps = d.typeParameters.mapNotNull { it.name }
+    val tpSet = tps.toSet()
+    fun typed(text: String?): KotlinType? =
+        service.typeFromText(text, fileContext)?.let { if (tpSet.isEmpty()) it else service.markTypeParameters(it, tpSet) }
+    val recvArgs = typed(d.receiverTypeReference?.text)?.typeArguments ?: emptyList()
     val declNode = runCatching { parsed.adapt(d) }.getOrNull()
     return when (d) {
         is KtNamedFunction -> {
@@ -304,13 +396,15 @@ internal fun KotlinResolver.sameFileMemberExtension(
             val retText = d.typeReference?.text
             KotlinSymbol(
                 name = name, kind = SymbolKind.METHOD,
-                type = retText?.let { service.typeFromText(it, fileContext) },
+                type = retText?.let { typed(it) },
                 origin = SOURCE, receiverTypeFqn = receiverFqn,
                 signature = "(" + params.joinToString(", ") { (n, t) -> "$n: ${t ?: "?"}" } + ")" + (retText?.let { ": $it" }
                     ?: ""),
-                paramTypes = params.map { (_, t) -> service.typeFromText(t, fileContext) },
+                typeParameters = tps,
+                paramTypes = params.map { (_, t) -> typed(t) },
                 paramNames = params.map { (n, _) -> n },
                 paramHasDefault = d.valueParameters.map { it.hasDefaultValue() },
+                isInfix = d.hasModifier(KtTokens.INFIX_KEYWORD),
                 varargParamIndex = d.valueParameters.indexOfFirst { it.isVarArg },
                 isComposable = d.annotationEntries.any { it.shortName?.asString() == "Composable" },
                 receiverTypeArgs = recvArgs,

@@ -2,6 +2,15 @@ package dev.ide.lang.kotlin
 
 import dev.ide.kotlin.syntax.psi.KtAnnotationEntry
 import dev.ide.kotlin.syntax.psi.KtArrayAccessExpression
+import dev.ide.kotlin.syntax.psi.KtValueArgumentList
+import dev.ide.kotlin.syntax.psi.KtValueArgument
+import dev.ide.kotlin.syntax.psi.KtPropertyDelegate
+import dev.ide.kotlin.syntax.psi.KtPrimaryConstructor
+import dev.ide.kotlin.syntax.psi.KtParenthesizedExpression
+import dev.ide.kotlin.syntax.psi.KtNullableType
+import dev.ide.kotlin.syntax.psi.KtLabeledExpression
+import dev.ide.kotlin.syntax.psi.KtConstructorDelegationCall
+import dev.ide.kotlin.syntax.psi.KtAnnotatedExpression
 import dev.ide.kotlin.syntax.psi.KtBinaryExpression
 import dev.ide.kotlin.syntax.psi.KtBinaryExpressionWithTypeRHS
 import dev.ide.kotlin.syntax.psi.KtBlockExpression
@@ -25,25 +34,31 @@ import dev.ide.kotlin.syntax.psi.KtLambdaExpression
 import dev.ide.kotlin.syntax.psi.KtNameReferenceExpression
 import dev.ide.kotlin.syntax.psi.KtNamedFunction
 import dev.ide.kotlin.syntax.psi.KtParameter
+import dev.ide.kotlin.syntax.psi.KtObjectDeclaration
 import dev.ide.kotlin.syntax.psi.KtPrefixExpression
 import dev.ide.kotlin.syntax.psi.KtProperty
 import dev.ide.kotlin.syntax.psi.KtPropertyAccessor
 import dev.ide.kotlin.syntax.psi.KtQualifiedExpression
+import dev.ide.kotlin.syntax.psi.KtThisExpression
+import dev.ide.kotlin.syntax.psi.KtUnaryExpression
 import dev.ide.kotlin.syntax.psi.KtReturnExpression
 import dev.ide.kotlin.syntax.psi.KtSafeQualifiedExpression
 import dev.ide.kotlin.syntax.psi.KtSecondaryConstructor
 import dev.ide.kotlin.syntax.psi.KtSuperTypeCallEntry
 import dev.ide.kotlin.syntax.psi.KtSuperTypeEntry
 import dev.ide.kotlin.syntax.psi.KtThrowExpression
+import dev.ide.kotlin.syntax.psi.KtPostfixExpression
 import dev.ide.kotlin.syntax.psi.KtTokens
 import dev.ide.kotlin.syntax.psi.KtTryExpression
 import dev.ide.kotlin.syntax.psi.KtTypeAlias
+import dev.ide.kotlin.syntax.psi.KtTypeProjection
 import dev.ide.kotlin.syntax.psi.KtTypeReference
 import dev.ide.kotlin.syntax.psi.KtUserType
 import dev.ide.kotlin.syntax.psi.KtWhenConditionWithExpression
 import dev.ide.kotlin.syntax.psi.KtWhenExpression
 import dev.ide.kotlin.syntax.psi.KtWhileExpressionBase
 import dev.ide.kotlin.syntax.psi.getStrictParentOfType
+import dev.ide.kotlin.syntax.psi.parents
 import dev.ide.lang.dom.Diagnostic
 import dev.ide.lang.dom.Severity
 import dev.ide.lang.dom.TextRange
@@ -51,6 +66,9 @@ import dev.ide.lang.kotlin.parse.KotlinDomNode
 import dev.ide.lang.kotlin.parse.unwrapParen
 import dev.ide.lang.kotlin.resolve.KotlinResolver
 import dev.ide.lang.kotlin.resolve.callTargets
+import dev.ide.lang.kotlin.resolve.resolveCalleeFunction
+import dev.ide.lang.kotlin.resolve.lambdaParamIndex
+import dev.ide.lang.kotlin.resolve.enclosingCallAndParamIndex
 import dev.ide.lang.kotlin.resolve.canonicalTypeForCheck
 import dev.ide.lang.kotlin.resolve.constructorTypeFqn
 import dev.ide.lang.kotlin.resolve.enclosingClassFqnOf
@@ -60,11 +78,14 @@ import dev.ide.lang.kotlin.resolve.inferType
 import dev.ide.lang.kotlin.resolve.isTypeParameterInScope
 import dev.ide.lang.kotlin.resolve.isTypeReceiver
 import dev.ide.lang.kotlin.resolve.iterationElementType
+import dev.ide.lang.kotlin.resolve.localTypesInScope
 import dev.ide.lang.kotlin.resolve.localsAt
 import dev.ide.lang.kotlin.resolve.pathGuardedNonNullAt
 import dev.ide.lang.kotlin.resolve.receiverForMembers
 import dev.ide.lang.kotlin.resolve.scopeMemberExtensions
 import dev.ide.lang.kotlin.resolve.smartCastNonNull
+import dev.ide.lang.kotlin.resolve.flowProvenNull
+import dev.ide.lang.kotlin.resolve.flowProvenTypes
 import dev.ide.lang.kotlin.symbols.KotlinSymbol
 import dev.ide.lang.kotlin.symbols.KotlinType
 import dev.ide.lang.kotlin.symbols.TypeRendering
@@ -97,6 +118,20 @@ private val ARITHMETIC_NAMES = mapOf(
     KtTokens.DIV to "div", KtTokens.PERC to "rem",
 )
 private val ORDER_TOKENS = setOf(KtTokens.LT, KtTokens.GT, KtTokens.LTEQ, KtTokens.GTEQ)
+
+/** The other binary conventions [undefinedBinaryOperator] judges. */
+private val CONVENTION_NAMES = mapOf(
+    KtTokens.RANGE to "rangeTo", KtTokens.RANGE_UNTIL to "rangeUntil",
+    KtTokens.LT to "compareTo", KtTokens.GT to "compareTo", KtTokens.LTEQ to "compareTo", KtTokens.GTEQ to "compareTo",
+    KtTokens.IN_KEYWORD to "contains", KtTokens.NOT_IN to "contains",
+)
+
+/** A compound assignment's `xAssign` and the plain operator it falls back to. */
+private val COMPOUND_NAMES = mapOf(
+    KtTokens.PLUSEQ to ("plusAssign" to "plus"), KtTokens.MINUSEQ to ("minusAssign" to "minus"),
+    KtTokens.MULTEQ to ("timesAssign" to "times"), KtTokens.DIVEQ to ("divAssign" to "div"),
+    KtTokens.PERCEQ to ("remAssign" to "rem"),
+)
 
 private val NUMERIC_CONVERSIONS = setOf("toInt", "toLong", "toShort", "toByte", "toDouble", "toFloat")
 
@@ -150,12 +185,33 @@ internal fun KotlinSemanticChecks.valueMismatch(
     if (declared == null) return null
     val e = unwrapParen(value)
     if (!platformTarget) nullForNonNull(declared, e)?.let { return it }
+    if (flowFits(declared, e, resolver)) return null
+    // A choice one of whose branches is a smart-cast name inference cannot type in full is judged branch by branch.
+    if (depth == 0 && choiceBranches(e).any { b -> branchValue(b)?.let { unwrapParen(it) }?.let { flowFits(declared, it, resolver) } == true }) {
+        for (alt in choiceBranches(e)) {
+            val leaf = branchValue(alt) ?: continue
+            valueMismatch(declared, leaf, resolver, platformTarget, strictNumeric, depth + 1)?.let { return it }
+        }
+        return null
+    }
+    if (isFunctionLiteral(e) && neverAFunction(declared)) {
+        // Inference types a lambda from what is expected of it, so with no function type expected it may have none.
+        resolver.inferType(e)?.let { return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, it, declared) }
+        return error(e, "Type mismatch: a function value is not a ${renderType(declared)}", KotlinDiagnosticCodes.TYPE_MISMATCH)
+    }
     val actual = resolver.inferType(e)
     // A branch of a choice is judged on its own only when its type is one to rely on: a literal, or a local
     // whose type was just read off its declaration. The whole expression (depth 0) keeps the rule it had.
     val trusted = depth == 0 || plainlyTyped(e)
-    if (trusted && (isMismatch(declared, actual) || (strictNumeric && numericMismatch(declared, actual, e)))) {
-        return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, actual!!, declared)
+    if (trusted && actual != null && isMismatch(declared, actual)) {
+        return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, actual, declared)
+    }
+    if (trusted && !platformTarget) typeArgumentMismatch(declared, e, resolver)?.let {
+        return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, it, declared)
+    }
+    if (trusted && strictNumeric && numericMismatch(declared, actual, e, resolver)) {
+        val shown = actual ?: numericConst(e, resolver)?.let { service.typeByFqn(it.default) } ?: return null
+        return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, shown, declared)
     }
     if (depth < 6) {
         val alternatives: List<KtExpression?> = when (e) {
@@ -166,6 +222,11 @@ internal fun KotlinSemanticChecks.valueMismatch(
             else -> emptyList()
         }
         for (alt in alternatives) {
+            // An empty block branch is `Unit`, which only `Unit`, `Any` and nullable types take
+            // (`fun f(): Int = if (c) {} else 2`).
+            if (e is KtIfExpression && alt is KtBlockExpression && alt.statements.isEmpty() && !declared.nullable &&
+                !declared.isTypeParameter && canonicalName(declared).let { it != UNIT && it != "kotlin.Any" && it != NOTHING && service.isKnownType(it) }
+            ) return error(e, "Type mismatch: inferred type is Unit but ${renderType(declared)} was expected", KotlinDiagnosticCodes.TYPE_MISMATCH)
             val leaf = branchValue(alt) ?: continue
             valueMismatch(declared, leaf, resolver, platformTarget, strictNumeric, depth + 1)?.let { return it }
         }
@@ -175,6 +236,48 @@ internal fun KotlinSemanticChecks.valueMismatch(
         return mismatchDiagnostic(e.textRange.startOffset, e.textRange.endOffset, actual!!.withNullable(true), declared)
     }
     return null
+}
+
+/** A lambda or an anonymous function: a function value by its very shape, whatever inference makes of it. */
+internal fun isFunctionLiteral(e: KtExpression): Boolean = when (val u = unwrapParen(e)) {
+    is KtLambdaExpression -> true
+    is KtNamedFunction -> u.nameIdentifier == null
+    is KtLabeledExpression -> u.baseExpression?.let(::isFunctionLiteral) == true
+    else -> false
+}
+
+/**
+ * Whether no function value can ever be a [declared]: a known class, not an interface (a lambda is a
+ * `Serializable`, and a fun interface takes one through SAM conversion), not `Any`, and no function type.
+ */
+internal fun KotlinSemanticChecks.neverAFunction(declared: KotlinType): Boolean {
+    if (declared.isTypeParameter) return false
+    val d = canonicalTypeForCheck(declared)
+    // A lambda's value may be coerced to Unit where Unit is expected of it, so leave Unit out too.
+    if (d.qualifiedName == "kotlin.Any" || d.qualifiedName == UNIT || isFunctional(d) || TypeRendering.isFunctionType(d.qualifiedName)) return false
+    if (d.qualifiedName.startsWith("kotlin.jvm.internal.") || d.qualifiedName == "kotlin.Function") return false
+    if (service.isInterfaceType(d.qualifiedName) != false) return false
+    return isConcreteNonFunction(d)
+}
+
+/**
+ * Whether the flow shows the value [e] fits [declared] where its inferred type does not: a value proven null
+ * (`if (i == null) foo(i)`) is a `Nothing?`, which fits any nullable type, and a value smart-cast to several types
+ * at once (`b is A && b is C`) has all of them while inference names one.
+ */
+internal fun flowFits(declared: KotlinType, e: KtExpression, resolver: KotlinResolver): Boolean {
+    if (e !is KtNameReferenceExpression || declared.isTypeParameter) return false
+    if (declared.nullable && resolver.flowProvenNull(e)) return true
+    return resolver.flowProvenTypes(e, deep = true).any { declared.withNullable(false).isAssignableFrom(it) }
+}
+
+/** The alternatives of an `if`/`when`/`try`/`?:` whose value is one of them. */
+private fun choiceBranches(e: KtExpression): List<KtExpression?> = when (e) {
+    is KtIfExpression -> if (e.`else` != null) listOf(e.then, e.`else`) else emptyList()
+    is KtWhenExpression -> e.entries.map { it.expression }
+    is KtTryExpression -> listOf<KtExpression?>(e.tryBlock) + e.catchClauses.map { it.catchBody }
+    is KtBinaryExpression -> if (e.operationToken == KtTokens.ELVIS) listOf(e.right) else emptyList()
+    else -> emptyList()
 }
 
 /** The value a branch produces: itself, or the last statement of its block when that is an expression. */
@@ -222,15 +325,31 @@ internal fun KotlinSemanticChecks.isMapRead(e: KtArrayAccessExpression, resolver
     return canonicalName(bt).let { it == "kotlin.collections.Map" || it == "kotlin.collections.MutableMap" }
 }
 
+/** Whether every function [call] can resolve to is a Kotlin declaration whose written return type is nullable. A
+ *  Java method's nullability comes from annotations the model reads differently, and a result nullable only
+ *  through an inferred type argument is inference's opinion; neither is taken. */
+private fun KotlinSemanticChecks.declaresNullableResult(call: KtCallExpression, resolver: KotlinResolver): Boolean {
+    val targets = runCatching { resolver.callTargets(call) }.getOrDefault(emptyList())
+    if (targets.isEmpty()) return false
+    return targets.all { sym ->
+        sym.kind == SymbolKind.METHOD && (sym.type as? KotlinType)?.nullable == true &&
+            sym.declaringClassFqn?.let { service.isJavaType(it) } != true
+    }
+}
+
 /** Whether [value]'s nullable type can be trusted: no guard this model cannot follow stands in front of it. */
 internal fun KotlinSemanticChecks.reliablyNullable(value: KtExpression, resolver: KotlinResolver): Boolean {
     return when (val e = unwrapParen(value)) {
-        is KtNameReferenceExpression -> firstUseOfNullableLocal(e, resolver)
+        is KtNameReferenceExpression -> firstUseOfNullableLocal(e, resolver) || flowNullableLocal(e, resolver)
         is KtSafeQualifiedExpression -> {
             val receiver = e.receiverExpression
             resolver.inferType(receiver)?.nullable == true && reliablyNullable(receiver, resolver)
         }
         is KtBinaryExpressionWithTypeRHS -> e.operationReference.text.trim() == "as?"
+        // A call's result is never smart cast: a return type its callee writes nullable (`fun f(): T?`, `Map.get`)
+        // is the type of the value.
+        is KtCallExpression -> declaresNullableResult(e, resolver)
+        is KtDotQualifiedExpression -> (e.selectorExpression as? KtCallExpression)?.let { declaresNullableResult(it, resolver) } == true
         is KtArrayAccessExpression -> {
             // `map[key]` on a real Map. Anything else with a nullable `get` may be a user operator.
             isMapRead(e, resolver) &&
@@ -249,9 +368,15 @@ internal fun KotlinSemanticChecks.reliablyNullable(value: KtExpression, resolver
  * expression is not: a constant one (`1 + 2`) adapts like a literal, and the promotion rules for the rest
  * are a guess this check does not need to make.
  */
-internal fun KotlinSemanticChecks.numericMismatch(declared: KotlinType?, actual: KotlinType?, value: KtExpression): Boolean {
-    if (declared == null || actual == null) return false
+internal fun KotlinSemanticChecks.numericMismatch(
+    declared: KotlinType?, actual: KotlinType?, value: KtExpression, resolver: KotlinResolver? = null,
+): Boolean {
+    if (declared == null || declared.isTypeParameter) return false
     val d = canonicalName(declared)
+    // A number expression read off the tree (literals in range, arithmetic on them, conversions, plainly
+    // typed names) settles it whatever inference made of it.
+    if (d in NUMERIC && resolver != null) numericConst(value, resolver)?.let { return d !in it.types }
+    if (actual == null) return false
     val a = canonicalName(actual)
     if (d !in NUMERIC || a !in NUMERIC || d == a) return false
     var e = unwrapParen(value)
@@ -348,37 +473,79 @@ private fun KotlinSemanticChecks.hasOperator(type: KotlinType, name: String, at:
     return resolver.scopeMemberExtensions(at.textRange.startOffset, c, name).any { it.name == name }
 }
 
-/** `"a" - 1`, `true * 2`: an arithmetic operator on a built-in value type that does not define it. */
+/**
+ * `"a" - 1`, `true * 2`, `Foo() + x`, `x in obj`, `a < b`: a binary operator whose convention function the
+ * receiver does not have at all. Judged where the receiver's members are known in full: a built-in value type, or
+ * a project class or object whose whole supertype chain is project source or built-ins. Any member of that name
+ * (an `operator`-less one is OPERATOR_MODIFIER_REQUIRED, a mistyped one an argument error), an applicable
+ * extension in scope, or a member extension of an implicit receiver backs off. A compound `x += y` needs neither
+ * `plusAssign` nor `plus`.
+ */
 internal fun KotlinSemanticChecks.undefinedBinaryOperator(e: KtBinaryExpression, resolver: KotlinResolver): Diagnostic? {
-    val name = ARITHMETIC_NAMES[e.operationToken] ?: return null
+    val token = e.operationToken ?: return null
+    val compound = COMPOUND_NAMES[token]
+    val name = compound?.second ?: ARITHMETIC_NAMES[token] ?: CONVENTION_NAMES[token] ?: return null
     val left = e.left ?: return null
-    e.right ?: return null
-    val lt = resolver.inferType(left) ?: return null
-    if (lt.isTypeParameter || lt.nullable || canonicalName(lt) !in CLOSED_VALUE_TYPES) return null
-    if (hasOperator(lt, name, left, resolver)) return null
+    val right = e.right ?: return null
+    // `a in b` calls `b.contains(a)`.
+    val receiver = if (name == "contains") right else left
+    // An import renamed to the convention name (`import a.plus as minus`) is what `-` calls.
+    if (renamedOnImport(resolver, name, compound?.first)) return null
+    // `a[i] += v` goes through `get`/`set`: judged elsewhere.
+    if (compound != null && unwrapParen(left) !is KtNameReferenceExpression) return null
+    val lt = operatorReceiverType(receiver, resolver) ?: return null
+    if (lt.isTypeParameter || lt.nullable) return null
+    if (!membersKnownInFull(lt)) return null
+    if (hasOperator(lt, name, receiver, resolver)) return null
+    if (compound != null && hasOperator(lt, compound.first, receiver, resolver)) return null
     return error(
         e.operationReference, "Unresolved reference: $name (no such operator on ${renderType(lt)})",
         KotlinDiagnosticCodes.UNRESOLVED,
     )
 }
 
-/** `!5`, `-"a"`: a unary operator on a built-in value type that does not define it. */
-internal fun KotlinSemanticChecks.undefinedUnaryOperator(e: KtPrefixExpression, resolver: KotlinResolver): Diagnostic? {
+/** `!5`, `-"a"`, `+obj`, `s++`: a unary operator whose convention function the receiver does not have at all
+ *  (judged as [undefinedBinaryOperator] judges a binary one). */
+internal fun KotlinSemanticChecks.undefinedUnaryOperator(e: KtUnaryExpression, resolver: KotlinResolver): Diagnostic? {
     val name = when (e.operationToken) {
         KtTokens.EXCL -> "not"; KtTokens.MINUS -> "unaryMinus"; KtTokens.PLUS -> "unaryPlus"
+        KtTokens.PLUSPLUS -> "inc"; KtTokens.MINUSMINUS -> "dec"
         else -> return null
     }
     val operand = e.baseExpression ?: return null
-    val t = resolver.inferType(operand) ?: return null
+    if (renamedOnImport(resolver, name, null)) return null
+    val t = operatorReceiverType(operand, resolver) ?: return null
     if (t.isTypeParameter || t.nullable) return null
     val tn = canonicalName(t)
-    val closed = tn in CLOSED_VALUE_TYPES || (name == "not" && tn in NUMERIC)
-    if (!closed || (name == "not" && tn == BOOLEAN)) return null
+    if (name == "not" && tn == BOOLEAN) return null
+    if (!(name == "not" && tn in NUMERIC) && !membersKnownInFull(t)) return null
     if (hasOperator(t, name, operand, resolver)) return null
     return error(
         e.operationReference, "Unresolved reference: $name (no such operator on ${renderType(t)})",
         KotlinDiagnosticCodes.UNRESOLVED,
     )
+}
+
+private fun renamedOnImport(resolver: KotlinResolver, name: String, other: String?): Boolean =
+    resolver.fileContext.imports.any { it.alias != null && (it.alias == name || it.alias == other) }
+
+/** The type an operator's receiver [e] has. A class NAME used as a value is its companion object, which the
+ *  inferred type does not say, so only an object's own name is judged. */
+private fun KotlinSemanticChecks.operatorReceiverType(e: KtExpression, resolver: KotlinResolver): KotlinType? {
+    val t = resolver.inferType(e) ?: return null
+    if (!resolver.isTypeReceiver(e)) return t
+    val decl = (service.sourceClass(t.qualifiedName)?.node as? KotlinDomNode)?.psi
+    return t.takeIf { decl is KtObjectDeclaration && !decl.isCompanion() }
+}
+
+/** Whether every function [t] could offer as an operator convention is known: a built-in value type, or a
+ *  project class/object whose supertype chain is wholly project source or built-ins. A numeric type has all the
+ *  arithmetic, comparison and inc/dec operators, so only `not` is judged on one (above). */
+private fun KotlinSemanticChecks.membersKnownInFull(t: KotlinType): Boolean {
+    val c = canonicalName(t)
+    if (c in CLOSED_VALUE_TYPES) return true
+    if (c in NUMERIC) return false
+    return service.sourceClass(c) != null && service.supertypeClosureKnown(c)
 }
 
 /** `a + 1` / `a < b` where `a` is a nullable number: the operator is a member call on a nullable receiver. */
@@ -472,17 +639,119 @@ private fun KotlinSemanticChecks.lambdaParameterDiagnostic(lambda: KtLambdaExpre
  *  with: its parameter count, then the value its body ends on. */
 internal fun KotlinSemanticChecks.declaredLambdaMismatch(declaredText: String?, init: KtExpression?, resolver: KotlinResolver): Diagnostic? {
     if (declaredText == null || init == null) return null
-    val lambda = unwrapParen(init) as? KtLambdaExpression ?: return null
     val declared = service.typeFromText(declaredText, resolver.fileContext, enclosingClassFqnOf(init)) ?: return null
+    return lambdaAgainstFunctionType(declared, init, resolver)
+}
+
+/**
+ * A lambda (labeled or not) given where the function type [declared] is expected: its parameter count, then what it
+ * returns, by its last statement and by each `return@label` aimed at it (RETURN_TYPE_MISMATCH). An assignment as the
+ * last statement, and a `return@label` with no value, give `Unit`, which no other result type takes. `Function<R>`
+ * has no parameter count to check but a result all the same.
+ */
+internal fun KotlinSemanticChecks.lambdaAgainstFunctionType(declared: KotlinType, init: KtExpression, resolver: KotlinResolver): Diagnostic? {
+    var e = unwrapParen(init)
+    var label: String? = null
+    if (e is KtLabeledExpression) {
+        label = e.getLabelName()
+        e = e.baseExpression?.let { unwrapParen(it) } ?: return null
+    }
+    if (e is KtNamedFunction && e.nameIdentifier == null && label == null) return anonymousAgainstFunctionType(declared, e, resolver)
+    val lambda = e as? KtLambdaExpression ?: return null
     if (declared.nullable) return null
-    val arity = lambdaArity(declared) ?: return null
+    val arity = lambdaArity(declared)
+    val plainFunction = canonicalName(declared) == "kotlin.Function" && declared.typeArguments.size == 1
+    if (arity == null && !plainFunction) return null
     val n = lambda.valueParameters.size
-    if (n > 0 && n != arity) return lambdaParameterDiagnostic(lambda, arity)
+    // A lambda written for a DECLARED extension function type may also name the receiver as its first parameter
+    // (`val f: String.() -> String = { x -> x }`, KT-81115), so one more parameter than the type's is fine. Not so
+    // for a call's argument, where it is a mismatch (KT-56138).
+    if (arity != null && n > 0 && n != arity && !(declared.isExtensionFunctionType && n == arity + 1)) return lambdaParameterDiagnostic(lambda, arity)
     val result = declared.typeArguments.lastOrNull() as? KotlinType ?: return null
-    if (result.isTypeParameter || canonicalName(result) == UNIT) return null // Unit coerces any last statement
+    if (result.isTypeParameter || result.projection == "*") return null
+    val rn = canonicalName(result)
+    // Unit coerces the last statement. A value handed back by `return@label` is checked against the lambda's return
+    // type as it stands, each one on its own ([labeledReturnMismatch]).
+    if (rn == UNIT) return null
+    val concreteResult = !result.nullable && service.isKnownType(rn) && rn != NOTHING
+    // A bare `return@label` gives `Unit`, which no other result type takes.
+    if (label != null && concreteResult) {
+        returnsTo(lambda, label).firstOrNull { it.returnedExpression == null }?.let { ret ->
+            return error(ret, "Type mismatch: inferred type is Unit but ${renderType(result)} was expected", KotlinDiagnosticCodes.TYPE_MISMATCH)
+        }
+    }
     val last = lambda.bodyExpression?.statements?.lastOrNull()?.takeIf { it !is KtDeclaration } ?: return null
     if (last is KtReturnExpression) return null
-    return valueMismatch(result, last, resolver)
+    // An `if` with no `else` is a statement whose value is `Unit` (K2 types it so), whatever its branch holds.
+    if (last is KtIfExpression && last.`else` == null) {
+        if (concreteResult && rn != "kotlin.Any") {
+            return error(last, "Type mismatch: inferred type is Unit but ${renderType(result)} was expected", KotlinDiagnosticCodes.TYPE_MISMATCH)
+        }
+        return null
+    }
+    if (last is KtBinaryExpression && last.operationToken in ASSIGNMENT_TOKENS) {
+        if (concreteResult && rn != "kotlin.Any") {
+            return error(last, "Type mismatch: inferred type is Unit but ${renderType(result)} was expected", KotlinDiagnosticCodes.TYPE_MISMATCH)
+        }
+        return null
+    }
+    return valueMismatch(result.withProjection(""), last, resolver)
+}
+
+/**
+ * An anonymous function given where the function type [declared] is expected. Its parameters (receiver included)
+ * must match in number and take what the type passes (INITIALIZER_TYPE_MISMATCH); an expression body is checked
+ * against the expected result as it stands, with no coercion to `Unit` (RETURN_TYPE_MISMATCH), and a block body
+ * without a written result type returns `Unit`.
+ */
+private fun KotlinSemanticChecks.anonymousAgainstFunctionType(declared: KotlinType, fn: KtNamedFunction, resolver: KotlinResolver): Diagnostic? {
+    if (declared.nullable || lambdaArity(declared) == null) return null
+    val expectedAll = declared.typeArguments.dropLast(1).map { it as? KotlinType ?: return null }
+    val result = (declared.typeArguments.lastOrNull() as? KotlinType)?.withProjection("") ?: return null
+    val ownReceiver = fn.receiverTypeReference
+    val ownParams = listOfNotNull(ownReceiver) + fn.valueParameters.map { it.typeReference }
+    fun mismatch(): Diagnostic = error(fn, "Type mismatch: this function is not a ${renderType(declared)}", KotlinDiagnosticCodes.TYPE_MISMATCH)
+    if (ownParams.size != expectedAll.size) return mismatch()
+    if ((ownReceiver != null) != declared.isExtensionFunctionType) return null
+    val typing = KotlinStrictSubtyping(service)
+    for ((i, ref) in ownParams.withIndex()) {
+        val written = ref?.text ?: continue
+        if ('(' in written || '@' in written) return null
+        val p = service.typeFromText(written, resolver.fileContext, enclosingClassFqnOf(fn)) ?: return null
+        val expected = expectedAll[i].withProjection("")
+        if (typing.subtype(expected, p) == false) return mismatch()
+    }
+    if (result.isTypeParameter || !service.isKnownType(canonicalName(result))) return null
+    val body = fn.bodyExpression ?: return null
+    if (fn.hasBlockBody()) {
+        val writtenResult = fn.typeReference?.text
+        if (writtenResult == null) {
+            // `Unit` is a subtype of `Unit`, `Any` and the nullable types only.
+            val rn = canonicalName(result)
+            return if (!result.nullable && rn != UNIT && rn != "kotlin.Any") mismatch() else null
+        }
+        val produced = service.typeFromText(writtenResult, resolver.fileContext, enclosingClassFqnOf(fn)) ?: return null
+        return if (typing.subtype(produced, result) == false) mismatch() else null
+    }
+    if (isFunctionLiteral(body)) return lambdaAgainstFunctionType(result, body, resolver)
+    return valueMismatch(result, body, resolver)
+}
+
+private val ASSIGNMENT_TOKENS = setOf(KtTokens.EQ, KtTokens.PLUSEQ, KtTokens.MINUSEQ, KtTokens.MULTEQ, KtTokens.DIVEQ, KtTokens.PERCEQ)
+
+/** The `return@label` expressions in [lambda] that return from it: its own body and the lambdas nested in it, not
+ *  a nested function or class, nor a nested lambda that reuses the label. */
+private fun returnsTo(lambda: KtLambdaExpression, label: String): List<KtReturnExpression> {
+    val out = ArrayList<KtReturnExpression>()
+    fun visit(el: KtElement) {
+        if (el is KtNamedFunction || el is KtClassOrObject) return
+        if (el is KtLabeledExpression && el.getLabelName() == label) return
+        if (el is KtReturnExpression && el.getLabelName() == label) out += el
+        var c = el.firstChild
+        while (c != null) { (c as? KtElement)?.let(::visit); c = c.nextSibling }
+    }
+    lambda.bodyExpression?.let(::visit)
+    return out
 }
 
 /** `xs.forEach { a, b -> }`: a lambda argument whose parameter count fits NO overload of the call. Silent as
@@ -524,45 +793,22 @@ internal fun KotlinSemanticChecks.lambdaArgumentParameterCount(call: KtCallExpre
 
 // --- visibility ---------------------------------------------------------------------------------------------
 
-/** The FQN of the outermost class enclosing [e], or null at the top level. */
-private fun outermostClassFqn(e: KtElement): String? {
-    var out: KtClassOrObject? = null
-    var node: KtElement? = e
-    while (node != null) {
-        if (node is KtClassOrObject) out = node
-        node = node.parent
+/** `import a.foo` of a top-level declaration that is `private` in another file of the project: a private
+ *  top-level declaration is visible only inside its own file, so the import names nothing usable here. */
+internal fun KotlinSemanticChecks.privateTopLevelImports(file: KtFile): List<Diagnostic> {
+    val out = ArrayList<Diagnostic>()
+    val here = file.name.substringAfterLast('/')
+    for (imp in file.importDirectives) {
+        if (imp.isAllUnder) continue
+        val fqn = imp.importedFqName?.asString()?.takeIf { '.' in it } ?: continue
+        val files = service.privateTopLevelSourceFiles(fqn) ?: continue
+        if (files.any { it.substringAfterLast('/') == here }) continue
+        val ref = imp.importedReference ?: continue
+        val leaf = (ref as? dev.ide.kotlin.syntax.psi.KtDotQualifiedExpression)?.selectorExpression ?: ref
+        val name = fqn.substringAfterLast('.')
+        out += error(leaf, "Cannot access '$name': it is private in file", KotlinDiagnosticCodes.INVISIBLE_REFERENCE)
     }
-    return out?.fqName?.asString()
-}
-
-/** `a.p()` where `p` is private in a class this code is not written inside of. Members of one top-level
- *  class and everything nested in it see each other's privates closely enough that this leaves them alone. */
-internal fun KotlinSemanticChecks.privateMemberAccess(ref: KtNameReferenceExpression, resolver: KotlinResolver): Diagnostic? {
-    val parent = ref.parent
-    val receiver = when {
-        parent is KtQualifiedExpression && parent.selectorExpression === ref -> parent.receiverExpression
-        parent is KtCallExpression && parent.calleeExpression === ref ->
-            (parent.parent as? KtQualifiedExpression)?.takeIf { it.selectorExpression === parent }?.receiverExpression
-        else -> null
-    } ?: return null
-    val name = ref.getReferencedName()
-    if (name.isEmpty()) return null
-    val inferred = resolver.inferType(receiver) ?: return null
-    val recvType = resolver.receiverForMembers(inferred, receiver.textRange.startOffset) ?: return null
-    if (recvType.isTypeParameter || !service.isSourceClass(recvType.qualifiedName)) return null
-    val members = service.membersNamedForCheck(recvType.qualifiedName, recvType.typeArguments, name).filter { it.name == name }
-    if (members.isEmpty() || members.any { it.isExtension || Modifier.PRIVATE !in it.modifiers || !it.origin.fromSource }) return null
-    if (resolver.scopeMemberExtensions(ref.textRange.startOffset, recvType, name).any { it.name == name }) return null
-    fun ownerOf(m: KotlinSymbol): String? =
-        m.declaringClassFqn ?: m.sourcePsi()?.getStrictParentOfType<KtClassOrObject>()?.fqName?.asString()
-    val owner = ownerOf(members.first()) ?: return null
-    if (members.any { ownerOf(it) != owner }) return null
-    val here = outermostClassFqn(ref)
-    if (here != null && (owner == here || owner.startsWith("$here."))) return null
-    return error(
-        ref, "Cannot access '$name': it is private in '${owner.substringAfterLast('.')}'",
-        KotlinDiagnosticCodes.INVISIBLE_REFERENCE,
-    )
+    return out
 }
 
 /** A public top-level or member declaration whose signature names a `private` top-level class of this file
@@ -636,9 +882,11 @@ private fun isValDeclaration(psi: KtElement?): Boolean = when (psi) {
  * An assignment in a constructor or initializer is the property's initialization and is left alone.
  */
 internal fun KotlinSemanticChecks.valMemberReassignment(e: KtBinaryExpression, resolver: KotlinResolver): Diagnostic? {
+    if (e.operationToken in VAL_COMPOUND_ASSIGN) return valCompoundReassignment(e, resolver)
     if (e.operationToken != KtTokens.EQ) return null
     when (val left = e.left) {
-        is KtDotQualifiedExpression -> {
+        is KtDotQualifiedExpression, is KtSafeQualifiedExpression -> {
+            left as KtQualifiedExpression
             val selector = left.selectorExpression as? KtNameReferenceExpression ?: return null
             val name = selector.getReferencedName()
             val receiver = left.receiverExpression
@@ -651,27 +899,166 @@ internal fun KotlinSemanticChecks.valMemberReassignment(e: KtBinaryExpression, r
                 return error(selector, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
             }
             if (!service.isSourceClass(recvType.qualifiedName)) return null
-            // `this.x = …` in a constructor or initializer initializes the property.
-            if (unwrapParen(receiver).text == "this" && insideInitialization(e)) return null
             val members = service.membersNamedForCheck(recvType.qualifiedName, recvType.typeArguments, name).filter { it.name == name }
-            if (members.isEmpty() || members.any { it.isExtension || it.kind != SymbolKind.FIELD || !isValDeclaration(it.sourcePsi()) }) return null
+            if (members.isEmpty() || members.all { it.isExtension }) {
+                // `some.y = …` where `y` is a `val` extension property: it has no field, and no setter.
+                val extVals = members.isNotEmpty() && members.all { m ->
+                    (m.sourcePsi() as? KtProperty)?.let { !it.isVar && it.receiverTypeReference != null } == true
+                }
+                return if (extVals || extensionValNamed(resolver, name, recvType.qualifiedName)) {
+                    error(selector, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
+                } else null
+            }
+            if (members.any { it.isExtension || it.kind != SymbolKind.FIELD || !isValDeclaration(it.sourcePsi()) }) return null
             if (resolver.scopeMemberExtensions(selector.textRange.startOffset, recvType, name).any { it.name == name }) return null
+            // `this.x = …` in a constructor or initializer of the class declaring `x` initializes it, when it
+            // was declared without a value. Through `next?.x` or any other instance it never does.
+            val r = unwrapParen(receiver)
+            if (left is KtDotQualifiedExpression && r is KtThisExpression && r.getLabelName() == null &&
+                members.all { deferredMemberVal(it.sourcePsi()) && insideInitializationOf(e, declaringClass(it.sourcePsi())) }
+            ) return null
             return error(selector, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
         }
-        is KtNameReferenceExpression -> {
-            val name = left.getReferencedName()
-            val offset = left.textRange.startOffset
-            if (resolver.localsAt(offset, name).isNotEmpty() || insideInitialization(e)) return null
-            if (e.getStrictParentOfType<KtNamedFunction>() == null) return null
-            val member = resolver.implicitReceiverMember(name, offset) ?: return null
-            if (member.kind != SymbolKind.FIELD || member.isExtension) return null
-            val psi = member.sourcePsi() as? KtProperty ?: return null
-            // A `val` with neither initializer nor getter is assigned exactly once somewhere this cannot see.
-            if (psi.isVar || psi.isLocal || !(psi.hasInitializer() || psi.hasDelegate() || psi.getter != null)) return null
-            return error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
-        }
+        is KtNameReferenceExpression -> return bareNameValReassignment(left, e, resolver)
         else -> return null
     }
+}
+
+/**
+ * An assignment ([at]) to the bare name [left] that reaches a `val` that is not a local: a member `val` with a
+ * value (or one declared without, outside its own class's constructor), a `val` constructor property, a `val`
+ * extension property of an implicit receiver, or a top-level `val`.
+ */
+private fun KotlinSemanticChecks.bareNameValReassignment(left: KtNameReferenceExpression, at: KtElement, resolver: KotlinResolver): Diagnostic? {
+    val e = at
+    val name = left.getReferencedName()
+    val offset = left.textRange.startOffset
+    if (resolver.localsAt(offset, name).isNotEmpty()) return null
+    if (nearestLocalDecl(name, offset, left) != null) return null
+    val member = resolver.implicitReceiverMember(name, offset)
+    if (member != null) {
+        if (member.kind != SymbolKind.FIELD) return null
+        if (member.isExtension) {
+            // A `val` extension property has no field and no setter.
+            val psi = member.sourcePsi() as? KtProperty ?: return null
+            return if (!psi.isVar && psi.receiverTypeReference != null) error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN) else null
+        }
+        return when (val psi = member.sourcePsi()) {
+            // A `val` constructor property already holds the argument.
+            is KtParameter -> if (isValDeclaration(psi)) error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN) else null
+            is KtProperty -> when {
+                psi.isVar || psi.isLocal -> null
+                hasValue(psi) ->
+                    error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
+                // Declared without a value: initialized by the constructor of its own class, and assigned
+                // nowhere else (a member function, an accessor, another class's initializer).
+                insideInitializationOf(e, declaringClass(psi)) -> null
+                else -> error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
+            }
+            else -> null
+        }
+    }
+    // A top-level `val` with a value, or a `val` extension property of an implicit receiver.
+    val tops = service.topLevelByName(name).filter { it.name == name }
+    if (tops.isEmpty() || tops.any { it.kind != SymbolKind.FIELD }) return null
+    val receivers = resolver.implicitReceiversAt(offset).map { it.qualifiedName.substringAfterLast('.') }
+    val allVals = tops.all { t ->
+        val psi = t.sourcePsi() as? KtProperty ?: return@all false
+        if (psi.isVar) return@all false
+        // One declared without a value is initialized by a top-level initializer, never by a function.
+        if (!(hasValue(psi))) {
+            return@all psi.receiverTypeReference == null &&
+                e.parents.takeWhile { it !is KtFile }.any { it is KtNamedFunction || it is KtPropertyAccessor }
+        }
+        val recv = psi.receiverTypeReference?.text ?: return@all true
+        recv.substringBefore('<').removeSuffix("?").substringAfterLast('.').trim() in receivers
+    }
+    return if (allVals) error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN) else null
+}
+
+/** `a++` / `--a` on a `val` that is not a local (see [bareNameValReassignment]). */
+internal fun KotlinSemanticChecks.valMemberIncDec(e: KtUnaryExpression, resolver: KotlinResolver): Diagnostic? {
+    if (e.operationToken != KtTokens.PLUSPLUS && e.operationToken != KtTokens.MINUSMINUS) return null
+    val base = unwrapParen(e.baseExpression ?: return null) as? KtNameReferenceExpression ?: return null
+    return bareNameValReassignment(base, e, resolver)
+}
+
+private val VAL_COMPOUND_ASSIGN = setOf(KtTokens.PLUSEQ, KtTokens.MINUSEQ, KtTokens.MULTEQ, KtTokens.DIVEQ, KtTokens.PERCEQ)
+
+/** The types whose `+=` and the like can only mean `x = x + y`: they declare no `plusAssign` family operator. */
+private val NO_ASSIGN_OPERATOR_TYPES = setOf(
+    "kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte", "kotlin.Double", "kotlin.Float", "kotlin.Char",
+    "kotlin.String", "kotlin.Boolean", "kotlin.UInt", "kotlin.ULong",
+)
+
+/**
+ * `x += 1` on a `val` whose type has no `plusAssign` (a number, a `String`): the operator can only be read as
+ * `x = x + 1`, a reassignment. A local `val`, a parameter (a `for` variable included), or a member `val`.
+ */
+private fun KotlinSemanticChecks.valCompoundReassignment(e: KtBinaryExpression, resolver: KotlinResolver): Diagnostic? {
+    val left = unwrapParen(e.left ?: return null) as? KtNameReferenceExpression ?: return null
+    val name = left.getReferencedName()
+    val offset = left.textRange.startOffset
+    val local = nearestLocalDecl(name, offset, left)
+    val isVal = when (local) {
+        is KtProperty -> !local.isVar && (local.hasInitializer() || local.hasDelegate())
+        is KtParameter -> !local.hasValOrVar()
+        null -> {
+            if (resolver.localsAt(offset, name).isNotEmpty()) return null
+            val member = resolver.implicitReceiverMember(name, offset) ?: return null
+            if (member.kind != SymbolKind.FIELD || member.isExtension) return null
+            val psi = member.sourcePsi()
+            (psi is KtProperty && !psi.isVar && (hasValue(psi))) ||
+                (psi is KtParameter && isValDeclaration(psi))
+        }
+        else -> false
+    }
+    if (!isVal) return null
+    val t = resolver.inferType(left) ?: return null
+    if (t.isTypeParameter || canonicalName(t) !in NO_ASSIGN_OPERATOR_TYPES) return null
+    return error(left, "Val cannot be reassigned", KotlinDiagnosticCodes.VAL_REASSIGN)
+}
+
+/** Whether a source `val` extension property named [name] exists for a receiver named like [receiverFqn]. */
+private fun KotlinSemanticChecks.extensionValNamed(resolver: KotlinResolver, name: String, receiverFqn: String): Boolean {
+    val tops = service.topLevelByName(name).filter { it.name == name }
+    if (tops.isEmpty()) return false
+    val simple = receiverFqn.substringAfterLast('.')
+    return tops.all { t ->
+        val psi = t.sourcePsi() as? KtProperty ?: return@all false
+        val recv = psi.receiverTypeReference?.text ?: return@all false
+        !psi.isVar && recv.substringBefore('<').removeSuffix("?").substringAfterLast('.').trim() == simple
+    }
+}
+
+/** Whether a `val` holds a value of its own: an initializer, a delegate, or a getter that reads no field. */
+private fun hasValue(psi: KtProperty): Boolean =
+    psi.hasInitializer() || psi.hasDelegate() || (psi.getter != null && !hasBackingField(psi))
+
+/** A member `val` declared without a value (initialized by the constructor). */
+private fun deferredMemberVal(psi: KtElement?): Boolean =
+    psi is KtProperty && !psi.isVar && !hasValue(psi)
+
+private fun declaringClass(psi: KtElement?): KtClassOrObject? = (psi?.parent as? KtClassBody)?.parent as? KtClassOrObject
+
+/**
+ * Whether [e] runs as part of constructing an instance of [cls]: in one of its `init` blocks, its secondary
+ * constructors or its property initializers, and not inside a function, an accessor or another class there.
+ */
+private fun insideInitializationOf(e: KtElement, cls: KtClassOrObject?): Boolean {
+    if (cls == null) return false
+    var node = e.parent
+    while (node != null) {
+        when (node) {
+            is KtNamedFunction, is KtPropertyAccessor -> return false
+            is KtSecondaryConstructor -> return node.getStrictParentOfType<KtClassOrObject>() == cls
+            is KtClassOrObject -> return node == cls
+            is KtFile -> return false
+            else -> {}
+        }
+        node = node.parent
+    }
+    return false
 }
 
 private fun insideInitialization(e: KtElement): Boolean {
@@ -765,9 +1152,12 @@ internal fun KotlinSemanticChecks.nullArgumentForNonNull(call: KtCallExpression,
             val named = arg.getArgumentName()?.asName?.identifier
             val idx = if (named != null) c.paramNames.indexOf(named) else i
             if (idx < 0 || (c.varargParamIndex in 0..idx)) return null
-            if (!plainNonNullSourceParameter(c, idx)) return null
-            val pt = c.paramTypes.getOrNull(idx) as? KotlinType ?: return null
-            if (pt.nullable || pt.isTypeParameter || !service.isKnownType(canonicalName(pt))) return null
+            // Each `null` argument is judged on its own: one passed for a parameter that may take it (`x: T`) says
+            // nothing about the next (`y: T & Any`).
+            if (!plainNonNullSourceParameter(c, idx)) return@forEachIndexed
+            val pt = c.paramTypes.getOrNull(idx) as? KotlinType ?: return@forEachIndexed
+            // `T & Any` refuses `null` whatever `T` is bound to; a plain `T` may be nullable.
+            if (pt.nullable || !pt.definitelyNonNull && (pt.isTypeParameter || !service.isKnownType(canonicalName(pt)))) return@forEachIndexed
             expected = expected ?: pt
         }
         expected?.let { return nullForNonNull(it, expr) }
@@ -835,10 +1225,10 @@ internal fun KotlinSemanticChecks.objectInvoked(call: KtCallExpression, resolver
 // --- type arguments -----------------------------------------------------------------------------------------
 
 /**
- * `val a: Box = …` where `class Box<T>`: a generic source class named with no type arguments in a
- * declaration's type. An `is`/`as` target, a supertype, a callable reference and an annotation are all
- * places where the arguments may legitimately be absent or inferred, so only a property, parameter or
- * return type (and the arguments nested in one) is judged.
+ * `val a: Box = …` where `class Box<T>`: a generic class named with no type arguments in a declaration's type
+ * (a property, parameter or return type, or an extension receiver), or anywhere as another type's ARGUMENT
+ * (`x is List<Map>`, `f<Box>()`). A top-level `is`/`as` target, a supertype, a callable reference and an
+ * annotation are places where the arguments may legitimately be absent or inferred, so those are left alone.
  */
 internal fun KotlinSemanticChecks.missingTypeArguments(userType: KtUserType, resolver: KotlinResolver): Diagnostic? {
     if (userType.typeArgumentList != null || userType.qualifier != null || userType.parent is KtUserType) return null
@@ -846,9 +1236,11 @@ internal fun KotlinSemanticChecks.missingTypeArguments(userType: KtUserType, res
     // Climb out of the type; what holds it decides whether arguments are required.
     var node: KtElement = userType
     var topRef: KtTypeReference? = null
+    var asArgument = false
     while (true) {
         val p = node.parent ?: return null
         if (p is KtTypeReference) topRef = p
+        if (p is KtTypeProjection) asArgument = true
         if (p is KtDeclaration || p is KtExpression || p is KtSuperTypeEntry || p is KtSuperTypeCallEntry ||
             p is KtAnnotationEntry || p is KtFile
         ) { node = p; break }
@@ -857,16 +1249,23 @@ internal fun KotlinSemanticChecks.missingTypeArguments(userType: KtUserType, res
     val holder = node
     val inDeclarationType = when (holder) {
         is KtTypeAlias -> false
-        is KtProperty -> holder.typeReference === topRef
+        is KtProperty -> holder.typeReference === topRef || holder.receiverTypeReference === topRef
         is KtParameter -> holder.typeReference === topRef && holder.parent?.parent !is KtCatchClause
-        is KtNamedFunction -> holder.typeReference === topRef
-        else -> false
+        is KtNamedFunction -> holder.typeReference === topRef || holder.receiverTypeReference === topRef
+        is KtAnnotationEntry -> false
+        else -> asArgument
     }
     if (!inDeclarationType) return null
     if (service.isProjectTypeAlias(name) || resolver.isTypeParameterInScope(name, userType.textRange.startOffset)) return null
+    if (resolver.localTypesInScope(userType.textRange.startOffset).containsKey(name)) return null
     val fqn = service.resolveTypeName(name, resolver.fileContext, enclosingClassFqnOf(userType)) ?: return null
-    if (!service.isSourceClass(fqn)) return null
-    val expected = service.classTypeParameters(fqn).size
+    // A library class counts when its parameters are decoded (or are the builtins' fixed ones) and the name is
+    // its own: a library typealias resolves to its expansion, whose parameters are not the alias's.
+    val expected = when {
+        service.isSourceClass(fqn) -> service.classTypeParameters(fqn).size
+        fqn.substringAfterLast('.') != name || !service.isKnownType(fqn) -> return null
+        else -> service.classTypeParameters(fqn).size.takeIf { it > 0 } ?: builtinTypeArity(fqn) ?: return null
+    }
     if (expected == 0) return null
     return error(
         userType, "$expected type argument${if (expected == 1) "" else "s"} expected for '$name'",
@@ -883,15 +1282,127 @@ internal fun KotlinSemanticChecks.arrayForVarargElement(elementType: KotlinType,
     return a == "kotlin.Array" || (a.startsWith("kotlin.") && a.endsWith("Array") && a != "kotlin.Array")
 }
 
+/** An array given BY NAME to a vararg of [elementType] whose elements cannot be that type (`a = ints` for
+ *  `vararg a: String`). */
+internal fun KotlinSemanticChecks.namedVarargArrayMismatch(elementType: KotlinType, actual: KotlinType): Boolean {
+    if (elementType.isTypeParameter || actual.isTypeParameter) return false
+    val a = canonicalName(actual)
+    val e = canonicalName(elementType)
+    val primitive = PRIMITIVE_ARRAYS[a]
+    if (primitive != null) return e in PRIMITIVE_ARRAYS.values && e != primitive
+    if (a != "kotlin.Array") return false
+    val arg = (actual.typeArguments.singleOrNull() as? KotlinType)?.withProjection("") ?: return false
+    if (arg.isTypeParameter || canonicalName(arg) == "*") return false
+    return isMismatch(elementType, arg)
+}
+
+private val PRIMITIVE_ARRAYS = mapOf(
+    "kotlin.IntArray" to "kotlin.Int", "kotlin.LongArray" to "kotlin.Long", "kotlin.ShortArray" to "kotlin.Short",
+    "kotlin.ByteArray" to "kotlin.Byte", "kotlin.DoubleArray" to "kotlin.Double", "kotlin.FloatArray" to "kotlin.Float",
+    "kotlin.CharArray" to "kotlin.Char", "kotlin.BooleanArray" to "kotlin.Boolean",
+)
+
+/** A known, non-array value given BY NAME to a vararg of [elementType]: the named form takes the whole array. */
+internal fun KotlinSemanticChecks.singleElementForNamedVararg(elementType: KotlinType, actual: KotlinType): Boolean {
+    // The element type does not matter, a type parameter included: the named form takes an `Array<out E>`, which a
+    // known non-array value never is.
+    if (actual.isTypeParameter) return false
+    fun isArray(n: String) = n == "kotlin.Array" || (n.startsWith("kotlin.") && n.endsWith("Array"))
+    if (!elementType.isTypeParameter && isArray(canonicalName(elementType))) return false
+    val a = canonicalName(actual)
+    if (a == NOTHING || isArray(a) || !service.isKnownType(a)) return false
+    return true
+}
+
+/** `*value` where [actual] is a known type that is no array at all (`*"2"`): only an array can be spread. */
+internal fun KotlinSemanticChecks.spreadOfNonArray(actual: KotlinType): Boolean {
+    if (actual.isTypeParameter) return false
+    val a = canonicalName(actual)
+    if (a == NOTHING || a == "kotlin.Any" || !service.isKnownType(a)) return false
+    if (a == "kotlin.Array" || (a.startsWith("kotlin.") && a.endsWith("Array"))) return false
+    // A Java array or a collection-like platform type may surface under its JVM name.
+    if (a.startsWith("java.") || a.endsWith("[]") || a == "kotlin.Cloneable") return false
+    // `Array` is final and implements nothing else a value could be declared as, so any other known type is no array.
+    return true
+}
+
+// --- non-local returns ----------------------------------------------------------------------------------------
+
+/**
+ * Whether [lambda] is certainly NOT inlined into its caller, so a `return` cannot pass through it: a lambda
+ * that is stored, returned or invoked as a value rather than passed to a call, one passed to a constructor,
+ * or one passed to a project function that is not `inline` (or is, but takes it `noinline`, `crossinline`, as
+ * a nullable function type, or as a type parameter). False whenever that is not certain, a library callee
+ * included: a library function's metadata may not say.
+ */
+internal fun KotlinSemanticChecks.lambdaNotInlined(lambda: KtLambdaExpression, resolver: KotlinResolver?): Boolean {
+    var holder: KtElement = lambda
+    while (true) {
+        val p = holder.parent ?: return false
+        if (p is KtParenthesizedExpression || p is KtLabeledExpression || p is KtAnnotatedExpression) holder = p else break
+    }
+    when (val p = holder.parent) {
+        // Stored or handed back as a value: nothing inlines it.
+        is KtProperty -> return p.initializer === holder
+        is KtPropertyDelegate, is KtReturnExpression, is KtBlockExpression -> return true
+        is KtNamedFunction -> return p.bodyExpression === holder
+        is KtBinaryExpression -> return p.operationToken == KtTokens.EQ && p.right === holder
+        // `{ ... }()` invokes a function value, and `{ ... }.let { }` passes one along as a receiver.
+        is KtCallExpression -> return p.calleeExpression === holder
+        is KtQualifiedExpression -> return p.receiverExpression === holder
+        // A trailing lambda is a value argument too, so it is matched first.
+        is KtLambdaArgument -> {}
+        is KtValueArgument -> when ((p.parent as? KtValueArgumentList)?.parent) {
+            is KtSuperTypeCallEntry, is KtConstructorDelegationCall -> return true
+            is KtCallExpression -> {}
+            else -> return false
+        }
+        else -> return false
+    }
+    if (resolver == null || holder !== lambda) return false
+    val (call, argIndex) = resolver.enclosingCallAndParamIndex(lambda) ?: return false
+    val callee = resolver.resolveCalleeFunction(call) ?: return false
+    if (!callee.origin.fromSource) return false
+    val psi = (callee.declaration() as? KotlinDomNode)?.psi
+    if (callee.kind == SymbolKind.CONSTRUCTOR) return psi is KtClass || psi is KtPrimaryConstructor || psi is KtSecondaryConstructor
+    val fn = psi as? KtNamedFunction ?: return false
+    if (!fn.hasModifier(KtTokens.INLINE_KEYWORD)) {
+        // A bare call could also reach an `inline` overload declared elsewhere; let any such overload win. One the
+        // file reaches only through a star or default import does not: a function of the file's own package that
+        // takes the call comes first (`fun <T> run(f: () -> T)` beside the stdlib's inline `run`).
+        val name = fn.name ?: return false
+        val file = call.containingFile
+        val samePackage = fn.parent is KtFile && fn.containingFile.packageFqName.asString() == file.packageFqName.asString()
+        if (call.parent !is KtQualifiedExpression &&
+            service.topLevelByName(name).any { s ->
+                s.kind == SymbolKind.METHOD && s.isInline && (!samePackage || s.packageName == file.packageFqName.asString() ||
+                    file.importDirectives.any { !it.isAllUnder && it.importedFqName?.asString() == "${s.packageName}.$name" })
+            }) return false
+        return true
+    }
+    val param = fn.valueParameters.getOrNull(resolver.lambdaParamIndex(call, argIndex, callee)) ?: return false
+    if (param.hasModifier(KtTokens.NOINLINE_KEYWORD) || param.hasModifier(KtTokens.CROSSINLINE_KEYWORD)) return true
+    return when (val type = param.typeReference?.typeElement) {
+        is KtNullableType -> true
+        is KtUserType -> type.referenceExpression?.getReferencedName()?.let { n -> fn.typeParameters.any { it.name == n } } == true
+        else -> false
+    }
+}
+
 // --- overrides ----------------------------------------------------------------------------------------------
+
+private fun mentionsJavaObject(t: KotlinType): Boolean =
+    t.qualifiedName == "java.lang.Object" || t.typeArguments.any { (it as? KotlinType)?.let(::mentionsJavaObject) != false }
 
 private fun mentionsTypeParameter(t: KotlinType): Boolean =
     t.isTypeParameter || t.typeArguments.any { (it as? KotlinType)?.let(::mentionsTypeParameter) != false }
 
 /**
- * An `override` whose declared type no overridden member accepts (`override fun f(): String` over
- * `fun f(): Int`). Each candidate's type must be concrete: one that mentions a type parameter is spelled
- * differently in the subclass than in the supertype, and is not compared.
+ * An `override` whose declared type some overridden member does not accept (`override fun f(): String` over
+ * `fun f(): Int`): as in K2's `FirOverrideChecker`, the type must be a subtype of EVERY overridden member's, so
+ * `override fun f(): Z` over a `fun f(): W` is wrong even where a further-up `fun f(): X` would take a `Z`. Each
+ * candidate's type must be concrete: one that mentions a type parameter is spelled differently in the subclass
+ * than in the supertype, and is not compared.
  */
 internal fun KotlinSemanticChecks.overrideReturnTypeMismatch(
     member: KtCallableDeclaration, candidates: List<KotlinSymbol>, resolver: KotlinResolver,
@@ -904,8 +1415,9 @@ internal fun KotlinSemanticChecks.overrideReturnTypeMismatch(
     for (c in candidates) {
         val superType = c.type as? KotlinType ?: return null
         if (mentionsTypeParameter(superType) || c.typeParameters.isNotEmpty()) return null
-        if (!isMismatch(superType, declared)) return null
-        expected = expected ?: superType
+        // A Java member read without its type arguments (`Iterator<Object>` for `Iterator<E>`) is erased, not concrete.
+        if (mentionsJavaObject(superType)) return null
+        if (isMismatch(superType, declared)) expected = expected ?: superType
     }
     expected ?: return null
     val what = if (member is KtNamedFunction) "Return type" else "Type"
@@ -933,6 +1445,27 @@ internal fun KotlinSemanticChecks.explicitTypeTextOf(ref: KtNameReferenceExpress
         else -> null
     } ?: return null
     return typeRef.text.trim().removeSuffix("?").trim()
+}
+
+/**
+ * Whether [e]'s type is a fact no smart cast can change: a literal, a number expression, or a local or
+ * parameter whose written type is a final class (a cast can only narrow it to itself).
+ */
+internal fun KotlinSemanticChecks.typeReadOffTheTree(e: KtExpression, resolver: KotlinResolver): Boolean {
+    val u = unwrapParen(e)
+    if (isLiteral(u)) return true
+    if (u !is KtNameReferenceExpression) return false
+    val text = explicitTypeTextOf(u) ?: return false
+    val decl = nearestLocalDecl(u.getReferencedName(), u.textRange.startOffset, u)
+    if (decl is KtProperty && decl.isVar) return false
+    if ((decl as? KtProperty)?.typeReference?.text?.trim()?.endsWith("?") == true) return false
+    if ((decl as? KtParameter)?.typeReference?.text?.trim()?.endsWith("?") == true) return false
+    if ('<' in text) return false
+    val fqn = service.resolveTypeName(text, resolver.fileContext) ?: return false
+    if (service.isFinalType(fqn) == true) return true
+    // An open declared type is read off the tree too where no check written before the use narrows the value: the
+    // flow walk proves no `is`/`as` target for it there (`when (x) { is Int -> … }` does not reach past the `when`).
+    return service.isKnownType(fqn) && resolver.flowProvenTypes(u, deep = true).isEmpty()
 }
 
 /** A literal, or a local/parameter with a written type: an expression whose type is read, not inferred. */
@@ -972,15 +1505,76 @@ internal fun KotlinSemanticChecks.firstUseOfNullableLocal(ref: KtNameReferenceEx
 }
 
 /**
+ * A local or parameter WRITTEN with a nullable type, read where the null-flow pass finds no guard that makes it
+ * non-null: the same authority the unsafe-call check takes for a receiver (`smartCastNonNull` follows if/else,
+ * early exits, `&&`/`||`, `!!`, `is`, loops and, for a `var`, reassignment). A scope-function guard it does not
+ * follow (`x?.let { }`) still backs off.
+ */
+internal fun KotlinSemanticChecks.flowNullableLocal(ref: KtNameReferenceExpression, resolver: KotlinResolver): Boolean {
+    val name = ref.getReferencedName()
+    val decl = nearestLocalDecl(name, ref.textRange.startOffset, ref)
+    when (decl) {
+        is KtProperty -> {
+            // A `var` is smart-cast by whatever it was last assigned, and a `val` initialized later by its
+            // assignments; only a `val` born nullable keeps its written type.
+            if (decl.isVar || decl.hasDelegate() || decl.typeReference?.text?.trim()?.endsWith("?") != true) return false
+            val init = decl.initializer ?: return false
+            if (!isNullLiteral(init) && resolver.inferType(init)?.nullable != true) return false
+        }
+        is KtParameter -> if (decl.isVarArg || decl.typeReference?.text?.trim()?.endsWith("?") != true) return false
+        else -> return false
+    }
+    if (resolver.smartCastNonNull(ref)) return false
+    if (resolver.flowProvenTypes(ref, deep = true).any { !it.nullable }) return false
+    // A `x!!` the flow pass does not follow (inside an object's initializer, a condition chain) still smart-casts.
+    // One that runs only sometimes does not: inside a safe call's selector (`a?.f(x!!)` runs it only when `a` is
+    // non-null), or inside one branch of an `if`/`when`, whose dominance the flow pass has already decided.
+    val from = (decl as dev.ide.kotlin.syntax.psi.KtNamedDeclaration).nameIdentifier?.textRange?.endOffset ?: return false
+    val to = ref.textRange.startOffset
+    var unconditional = false
+    fun visit(e: KtElement) {
+        if (unconditional || e.textRange.endOffset <= from || e.textRange.startOffset >= to) return
+        if (e is KtPostfixExpression && e.operationToken == KtTokens.EXCLEXCL &&
+            (e.baseExpression?.let { unwrapParen(it) } as? KtNameReferenceExpression)?.getReferencedName() == name &&
+            !conditionallyRun(e)
+        ) { unconditional = true; return }
+        var c = e.firstChild
+        while (c != null) { (c as? KtElement)?.let(::visit); c = c.nextSibling }
+    }
+    visit(ref.getStrictParentOfType<KtNamedFunction>() ?: ref.containingFile)
+    if (unconditional) return false
+    return !hasUnmodeledNullGuard(ref, name)
+}
+
+/** Whether [e] runs only on some paths through its statement: in a safe call's selector, or in a branch (not the
+ *  condition) of an `if` or `when`. */
+private fun conditionallyRun(e: KtElement): Boolean {
+    var node: KtElement? = e.parent
+    var child: KtElement? = e
+    while (node != null && node !is KtNamedFunction && node !is dev.ide.kotlin.syntax.psi.KtClassOrObject) {
+        when (node) {
+            is KtSafeQualifiedExpression -> if (child != null && child === node.selectorExpression) return true
+            is KtIfExpression -> if (child != null && (child === node.then || child === node.`else`)) return true
+            is dev.ide.kotlin.syntax.psi.KtWhenEntry -> if (child != null && child === node.expression) return true
+            // A lambda or an object's body is what the backstop is for: leave it judged as it was.
+            is KtLambdaExpression, is dev.ide.kotlin.syntax.psi.KtObjectLiteralExpression -> return false
+        }
+        child = node
+        node = node.parent
+    }
+    return false
+}
+
+/**
  * Whether parameter [index] of [callee] is declared, in this project's source, with a non-null type that
  * names no type parameter. Only then is "this parameter does not take null" a fact about the declaration: a
  * library signature reaches the model with its type arguments already substituted, and `Array<T?>.fill(T?)`
  * has by then become `fill(KtFile)`.
  */
-internal fun KotlinSemanticChecks.plainNonNullSourceParameter(callee: KotlinSymbol, index: Int): Boolean {
+internal fun KotlinSemanticChecks.plainNonNullSourceParameter(callee: KotlinSymbol, index: Int, nullableToo: Boolean = false): Boolean {
     val fn = callee.sourcePsi() as? KtNamedFunction ?: return false
     val text = fn.valueParameters.getOrNull(index)?.typeReference?.text?.trim() ?: return false
-    if (text.endsWith("?") || '(' in text) return false
+    if ((text.endsWith("?") && !nullableToo) || '(' in text) return false
     val typeParams = HashSet<String>()
     fn.typeParameters.forEach { tp -> tp.name?.let { typeParams += it } }
     var node: KtElement? = fn.parent
@@ -988,7 +1582,26 @@ internal fun KotlinSemanticChecks.plainNonNullSourceParameter(callee: KotlinSymb
         if (node is KtClassOrObject) node.typeParameters.forEach { tp -> tp.name?.let { typeParams += it } }
         node = node.parent
     }
+    // `T & Any` is non-null whatever `T` is.
+    if (DNN_TYPE_PARAM.matchEntire(text)?.groupValues?.get(1)?.let { it in typeParams } == true) return true
     return Regex("[A-Za-z_][A-Za-z0-9_]*").findAll(text).none { it.value in typeParams }
+}
+
+private val DNN_TYPE_PARAM = Regex("""([A-Za-z_][A-Za-z0-9_]*)\s*&\s*Any""")
+
+/**
+ * Whether parameter [index] of the source function [callee] is a bare type parameter `T` (not `T?`) that [call]
+ * fixes with a written non-null type argument: `checkSubtype<Int>(x)` takes no `null`, whatever `x` is.
+ */
+internal fun KotlinSemanticChecks.explicitNonNullTypeArgumentParameter(callee: KotlinSymbol, index: Int, call: KtCallExpression): Boolean {
+    val fn = callee.sourcePsi() as? KtNamedFunction ?: return false
+    val text = fn.valueParameters.getOrNull(index)?.typeReference?.text?.trim() ?: return false
+    val written = call.typeArgumentList?.arguments ?: return false
+    if (written.size != fn.typeParameters.size) return false
+    val at = fn.typeParameters.indexOfFirst { it.name == text }
+    if (at < 0) return false
+    val arg = written[at].typeReference?.text?.trim() ?: return false
+    return !arg.endsWith("?") && '(' !in arg && arg != "Nothing"
 }
 
 /**
@@ -1088,6 +1701,8 @@ internal fun KotlinSemanticChecks.projectConstructorMismatch(call: KtCallExpress
     val n = call.valueArguments.size
     fun arities(c: dev.ide.lang.kotlin.symbols.RawCallable) = c.paramHasDefault.count { !it }..c.paramTexts.size
     val fitting = ctors.filter { n in arities(it) }
+    // A default-imported class of that name that can take the arguments is what the call resolves to instead.
+    if (fitting.isEmpty() && name == callee.getReferencedName() && defaultImportedConstructorTakes(name, fqn, n)) return null
     if (fitting.isEmpty()) {
         val expected = ctors.flatMap { arities(it) }.distinct().sorted().joinToString("/")
         return error(

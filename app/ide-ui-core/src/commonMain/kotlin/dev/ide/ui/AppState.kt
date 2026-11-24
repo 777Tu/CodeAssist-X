@@ -12,6 +12,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.text.TextRange
 import dev.ide.ui.backend.IdeBackend
 import dev.ide.ui.backend.NodeKind
+import dev.ide.ui.backend.defaultExpandedTreeIds
 import dev.ide.ui.backend.RunStatus
 import dev.ide.ui.backend.RunTaskOption
 import dev.ide.ui.backend.TreeNode
@@ -58,7 +59,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * Top-level screens, ordered by depth so the transition helper can infer direction: a move to a
  * higher-ordinal screen animates "forward" (deeper), a lower one "back".
  */
-enum class Screen { Projects, CreateProject, ImportProject, ExportProject, Editor, Hub, Run, ModuleConfig, SdkManager, KeystoreManager, KeystoreCreate, KeystoreImport, IconManager, AppIconStudio, Settings, CodeStyle, ColorScheme, EditorSymbols, LanguageServers, Plugins, Storage, LearnPath, LessonTrack, LessonPlayer, LearnDiscussion, LearnThread, LearnAsk, LearnSolutions, ChallengePlayer, ChallengeBoard, StoreItem, SubmitProject, PublishingGuide, PublisherProfile, You, Moderation, PluginScreen }
+enum class Screen { Projects, CreateProject, ImportProject, ExportProject, Editor, Hub, Run, ModuleConfig, SdkManager, KeystoreManager, KeystoreCreate, KeystoreImport, IconManager, AppIconStudio, Settings, CodeStyle, ColorScheme, EditorSymbols, LanguageServers, Plugins, Storage, LearnPath, LessonTrack, LessonPlayer, LearnDiscussion, LearnThread, LearnAsk, LearnSolutions, ChallengePlayer, ChallengeBoard, Countdown, StoreItem, SubmitProject, PublishingGuide, PublisherProfile, You, Moderation, PluginScreen }
 
 /**
  * The home screen's bottom-navigation destinations (the landing surface shown on [Screen.Projects]): the
@@ -852,6 +853,16 @@ class IdeUiState(
         runConflict = PendingRun(action)
     }
 
+    /**
+     * Ask for the notification permission now, with nothing waiting on the answer. Called once a project has
+     * been open for a moment. The prompt used to come only with the first build, so someone who never got as far
+     * as building was never asked, and a reminder about the project they left could not be shown to them. It is
+     * the same one-time prompt: whoever answers it here is not asked again at their first build.
+     */
+    fun offerNotifications() {
+        if (isMobilePlatform && !notifPromptResolved && notifGate == null) notifGate = PendingRun {}
+    }
+
     /** Whether the one-time first-build notification prompt has already run (persisted app-globally). */
     private val notifPromptResolved: Boolean
         get() = backend.settings.preference(NOTIF_BUILD_PROMPT_RESOLVED_PREF)?.toBooleanStrictOrNull() == true
@@ -973,7 +984,7 @@ class IdeUiState(
 
     /**
      * (Re)seed [treeExpanded] for the current [treeMode]: the persisted expanded set if this project has one,
-     * otherwise the defaults (each module / source root / the workspace expanded). Called on creation and on a
+     * otherwise the defaults (each module, source root and the folders leading to it, and the workspace). Called on creation and on a
      * view-mode flip (the two modes shape the tree differently, so each remembers its own expansion).
      */
     private fun loadTreeExpansion() {
@@ -983,15 +994,11 @@ class IdeUiState(
         backend.files.expandedTreeState(treeMode)?.forEach { treeExpanded[it] = true }
     }
 
-    /** Expand modules / source roots / the workspace by default. Additive (doesn't clear user toggles), so it's
-     *  safe to (re)run once the real tree lands. Reads [tree], so it must run after a tree build. */
+    /** Expand the workspace, modules, source roots and the folders leading to them by default
+     *  ([defaultExpandedTreeIds]). Additive (doesn't clear user toggles), so it's safe to (re)run once the real
+     *  tree lands. Reads [tree], so it must run after a tree build. */
     private fun seedDefaultExpansion() {
-        fun seed(n: TreeNode) {
-            if (n.kind == NodeKind.Module || n.kind == NodeKind.SourceRoot || n.kind == NodeKind.Workspace)
-                treeExpanded[n.id] = true
-            n.children.forEach(::seed)
-        }
-        seed(tree)
+        defaultExpandedTreeIds(tree).forEach { treeExpanded[it] = true }
     }
 
     /** The currently-expanded tree-node ids — the host persists this (debounced) whenever it changes. */
@@ -1413,10 +1420,11 @@ class IdeUiState(
      * session); false on a genuine first open (no session yet).
      */
     suspend fun restoreTabs(): Boolean {
-        val saved = backend.projects.openTabs()
+        // Both read the session file, and this runs on main while the project opens.
+        val saved = withContext(ioDispatcher) { backend.projects.openTabs() }
         // No tabs to restore: respect an intentionally-empty reopen (session file exists → stay empty), and
         // only fall through to a default file on a first open (no session file yet).
-        if (saved.tabs.isEmpty()) return backend.projects.hasSavedSession()
+        if (saved.tabs.isEmpty()) return withContext(ioDispatcher) { backend.projects.hasSavedSession() }
         for (tab in saved.tabs) {
             val name = tab.path.substringAfterLast('/').substringAfterLast('\\')
             runCatching {

@@ -508,11 +508,18 @@ class CodeAssistAppState(
             val last = resumeProject
             if (!reopenLast || last == null) return@launch
             if (backend.projects.projectEpoch.value > 0) return@launch // already in a project
-            val exists = withContext(ioDispatcher) { backend.projects.projects().any { it.rootPath == last } }
+            // The path as it was remembered, or the same folder where the projects are now: an iOS app's
+            // container is somewhere else after every update, and the project went with it.
+            val folder = last.replace('\\', '/').trimEnd('/').substringAfterLast('/')
+            val root = withContext(ioDispatcher) {
+                val known = backend.projects.projects().map { it.rootPath }
+                known.firstOrNull { it == last }
+                    ?: known.firstOrNull { it.replace('\\', '/').trimEnd('/').substringAfterLast('/') == folder }
+            }
             // A link, a tapped notification or the user got somewhere first: that wins over resuming.
-            if (!exists || resumeSuperseded || screen != Screen.Projects) return@launch
+            if (root == null || resumeSuperseded || screen != Screen.Projects) return@launch
             resumePending = true
-            if (!backend.projects.openProject(last)) resumePending = false
+            if (!backend.projects.openProject(root)) resumePending = false
         }
         // Track which project (if any) the user has open, for the resume above. Entering the editor (or its Run
         // screen, which only an open project has) records the project; the picker, where closing a project
@@ -543,6 +550,17 @@ class CodeAssistAppState(
     /** Re-read the persisted settings after the Settings screen (or a quick toggle) wrote them. */
     fun reloadSettings() {
         settings = backend.settings.settings()
+    }
+
+    /**
+     * The season the calendar says it is, ignoring the Seasonal touches switch. A developer can pin one with
+     * the `seasonal.force` preference (a [Season] name, or `none`) to see a season out of its dates; read on
+     * each call, so it takes effect on the next settings change or launch like the calendar itself.
+     */
+    fun calendarSeason(): dev.ide.ui.theme.Season? {
+        val forced = backend.settings.preference(SEASON_OVERRIDE_KEY)?.trim().orEmpty()
+        if (forced.equals("none", ignoreCase = true)) return null
+        return dev.ide.ui.theme.Season.named(forced) ?: dev.ide.ui.theme.Season.current()
     }
 
     /** Re-read the active color scheme after the scheme editor saved or switched one. */
@@ -1128,6 +1146,31 @@ class CodeAssistAppState(
         screen = Screen.ChallengeBoard
     }
 
+    // ---- Winter ----
+
+    /**
+     * The New Year countdown and the sky. Its "today" is the device's local date unless a developer has pinned one
+     * with the `seasonal.forceDate` preference (`yyyyMMdd`), which, with `seasonal.force`, shows the season and
+     * its doors on any day of the year.
+     */
+    val holidayLedger: dev.ide.ui.holiday.HolidayLedger = dev.ide.ui.holiday.HolidayLedger(
+        get = { backend.settings.preference(it) },
+        set = { k, v -> backend.settings.setPreference(k, v) },
+        today = {
+            backend.settings.preference(SEASON_DATE_OVERRIDE_KEY)?.trim()?.toIntOrNull()
+                ?: (dev.ide.ui.platform.localYear() * 10_000 + dev.ide.ui.platform.localMonthDay())
+        },
+    )
+
+    fun openCountdown() {
+        screen = Screen.Countdown
+    }
+
+    /** Back from the calendar, to Home where it was opened. */
+    fun exitCountdown() {
+        screen = Screen.Projects
+    }
+
     fun exitChallengeBoard() {
         screen = Screen.Projects
         homeTab = HomeTab.Challenges
@@ -1499,6 +1542,7 @@ class CodeAssistAppState(
 
             screen == Screen.ChallengePlayer -> exitChallenge()
             screen == Screen.ChallengeBoard -> exitChallengeBoard()
+            screen == Screen.Countdown -> exitCountdown()
 
             screen == Screen.CreateProject -> screen = Screen.Projects
             screen == Screen.ImportProject -> cancelImportPreview()
@@ -1512,6 +1556,12 @@ class CodeAssistAppState(
         }
     }
 }
+
+/** The developer preference that pins a season (see [CodeAssistAppState.calendarSeason]). */
+internal const val SEASON_OVERRIDE_KEY = "seasonal.force"
+
+/** The developer preference that pins the holiday calendar's date (see [CodeAssistAppState.holidayLedger]). */
+internal const val SEASON_DATE_OVERRIDE_KEY = "seasonal.forceDate"
 
 /**
  * Creates (and remembers) the [CodeAssistAppState] for this composition, tied to a scope that is cancelled
@@ -1533,6 +1583,7 @@ internal fun accentOf(settings: UiSettings): CaAccent = when (settings.accent) {
     UiAccent.Orange -> CaAccent.Orange
     UiAccent.Violet -> CaAccent.Violet
     UiAccent.Pumpkin -> CaAccent.Pumpkin
+    UiAccent.Aurora -> CaAccent.Aurora
     else -> CaAccent.Lime
 }
 

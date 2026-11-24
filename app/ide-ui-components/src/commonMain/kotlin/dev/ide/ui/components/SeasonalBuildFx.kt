@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Paint
@@ -328,7 +327,7 @@ private fun DrawScope.drawLitPumpkin(center: Offset, height: Float, lit: Float, 
     if (lit > 0.5f) {
         // A halo that fades to nothing, so a row of lit pumpkins glows rather than sitting on discs.
         val r = height * 0.95f
-        drawCircle(Brush.radialGradient(listOf(Glow.copy(alpha = 0.3f * lit), Color.Transparent), center, r), r, center)
+        drawRadialGlow(listOf(Glow.copy(alpha = 0.3f * lit), Color.Transparent), center, r)
     }
     withAlpha(lit) { drawPumpkin(center, w) }
 }
@@ -351,13 +350,14 @@ private inline fun DrawScope.withAlpha(alpha: Float, block: DrawScope.() -> Unit
 // ---------------------------------------------------------------------------
 
 /**
- * The build status glyph for [status]: in the season, a cauldron that bubbles while the build runs and puffs
+ * The build status glyph for [status]: in winter, a turning snowflake (see [WinterBuildGlyph]); at Halloween, a cauldron that bubbles while the build runs and puffs
  * a little green smoke as it finishes, then hands back to [glyph] (the ordinary check or cross). Outside the
  * season it is just [glyph]. [size] is the glyph's own footprint.
  */
 @Composable
 fun SeasonalBuildGlyph(status: RunStatus, size: Dp, glyph: @Composable () -> Unit) {
-    if (!isHalloween()) {
+    val season = LocalSeason.current
+    if (season == null) {
         glyph()
         return
     }
@@ -373,6 +373,12 @@ fun SeasonalBuildGlyph(status: RunStatus, size: Dp, glyph: @Composable () -> Uni
         }
     }
     val running = status == RunStatus.Running
+    if (season == Season.Winter) {
+        // Winter: a snowflake that turns while the build runs, and a star that pops as it finishes.
+        if (!running && !puff.isRunning && last[0] != RunStatus.Running) glyph()
+        else WinterBuildGlyph(running, if (running) null else puff.value, size)
+        return
+    }
     // `last` still holds the previous status in the frame the build finishes (the effect that starts the puff
     // runs after it), so this keeps the cauldron up for that frame instead of flashing the check first.
     if (!running && !puff.isRunning && last[0] != RunStatus.Running) {

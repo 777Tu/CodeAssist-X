@@ -58,6 +58,7 @@ import dev.ide.android.support.tools.Bundler
 import dev.ide.android.support.tools.BundletoolInProcess
 import dev.ide.android.support.tools.D8Dexer
 import dev.ide.android.support.tools.D8InProcessDexer
+import dev.ide.android.support.tools.D8Native
 import dev.ide.android.support.tools.DebugKeystore
 import dev.ide.android.support.tools.DesugarLib
 import dev.ide.android.support.tools.DesugaredLibrary
@@ -611,7 +612,7 @@ class AndroidBuildSystem(
                 val merge = step("merge${label}Resources")
                 val compile = step("compile${label}Resources")
                 tasks.task(merge) { MergeResourcesTask(merge, inputs, merged) }
-                tasks.task(compile, listOf(merge)) { Aapt2CompileTask(compile, listOf(merged), compiled, aapt2) }
+                tasks.task(compile, listOf(merge)) { Aapt2CompileTask(compile, listOf(merged), compiled, aapt2, crunch = release) }
                 lowerResTiers += Triple(merged, compiled, compile)
             }
             tier("Module", moduleRes, layout.mergedModuleRes, layout.compiledModuleRes)
@@ -648,7 +649,7 @@ class AndroidBuildSystem(
             linkManifest = layout.mergedManifest
             manifestDep = processManifest
         }
-        tasks.task(aapt2Compile, listOf(mergeRes)) { Aapt2CompileTask(aapt2Compile, listOf(layout.mergedRes), layout.compiledRes, aapt2) }
+        tasks.task(aapt2Compile, listOf(mergeRes)) { Aapt2CompileTask(aapt2Compile, listOf(layout.mergedRes), layout.compiledRes, aapt2, crunch = release) }
         // A minify build needs aapt2's manifest/layout keep rules so R8 does not strip XML-referenced classes;
         // a shrinkResources build additionally links proto resources (R8's resource-shrinker input form).
         tasks.task(aapt2Link, listOf(aapt2Compile, manifestDep) + lowerResTiers.map { it.third }) {
@@ -1147,7 +1148,7 @@ class AndroidBuildSystem(
             tasks.task(mergeTestRes) { MergeResourcesTask(mergeTestRes, testLibs.resDirs, testRoot.resolve("merged-res")) }
             val compileTestRes = step("compileAndroidTestResources")
             tasks.task(compileTestRes, listOf(mergeTestRes)) {
-                Aapt2CompileTask(compileTestRes, listOf(testRoot.resolve("merged-res")), testRoot.resolve("compiled-res"), aapt2)
+                Aapt2CompileTask(compileTestRes, listOf(testRoot.resolve("merged-res")), testRoot.resolve("compiled-res"), aapt2, crunch = false)
             }
             val linkTest = step("linkAndroidTestResources")
             val testAp = testRoot.resolve("resources.ap_")
@@ -2024,12 +2025,12 @@ class AndroidBuildSystem(
                 // The dexBuilder ARCHIVE dexer. The host can inject a forked-VM D8 (an [OffHeapArchiveDexer]) so a
                 // big project jar / cold library archives off the app heap and several libraries archive at once;
                 // default keeps archiving in-process (app-heap-bounded by DexConcurrency).
-                dexer = dexer ?: D8InProcessDexer(),
+                dexer = dexer ?: D8Native.dexer() ?: D8InProcessDexer(),
                 // R8 is the heaviest in-process step (whole-program). On ART the host can inject a forked-VM
                 // shrinker that runs R8 with a bigger -Xmx than the app heap cap; default keeps it in-process.
                 shrinker = shrinker ?: R8InProcessShrinker(),
                 // The dex MERGE is the debug-path memory peak; the host can inject a forked-VM D8 for it.
-                mergeDexer = mergeDexer ?: D8InProcessDexer(),
+                mergeDexer = mergeDexer ?: D8Native.dexer() ?: D8InProcessDexer(),
                 signer = ApksigSigner(),
                 bundleSigner = ApksigBundleSigner(),   // ART: v1-sign the .aab in-process (no jarsigner)
                 kotlin = kotlin,

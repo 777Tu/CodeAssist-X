@@ -101,6 +101,34 @@ class LearnCatalogCodecTest {
     }
 
     @Test
+    fun aSeasonalTrackKeepsItsWindowAndIsHiddenFromBuildsThatCannotHonourIt() {
+        val tree = LearnCatalogCodec.encodeTree(LearnContent.catalog)
+        val seasonal = tree.array("tracks").map { it.jsonObject }.first { it.str("id") == "new-year-card" }
+        val window = seasonal["visibleIn"] as JsonObject
+        assertEquals("11-28", window.str("from"))
+        assertEquals("01-06", window.str("to"))
+        // A build that reads format 2 would ignore the window and list the track all year; format 3 makes it
+        // drop the track's lessons, and with them the track.
+        for (l in seasonal.array("lessons")) assertEquals("3", l.jsonObject.str("format"))
+        val back = LearnCatalogCodec.decode(LearnCatalogCodec.encode(LearnContent.catalog))
+        assertEquals(WINTER_SEASON, back.tracks.first { it.id == "new-year-card" }.visibleIn)
+        // A track that is not seasonal keeps its old formats.
+        val plain = tree.array("tracks").map { it.jsonObject }.first { it.str("id") == "kotlin-basics" }
+        assertTrue(plain.array("lessons").all { it.jsonObject.str("format") != "3" })
+    }
+
+    @Test
+    fun aMalformedWindowDropsTheTrackRatherThanListingItAllYear() {
+        val tree = LearnCatalogCodec.encodeTree(LearnContent.catalog)
+        val tracks = tree.array("tracks").toMutableList()
+        val i = tracks.indexOfFirst { it.jsonObject.str("id") == "new-year-card" }
+        tracks[i] = JsonObject(tracks[i].jsonObject + ("visibleIn" to JsonObject(mapOf("from" to JsonPrimitive("soon")))))
+        val back = LearnCatalogCodec.decode(JsonObject(tree + ("tracks" to JsonArray(tracks))).toString())
+        assertTrue(back.tracks.none { it.id == "new-year-card" })
+        assertEquals(LearnContent.tracks.size - 1, back.tracks.size)
+    }
+
+    @Test
     fun theExportIsCompactEnoughToDownload() {
         val size = LearnCatalogCodec.encode(LearnContent.catalog).length
         assertTrue(size < 2 * 1024 * 1024, "catalog JSON is $size bytes")

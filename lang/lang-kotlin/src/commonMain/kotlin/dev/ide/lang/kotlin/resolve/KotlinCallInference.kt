@@ -1,6 +1,7 @@
 package dev.ide.lang.kotlin.resolve
 
 import dev.ide.kotlin.syntax.psi.KtCallExpression
+import dev.ide.kotlin.syntax.psi.KtCallableReferenceExpression
 import dev.ide.kotlin.syntax.psi.KtDotQualifiedExpression
 import dev.ide.kotlin.syntax.psi.KtElement
 import dev.ide.kotlin.syntax.psi.KtLambdaExpression
@@ -33,7 +34,7 @@ internal fun KotlinResolver.inferCallBindings(
 
     call.typeArgumentList?.arguments?.takeIf { it.isNotEmpty() }?.let { targs ->
         sym.typeParameters.forEachIndexed { i, name ->
-            targs.getOrNull(i)?.typeReference?.text?.let { service.typeFromText(it, fileContext) }
+            targs.getOrNull(i)?.typeReference?.text?.let { service.typeFromText(it, fileContext, enclosingClassFqnOf(call)) }
                 ?.let { cs.fix(name, it) }
         }
         return cs.solve(erasure)
@@ -90,6 +91,15 @@ internal fun KotlinResolver.inferCallBindings(
                     ?.takeIf { r -> r.typeArguments.any { (it as? KotlinType)?.isTypeParameter == true } }
                     ?.let { inferBuilderVars(it, expr, cs) }
             }
+        } else if (expr is KtCallableReferenceExpression && service.functionalShape(pt) != null) {
+            // A callable reference fills a functional parameter as a lambda does: its target's result
+            // constrains the functional return (`let(regex::find)` ⇒ `R = MatchResult?`). Its own type is a
+            // `KFunction`/`KProperty`, which never unifies with `(T) -> R`, so the generic branch bound nothing.
+            val shape = service.functionalShape(pt)!!
+            val functionalReturn = (shape.returnType as? KotlinType)?.let { service.substitute(it, cs.solve()) }
+            if (!coercesResultToUnit(functionalReturn)) {
+                callableReferenceResultType(expr)?.let { cs.addSubtypeConstraint(it, shape.returnType) }
+            }
         } else {
             // A SPREAD argument (`listOf(*arr)`) passes the array's ELEMENTS to the vararg, whose parameter type
             // is the element type: constraining the whole `Array<String>` against it typed the call `List<Array>`.
@@ -126,6 +136,17 @@ private fun KotlinResolver.inferBuilderVars(
                 service.membersNamed(receiverType.qualifiedName, receiverType.typeArguments, name)
                     .firstOrNull { it.kind == SymbolKind.METHOD && it.paramTypes.size == e.valueArguments.size }
                     ?.let { member ->
+                        // Fixation on demand: a builder call whose result IS one of the builder's variables
+                        // (`get(): S`), used where its type is needed (an argument of another call, a receiver),
+                        // fixes that variable to what the calls before it constrained. A later call no longer
+                        // widens it: `yield(b); myWith(get()) { }; yield(a)` keeps `S = B`, and `yield(a)` is the
+                        // mismatch.
+                        val result = member.type as? KotlinType
+                        if (result != null && result.isTypeParameter && e.valueArguments.isEmpty() && resultIsDemanded(e)) {
+                            cs.solve()[result.qualifiedName]?.let { fixed ->
+                                (fixed as? KotlinType)?.takeIf { !it.isTypeParameter }?.let { cs.fix(result.qualifiedName, it) }
+                            }
+                        }
                         e.valueArguments.forEachIndexed { i, arg ->
                             val pt = member.paramTypes.getOrNull(i) as? KotlinType
                                 ?: return@forEachIndexed
@@ -142,6 +163,19 @@ private fun KotlinResolver.inferBuilderVars(
         }
     }
     visit(body)
+}
+
+/** Whether [call]'s value is consumed where its type has to be known: as a call's argument or as a receiver. */
+private fun resultIsDemanded(call: KtCallExpression): Boolean {
+    var e: KtElement = call
+    val q = call.parent as? KtQualifiedExpression
+    if (q != null && q.selectorExpression === call) {
+        if (q.parent is KtQualifiedExpression && (q.parent as KtQualifiedExpression).receiverExpression === q) return true
+        e = q
+    }
+    val p = e.parent
+    return p is dev.ide.kotlin.syntax.psi.KtValueArgument ||
+        (p is KtQualifiedExpression && p.receiverExpression === e)
 }
 
 /** A call reached on the IMPLICIT builder receiver: a bare `member(args)` (no qualifier) or an explicit

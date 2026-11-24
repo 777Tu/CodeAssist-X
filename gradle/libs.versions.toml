@@ -32,6 +32,8 @@ aapt2 = "9.2.1-15009934" # com.android.tools.build:aapt2 — the host aapt2 bina
 bundletool = "1.18.3" # com.android.tools.build.bundletool — builds the .aab (aligns with AGP 9.x's bundletool)
 guava = "32.0.1-jre"  # com.google.common.* — bundletool's collections (ImmutableList) at compile time
 asm = "9.7"           # org.ow2.asm — bytecode rewrite of System.exit for the in-process Java dex-run
+layoutlib = "17.0.4"            # com.android.tools.layoutlib — the Android framework as Android Studio renders layouts with it
+androidToolsBase = "32.6.0-alpha04"  # layoutlib-api + sdk-common: the render API and the resource loader layoutlib 17 is driven through
 trove4j = "1.0.20200330"  # gnu.trove.* — IntelliJ-core dependency the Kotlin compiler needs but doesn't bundle
 # StAX on ART (which ships none): the standalone JSR-173 API, and aalto as its implementation. Used by the
 # on-device Kotlin compiler (IntelliJ-core's descriptor parsing) and by R8's resource shrinker.
@@ -50,6 +52,7 @@ admobMediationPangle = "8.2.0.4.0"     # com.google.ads.mediation:pangle — Pan
 admobMediationMintegral = "17.1.71.0"  # com.google.ads.mediation:mintegral — Mintegral adapter (native-capable)
 admobMediationUnity = "4.21.0.0"       # com.google.ads.mediation:unity — Unity Ads adapter (banner + interstitial; no native)
 unityAds = "4.21.0"                    # com.unity3d.ads:unity-ads — the Unity Ads SDK the adapter drives (Maven Central)
+admobMediationAppLovin = "13.7.0.0"    # com.google.ads.mediation:applovin: AppLovin adapter (interstitial + rewarded; no native). Needs play-services-ads 25.5.0
 androidStub = "4.1.1.4"     # com.google.android:android — the throwaway stub android.jar (compileOnly) :applog-runtime compiles against
 okhttp = "4.12.0"           # com.squareup.okhttp3 — HTTP + SSE transport for the agent's LLM client (:agent-impl); runs on JVM and ART
 # Eclipse JGit: the pure-Java Git implementation behind :vcs-impl. The 6.10.x line targets Java 11
@@ -168,6 +171,9 @@ androidx-compose-material3 = { module = "androidx.compose.material3:material3", 
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 androidx-window = { module = "androidx.window:window", version = "1.5.0" }
 androidx-core = { module = "androidx.core:core", version.ref = "androidxCore" }
+# WorkManager, for the check that shows a reminder to come back when the app is not running. Already in the APK
+# at this version (the ads SDK brings it); declared so the app's own code may use it.
+androidx-work-runtime = { module = "androidx.work:work-runtime", version = "2.7.0" }
 androidx-fragment = { module = "androidx.fragment:fragment", version.ref = "androidxFragment" }
 androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "androidxProfileInstaller" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
@@ -192,6 +198,14 @@ bundletool-gson = { module = "com.google.code.gson:gson", version = "2.8.9" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugarJdkLibs" }
 desugar-jdk-libs-configuration = { module = "com.android.tools:desugar_jdk_libs_configuration", version.ref = "desugarJdkLibs" }
+layoutlib = { module = "com.android.tools.layoutlib:layoutlib", version.ref = "layoutlib" }
+layoutlib-runtime = { module = "com.android.tools.layoutlib:layoutlib-runtime", version.ref = "layoutlib" }
+layoutlib-resources = { module = "com.android.tools.layoutlib:layoutlib-resources", version.ref = "layoutlib" }
+layoutlib-api = { module = "com.android.tools.layoutlib:layoutlib-api", version.ref = "androidToolsBase" }
+android-tools-sdk-common = { module = "com.android.tools:sdk-common", version.ref = "androidToolsBase" }
+android-tools-common = { module = "com.android.tools:common", version.ref = "androidToolsBase" }
+android-tools-ninepatch = { module = "com.android.tools:ninepatch", version.ref = "androidToolsBase" }
+kxml2 = { module = "net.sf.kxml:kxml2", version = "2.3.0" }
 ow2-asm = { module = "org.ow2.asm:asm", version.ref = "asm" }
 ow2-asm-tree = { module = "org.ow2.asm:asm-tree", version.ref = "asm" }
 ow2-asm-commons = { module = "org.ow2.asm:asm-commons", version.ref = "asm" } # ClassRemapper/Remapper — bridge reparent + type remap
@@ -213,8 +227,8 @@ firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 play-integrity = { module = "com.google.android.play:integrity", version.ref = "playIntegrity" }
 # UMP consent SDK + AdMob mediation adapters (Android launcher only). The adapters let Meta/Pangle/Mintegral
 # BID to fill the SAME native ad slots AdMob already serves — higher eCPM through network competition, no new
-# ad placements. Only NATIVE-capable networks are wired (AppLovin removed native inventory, so it would fill
-# nothing here). Each adapter drags its network SDK in transitively and requires play-services-ads >= 25.4.0.
+# ad placements. These three are the NATIVE-capable ones; Unity and AppLovin below have no native format and
+# bid on the other units. Each adapter drags its network SDK in transitively and requires play-services-ads >= 25.4.0.
 user-messaging-platform = { module = "com.google.android.ump:user-messaging-platform", version.ref = "userMessagingPlatform" }
 admob-mediation-meta = { module = "com.google.ads.mediation:facebook", version.ref = "admobMediationMeta" }
 admob-mediation-pangle = { module = "com.google.ads.mediation:pangle", version.ref = "admobMediationPangle" }
@@ -223,6 +237,10 @@ admob-mediation-mintegral = { module = "com.google.ads.mediation:mintegral", ver
 # Its adapter does not pull the Unity SDK in, so both are declared.
 admob-mediation-unity = { module = "com.google.ads.mediation:unity", version.ref = "admobMediationUnity" }
 unity-ads = { module = "com.unity3d.ads:unity-ads", version.ref = "unityAds" }
+# AppLovin dropped native in adapter 9.14.4.0, which kept it out while the app was native only. The full-screen
+# units (the build interstitial and the rewarded ad) now earn most of the revenue, and those it does bid on.
+# The adapter pulls applovin-sdk in itself (Maven Central).
+admob-mediation-applovin = { module = "com.google.ads.mediation:applovin", version.ref = "admobMediationAppLovin" }
 # The stub android.jar (every method throws "Stub!"): compileOnly for :applog-runtime, whose tiny debug
 # log-bridge (ContentProvider + LocalSocket forwarder) is compiled against the framework APIs but never links
 # them (they resolve against the real android.jar when the runtime jar is dexed into a user's app). Ancient

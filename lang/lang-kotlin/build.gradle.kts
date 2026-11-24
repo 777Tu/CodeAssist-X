@@ -200,7 +200,9 @@ val compilerTestPattern = "dev.ide.lang.kotlin.compile.*"
 // suites into the fast gate.
 tasks.named<Test>("jvmTest") {
     filter { excludeTestsMatching(compilerTestPattern) }
-    maxHeapSize = "1536m"
+    // 2g since the parity suites (compiler/IDE-plugin test data) brought the class count past what 1536m held:
+    // the whole suite died with "Java heap space" in the shared fork.
+    maxHeapSize = "2g"
     // Point the real-foundation reproduction/regression test at the extracted classes.jar (self-gates if absent).
     dependsOn(extractComposeFoundationClasses)
     systemProperty("compose.foundation.classes.jar", composeFoundationJar.get().asFile.absolutePath)
@@ -212,12 +214,31 @@ tasks.named<Test>("jvmTest") {
     // (the root is handed over the way :kotlin-syntax hands its parser sweep the same one);
     // `-Dkt.externalCorpus=<kotlin checkout>` runs the one over the standard library. Opt-in because a sweep
     // is ~3,000 files of analysis, which does not belong in the fast correctness gate.
-    val sweeping = System.getProperty("kt.sweep") != null || System.getProperty("kt.externalCorpus") != null
+    // `-Dkt.testData=<kotlin checkout>` runs the compiler-test-data parity sweep (KotlinCompilerTestDataSweepTest);
+    // `-Dkt.testDataOnly=<path substring>` and `-Dkt.testDataLimit=<n>` narrow it.
+    listOf("kt.testData", "kt.testDataOnly", "kt.testDataLimit", "kt.testDataOut", "kt.sweepThreads").forEach { k -> System.getProperty(k)?.let { systemProperty(k, it) } }
+    // `-Dkt.completionTestData=<intellij>/plugins/kotlin/completion/testData` runs the completion-parity sweep
+    // over the IntelliJ Kotlin plugin's own completion test data (KotlinCompletionTestDataSweepTest);
+    // `kt.completionOnly` narrows it to matching cases and `kt.completionDirs` picks the directories.
+    val sweeping = System.getProperty("kt.sweep") != null || System.getProperty("kt.externalCorpus") != null ||
+        System.getProperty("kt.testData") != null || System.getProperty("kt.completionTestData") != null
+    for (key in listOf("kt.completionTestData", "kt.completionOnly", "kt.completionDirs", "kt.completionDebug", "kt.completionOut")) {
+        System.getProperty(key)?.let { systemProperty(key, it) }
+    }
     if (System.getProperty("kt.sweep") != null) systemProperty("kt.repoRoot", rootDir.absolutePath)
     System.getProperty("kt.externalCorpus")?.let { systemProperty("kt.externalCorpus", it) }
     // `-Dkt.sweepOnly=<path substring>` narrows the module sweep to matching files and dumps every error in
     // them with its source line, for working one bucket. Forwarded for the same reason as the flags above.
     System.getProperty("kt.sweepOnly")?.let { systemProperty("kt.sweepOnly", it) }
+    // `-Dkt.perf=<report file>` runs the whole-corpus analysis cost harness (KotlinAnalysisPerfHarnessTest);
+    // `kt.perfOnly` / `kt.perfLimit` narrow it. `-Dkt.jfr=<file.jfr>` records a Flight Recorder profile of the run.
+    if (System.getProperty("kt.perf") != null) {
+        for (k in listOf("kt.perf", "kt.perfOnly", "kt.perfLimit", "kt.perfCorpus", "kt.perfIndex", "kt.perfHisto")) System.getProperty(k)?.let { systemProperty(k, it) }
+        systemProperty("kt.repoRoot", rootDir.absolutePath)
+        maxHeapSize = "4g"
+        testLogging { showStandardStreams = true }
+        outputs.upToDateWhen { false }
+    }
     if (sweeping) {
         // A sweep needs more heap than the fast gate's 1536m: it holds a whole corpus's source model, and the
         // module sweep stands a second one up over a 68-jar classpath in the same JVM. Measured: the full
@@ -244,3 +265,9 @@ val compilerTest = tasks.register<Test>("compilerTest") {
     setForkEvery(1)
 }
 tasks.named("check") { dependsOn(compilerTest) }
+
+// `-Dkt.jfr=<file.jfr>` records a Flight Recorder profile of any test run of this module, the regression
+// benchmarks included.
+tasks.withType<Test>().configureEach {
+    System.getProperty("kt.jfr")?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile,jdk.ExecutionSample#period=1ms,dumponexit=true") }
+}

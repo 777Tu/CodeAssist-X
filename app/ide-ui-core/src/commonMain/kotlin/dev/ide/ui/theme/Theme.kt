@@ -42,7 +42,7 @@ import dev.ide.ui.theme.colors.SchemeDefaults
  * The preset accent palettes. [Lime] is the default and the one the app's identity is built on: unlike
  * the other three it brings its own warm neutral ramp rather than tinting the shared one.
  */
-enum class CaAccent { Lime, Violet, Teal, Orange, Pumpkin }
+enum class CaAccent { Lime, Violet, Teal, Orange, Pumpkin, Aurora }
 
 @Immutable
 data class SyntaxColors(
@@ -296,6 +296,9 @@ fun caColors(dark: Boolean, accent: CaAccent): CodeAssistColors = when {
     // Pumpkin: a lit-jack-o'-lantern orange on the plum night, a burnt orange on the light paper.
     dark && accent == CaAccent.Pumpkin -> darkColors(Color(0xFFFF9A3C), Color(0xFFF07F1A))
     !dark && accent == CaAccent.Pumpkin -> lightColors(Color(0xFFB85A0A), Color(0xFF964900))
+    // Aurora: an aurora teal on the navy night, a deep teal on the clear paper.
+    dark && accent == CaAccent.Aurora -> darkColors(Color(0xFF6FE0C8), Color(0xFF4FCDB2))
+    !dark && accent == CaAccent.Aurora -> lightColors(Color(0xFF0E7A6A), Color(0xFF0A6457))
     else -> lightColors(Color(0xFF1C9BBD), Color(0xFF137E9C))
 }
 

@@ -261,6 +261,12 @@ internal fun DesignCanvas(
         canvasSize.height / 2f + shownPan.value.y + (card.y - cardH / 2f) * shownScale.value,
     )
     val drag = state.drag
+    // A strip is a touch target on the screen, so its size is the screen's: in the frame's pixels it grows as
+    // the canvas is zoomed out, where a size in the device's own dp shrank to half a fingertip at "fit".
+    val framePerScreenPx = 1f / (k * scale.coerceAtLeast(0.01f))
+    val zoneSide = with(density) { DROP_ZONE_DP.dp.toPx() } * framePerScreenPx
+    // The middle of the dragged view's label, which DragGhost draws this far above the finger.
+    val labelAbove = with(density) { DRAG_LABEL_ABOVE_DP.dp.toPx() } * framePerScreenPx
     drag.canvasTarget = { root ->
         val local = root - canvasOrigin
         val t = tree
@@ -268,10 +274,20 @@ internal fun DesignCanvas(
         else {
             val c = cardPointOf(root)
             val moving = (drag.payload as? DragPayload.Move)?.element
-            dropTargetAt(t, document, c.x / k, c.y / k, isViewGroup, moving)
+            dropTargetAt(t, document, c.x / k, c.y / k, isViewGroup, moving, minZone = zoneSide, labelAbove = labelAbove)
         }
     }
+    // During a drag, the containers there is nowhere to drop on, each as a strip to drop on.
+    val dragging = drag.payload
+    val zones = remember(tree, document, dragging, zoneSide) {
+        val t = tree
+        if (dragging == null || t == null) emptyList()
+        else dropZones(t, document, zoneSide, isViewGroup, (dragging as? DragPayload.Move)?.element)
+    }
     val hover: DropTarget? = drag.payload?.let { drag.canvasTarget?.invoke(drag.position) }
+    // The frame with the dragged view where the finger rests, when there is one (see DesignerState.dragPreview).
+    val preview = state.dragPreview
+    val previewImage = remember(preview) { preview?.image?.toImageBitmap() }
 
     Box(
         modifier
@@ -389,7 +405,7 @@ internal fun DesignCanvas(
                         drawTransition(from, t.from.widthPx, image, frameW, motions, p, k, accent)
                     } else {
                         drawImage(
-                            image,
+                            previewImage ?: image,
                             dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
                             filterQuality = FilterQuality.Medium,
                         )
@@ -398,7 +414,15 @@ internal fun DesignCanvas(
                 state.ghost?.let { drawGhost(it, k, accent, labels) }
                 parentNode?.let { drawDashed(it.rect(k), accent.copy(alpha = 0.55f), 1.dp.toPx()) }
                 selectedNode?.let { if (drag.payload == null) drawSelection(it.rect(k), accent, handleFill, 1.dp.toPx()) }
-                hover?.let { t -> drawDropTarget(t, k, accent) }
+                // Over a frame that already shows the view dropped, the marks of where it would go are in the
+                // old frame's places and say nothing the picture does not.
+                // The strips stay, since they are what can be dropped on: all but the one the picture now shows
+                // the view inside.
+                zones.forEach { z ->
+                    val on = hover?.zone != null && hover.parent === z.element
+                    if (previewImage == null || !on) drawDropZone(z, k, accent, labels, hovered = on)
+                }
+                if (previewImage == null) hover?.let { t -> if (t.zone == null) drawDropTarget(t, k, accent) }
             }
             if (document.root != null && document.root?.children?.isEmpty() == true) {
                 EmptyLayoutHint(document.root!!, Modifier.fillMaxSize().padding(12.dp))
@@ -477,13 +501,29 @@ private fun DrawScope.drawDropTarget(t: DropTarget, k: Float, accent: Color) {
             drawLine(accent, Offset(line[0] * k, line[1] * k), Offset(line[2] * k, line[3] * k), strokeWidth = w)
             drawCircle(accent, 4.dp.toPx(), Offset(line[0] * k, line[1] * k))
             drawCircle(accent, 4.dp.toPx(), Offset(line[2] * k, line[3] * k))
-        } else {
-            // A free or constraint layout: mark the point it will be pinned at.
+        } else if (containerKind(t.parent) == ContainerKind.CONSTRAINT) {
+            // A constraint layout: mark the point it will be pinned at. Any other container places the view
+            // itself, and a mark under the finger would point at somewhere it does not go.
             val c = Offset((a.left + t.x) * k, (a.top + t.y) * k)
             val arm = 8.dp.toPx()
             drawLine(accent, c - Offset(arm, 0f), c + Offset(arm, 0f), strokeWidth = 2.dp.toPx())
             drawLine(accent, c - Offset(0f, arm), c + Offset(0f, arm), strokeWidth = 2.dp.toPx())
         }
+    }
+}
+
+/** A container with nowhere to drop a view, as the strip a drag can drop on: named, and filled when the finger is on it. */
+private fun DrawScope.drawDropZone(z: DropZone, k: Float, accent: Color, labels: TextMeasurer, hovered: Boolean) {
+    val r = Rect(z.rect[0] * k, z.rect[1] * k, z.rect[2] * k, z.rect[3] * k)
+    val corner = CornerRadius(6.dp.toPx())
+    drawRoundRect(accent.copy(alpha = if (hovered) 0.32f else 0.14f), r.topLeft, r.size, corner)
+    drawRoundRect(
+        accent, r.topLeft, r.size, corner,
+        style = Stroke(if (hovered) 2.dp.toPx() else 1.5.dp.toPx(), pathEffect = if (hovered) null else PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))),
+    )
+    val label = labels.measure(z.element.simpleName, TextStyle(color = accent, fontSize = 11.sp, fontWeight = FontWeight.Medium))
+    if (label.size.width + 8.dp.toPx() <= r.width && label.size.height <= r.height) {
+        drawText(label, topLeft = Offset(r.left + (r.width - label.size.width) / 2f, r.top + (r.height - label.size.height) / 2f))
     }
 }
 
@@ -526,6 +566,12 @@ private fun EmptyLayoutHint(root: LayoutElement, modifier: Modifier) {
 
 /** How long a designer edit's frame takes to arrive from the one before. */
 private const val TRANSITION_MS = 240
+
+/** The least side of the strip an empty container shows during a drag, in the screen's dp: a comfortable touch target. */
+internal const val DROP_ZONE_DP = 48f
+
+/** How far above the finger the middle of the dragged view's label is (DragGhost: 44dp tall, its top 64dp above). */
+internal const val DRAG_LABEL_ABOVE_DP = 42f
 
 /**
  * One step of a frame transition at [p] (0..1): the new frame with the old one fading out over it, and each

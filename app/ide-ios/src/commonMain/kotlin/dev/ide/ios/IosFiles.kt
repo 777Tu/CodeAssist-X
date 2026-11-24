@@ -125,7 +125,7 @@ internal object IosFiles {
 
 /** `NSData` to `ByteArray`. Foundation reads a file as the former and Skia decodes the latter. */
 @OptIn(ExperimentalForeignApi::class)
-private fun NSData.toByteArray(): ByteArray {
+internal fun NSData.toByteArray(): ByteArray {
     val size = length.toInt()
     if (size == 0) return ByteArray(0)
     val out = ByteArray(size)
@@ -135,7 +135,8 @@ private fun NSData.toByteArray(): ByteArray {
 
 /** `ByteArray` to `NSData`, the inverse of the read above. */
 @OptIn(ExperimentalForeignApi::class)
-private fun ByteArray.toNSData(): NSData = memScoped {
+internal fun ByteArray.toNSData(): NSData {
     if (isEmpty()) return NSData()
-    NSData.create(bytes = allocArrayOf(this@toNSData), length = size.toULong())
+    // Copied once, straight out of the array: every call to the engine goes through here.
+    return usePinned { pinned -> NSData.create(bytes = pinned.addressOf(0), length = size.toULong()) }
 }

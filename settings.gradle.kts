@@ -12,6 +12,28 @@ pluginManagement {
 }
 plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+    // Build-wide AGP settings; used here only for how R8 runs (below). Same version as AGP in libs.versions.toml.
+    id("com.android.settings") version "9.2.1"
+}
+
+// R8 runs in its own JVM with its own heap, so the Gradle daemon keeps its 3 GB (gradle.properties) and the
+// extra memory exists only while a minified build shrinks. 5 GB held R8 with the toolchain outside its
+// input (dev.ide.toolchain-split: measured 154s, 11% of it GC, peak 4.7 GB); that split is off since
+// 3.48.2 (see app/ide-android/build.gradle.kts), so R8 reads the whole app again and gets 9 GB. The root build script turns
+// horizontal class merging off with a system property of the daemon, which a separate JVM never sees, so
+// it is passed again here.
+android {
+    execution {
+        profiles {
+            create("isolatedR8") {
+                r8 {
+                    runInSeparateProcess = true
+                    jvmOptions += listOf("-Xmx9g", "-Dcom.android.tools.r8.disableHorizontalClassMerging=true")
+                }
+            }
+        }
+        defaultProfile = "isolatedR8"
+    }
 }
 
 dependencyResolutionManagement {
@@ -193,6 +215,11 @@ if (System.getenv("CI_CORE_ONLY") != "true") {
         ":layout-editor", // the Android layout editor: a built-in plugin written against the plugin SPI only (engine + UI facet)
         ":ide-core",
         ":ide-desktop",
+        // The backend as the iOS app runs it: inside the JVM that app embeds, reached over a byte channel.
+        ":ide-embedded",
+        // Real Android views off-device: layoutlib driven on a plain JVM (the desktop's, or the one embedded on
+        // iOS). Only :ide-embedded uses it, and its tests render through :ide-core, so it is a shell module too.
+        ":realview-layoutlib",
         // The iOS shell: a Compose `UIViewController` over :ide-ui, the third host beside desktop and
         // Android. It builds only on a machine with Xcode, which is every machine that can target iOS.
         ":ide-ios",
@@ -254,7 +281,7 @@ val layers = mapOf(
     // preview, and the ART compatibility shims.
     "android" to listOf(
         "android-support", "android-sdk-metadata", "art-compat",
-        "layout-preview-api", "layout-preview-impl", "applog-runtime", "android-layout-api", "layout-editor",
+        "layout-preview-api", "layout-preview-impl", "realview-layoutlib", "applog-runtime", "android-layout-api", "layout-editor",
     ),
     // Cross-cutting services, each an api/impl pair (plus its own Compose UI where it has one):
     // dependency resolution, version control, the Projects Store, analytics, the AI agent.
@@ -268,7 +295,7 @@ val layers = mapOf(
     // The IDE itself: the Compose UI, its backend port, and the desktop/Android/iOS shells.
     "app" to listOf(
         "ide-ui-api", "ide-ui-resources", "ide-ui-core", "ide-ui-components", "ide-ui-editor",
-        "ide-ui-screens", "ide-ui-testing", "ide-ui", "model-bridge", "ide-core", "ide-desktop",
+        "ide-ui-screens", "ide-ui-testing", "ide-ui", "model-bridge", "ide-core", "ide-embedded", "ide-desktop",
         "ide-android", "ide-android-e2e", "ide-ios",
         "build-cli",
     ),

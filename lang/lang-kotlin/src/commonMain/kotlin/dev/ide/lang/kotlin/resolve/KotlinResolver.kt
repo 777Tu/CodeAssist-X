@@ -2,6 +2,7 @@ package dev.ide.lang.kotlin.resolve
 
 import dev.ide.kotlin.syntax.psi.KtCallExpression
 import dev.ide.kotlin.syntax.psi.KtElement
+import dev.ide.kotlin.syntax.psi.KtTypeReference
 import dev.ide.kotlin.syntax.psi.KtExpression
 import dev.ide.kotlin.syntax.psi.KtFile
 import dev.ide.kotlin.syntax.psi.KtLambdaExpression
@@ -67,9 +68,28 @@ class KotlinResolverCaches {
     val composeCtx = HashMap<KtElement, ComposableContext>()
     val suspendCtx = HashMap<KtElement, SuspendContext>()
 
-    /** Per-flow-root result of the CFG var-nullability pass: the var references it proves non-null (see
-     *  [KotlinVarNullFlow]). Keyed by the analysed body block. */
-    val varNonNull = HashMap<KtElement, Set<KtElement>>()
+    /** Per builder lambda and type variable: where in its body the variable is fixed on demand, and to what
+     *  (see [dev.ide.lang.kotlin.resolve.postponedVariableFixedAt]). A null value records "never fixed". */
+    internal val pclaFixation = HashMap<Pair<KtLambdaExpression, String>, PclaFixation?>()
+
+    /** Per-flow-root result of the data-flow nullability pass: the variable reads it proves non-null (see
+     *  [KotlinVarNullFlow]). Keyed by the analysed function. */
+    internal val varNonNull = HashMap<KtElement, Map<KtElement, VarNul>>()
+
+    /** The roots whose data-flow pass is running, so a re-entrant ask answers instead of recursing. */
+    val varFlowInProgress = HashSet<KtElement>()
+
+    /** Per file: the `is`/`as`/`when`-pattern type references written against each simple name, the candidates
+     *  [flowProvenTypes] tries to prove at a use. Keyed by the file. */
+    val castTargets = HashMap<KtElement, Map<String, List<KtTypeReference>>>()
+
+    /** Per file: the names a null check could be written against (see `flowCheckedNames`), the cheap gate that
+     *  keeps type inference from walking the flow for a name nothing checks. Keyed by the file. */
+    val flowCheckedNames = HashMap<KtElement, Set<String>>()
+
+    /** Per element (a loop, a lambda, a statement after a narrowing): the names assigned and declared under it
+     *  (see `writtenNames`), which decide whether a narrowing survives it. */
+    internal val writtenNames = HashMap<KtElement, WrittenNames>()
 
     /**
      * Symbols for local `val`/`var` and value-parameter DECLARATIONS, keyed by the declaration.
@@ -103,6 +123,29 @@ class KotlinResolverCaches {
 
     /** The names of this file's top-level declarations, for the per-reference "does a bare name resolve" test. */
     var topLevelNames: Set<String>? = null
+
+    /** The member access paths (`b.x`, `Obj.y`) this file checks with `is`/`as`/`==` or a `when` subject: the gate
+     *  of the path smart cast, so a path nothing checks never walks for a narrowing. */
+    var checkedPaths: Set<String>? = null
+
+    /** The names of the member extension properties this file's classes declare (the live buffer's share of the
+     *  gate [dev.ide.lang.kotlin.symbols.KotlinSymbolService.isMemberExtensionPropertyName] keeps for the model). */
+    var memberExtensionPropertyNames: Set<String>? = null
+
+    /** The last segment of each of [checkedPaths], the allocation-free first gate. */
+    var checkedPathSelectors: Set<String>? = null
+
+    /** Local `val`s holding a member access path (`val y = x.data`), by path: a check on the `val` is one on the
+     *  path too (K2 aliases a stable value and the `val` initialized with it). */
+    var pathAliases: Map<String, List<String>>? = null
+
+    /** The local `val`s that may alias another name (no initializer, or a bare name as initializer), keyed by
+     *  their own name and by that initializer name; built once per snapshot for [aliasPartner]. */
+    var aliasCandidateNames: Set<String>? = null
+
+    /** The names of this file's `@Deprecated(level = HIDDEN)` functions and properties (any depth), the cheap gate
+     *  of the hidden-only resolution test. */
+    var hiddenNames: Set<String>? = null
 
     /** Key for [sameFileSymbols]: a declaration and the owner it is offered under. */
     class SameFileKey(val decl: KtElement, val ownerFqn: String?) {
@@ -167,9 +210,10 @@ class KotlinResolver(
 ) {
     val fileContext: FileContext = run {
         val imports = ktFile.importDirectives.mapNotNull { imp ->
-            imp.importedFqName?.asString()?.let { ImportInfo(it, imp.aliasName, imp.isAllUnder) }
+            // A backticked segment is a name like any other (`` `a bc`.`d e` `` and `` `a bc.d e` `` both name `a bc.d e`).
+            imp.importedFqName?.asString()?.let { ImportInfo(it.replace("`", ""), imp.aliasName, imp.isAllUnder) }
         }
-        FileContext(ktFile.name, ktFile.packageFqName.asString(), imports)
+        FileContext(ktFile.name, ktFile.packageFqName.asString().replace("`", ""), imports)
     }
 
     // --- inference ---
@@ -305,10 +349,20 @@ class KotlinResolver(
         (t as? KotlinType)?.qualifiedName?.substringAfterLast('.')?.takeIf { it.isNotEmpty() }
 
     internal fun elementAt(offset: Int): KtElement? {
+        // One resolution step asks for the same offset several times running (the local scope, the accessor
+        // scope and the constructor scope each start from it), so the last answer is kept. The tree is fixed for
+        // this resolver's snapshot, so the answer cannot go stale.
+        if (offset == lastElementOffset) return lastElement
         val len = ktFile.textLength
         if (len == 0) return null
-        return ktFile.findElementAt(if (offset >= len) len - 1 else offset.coerceAtLeast(0))
+        val e = ktFile.findElementAt(if (offset >= len) len - 1 else offset.coerceAtLeast(0))
+        lastElementOffset = offset
+        lastElement = e
+        return e
     }
+
+    private var lastElementOffset = Int.MIN_VALUE
+    private var lastElement: KtElement? = null
 
 }
 

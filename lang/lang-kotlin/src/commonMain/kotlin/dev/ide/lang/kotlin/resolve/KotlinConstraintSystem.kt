@@ -31,12 +31,21 @@ import dev.ide.lang.resolve.TypeRef
  * a call the compiler accepts. Faithful invariant/contravariant checking would need projections the model
  * doesn't retain.
  */
-internal class KotlinConstraintSystem(private val service: KotlinSymbolService) {
+internal class KotlinConstraintSystem(
+    private val service: KotlinSymbolService,
+    /** Whether a variable's own `?` is read: a nullable variable below a non-null type (`T? <: Int`, which null
+     *  itself breaks) is a contradiction, and `Int? <: T?` asks only `Int <: T`. Off for overload resolution, whose
+     *  expected-type constraints this model reads loosely; on where a single candidate's own arguments are judged. */
+    private val nullableVariableBelowNonNull: Boolean = false,
+) {
 
     private class Var(val name: String) {
         val lower = ArrayList<KotlinType>()
         val upper = ArrayList<KotlinType>()
         var exact: KotlinType? = null
+
+        /** The variable's DECLARED upper bound, as registered; the other upper bounds come from the call. */
+        var declared: KotlinType? = null
 
         /** True while [check] is walking this variable's bounds. A decomposition under that walk can add
          *  ANOTHER bound to the same variable; the walk picks it up by index, so the nested call returns
@@ -53,11 +62,35 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
     var hasContradiction = false
         private set
 
+    /** Why the contradiction arose, where it says what K2 then does with the variable: a floor above the variable's
+     *  DECLARED bound (`T : CharSequence` given an `Int`), or a constraint impossible at a nullable variable itself
+     *  (`T? <: Int`). Either leaves the variable with no type it may take, which K2 reports as uninferred; two
+     *  bounds from different arguments disagreeing does not (the variable is fixed from one, the other argument is
+     *  the mismatch). */
+    var variableLeftWithoutType = false
+        private set
+
+    /** The variables [variableLeftWithoutType] is about. */
+    val variablesLeftWithoutType = LinkedHashSet<String>()
+
+    /** Record a contradiction found outside the constraints themselves (a lambda of the wrong arity). */
+    fun contradict() {
+        hasContradiction = true
+    }
+
     val isEmpty: Boolean get() = vars.isEmpty()
+
+    /** Whether the variable [name] has any constraint besides its declared bound: a floor, an exact type, or a
+     *  ceiling the constraints added. One with none has nothing to be inferred from. */
+    fun isConstrained(name: String): Boolean {
+        val v = vars[name] ?: return false
+        return v.exact != null || v.lower.isNotEmpty() || v.upper.any { it !== v.declared }
+    }
 
     fun registerVariable(name: String, upperBound: KotlinType? = null) {
         val v = vars.getOrPut(name) { Var(name) }
         if (upperBound != null && !upperBound.isTypeParameter && upperBound.qualifiedName != "kotlin.Any") {
+            v.declared = upperBound
             if (addBound(v.upper, upperBound)) check(v)
         }
     }
@@ -87,9 +120,15 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
             when {
                 bv != null && av != null -> {} // variable <: variable: skip (rare; both stay open, fixation handles)
                 bv != null -> {
-                    if (addBound(bv.lower, a)) check(bv)
+                    // `X <: T?` asks only `X!! <: T`: the `?` already takes null.
+                    val floor = if (nullableVariableBelowNonNull && b.nullable && a.nullable) a.withNullable(false) else a
+                    if (addBound(bv.lower, floor)) check(bv)
                 }          // b ≥ a
                 av != null -> {
+                    // `T? <: B` holds for null only when B takes null.
+                    if (nullableVariableBelowNonNull && a.nullable && !b.nullable && !b.isTypeParameter) {
+                        hasContradiction = true; variableLeftWithoutType = true; variablesLeftWithoutType += av.name; return
+                    }
                     if (addBound(av.upper, b)) check(av)
                 }          // a ≤ b
                 else -> checkConcrete(
@@ -114,6 +153,17 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
         if (a.qualifiedName == b.qualifiedName) {
             decompose(b.qualifiedName, a.typeArguments, b.typeArguments); return
         }
+        // A Java parameter's collection type is flexible in mutability (`(Mutable)Map<K, V>!`): a Kotlin `Map` or
+        // `MutableMap` is the `java.util.Map` it compiles to, so `HashMap(m)` takes a read-only `m`.
+        // A Java spelling of a mapped built-in is that built-in: a Java method's `java.lang.String` result is a
+        // `kotlin.String` (`path.toString()` passed for `root: String`).
+        val aKotlin = Builtins.kotlinTypeFor(a.qualifiedName)
+        if (aKotlin != null && aKotlin == (Builtins.kotlinTypeFor(b.qualifiedName) ?: b.qualifiedName) && aKotlin !in MUTABILITY_FLEXIBLE) {
+            decompose(aKotlin, a.typeArguments, b.typeArguments); return
+        }
+        if (Builtins.javaTypeFor(a.qualifiedName) == b.qualifiedName) {
+            decompose(b.qualifiedName, a.typeArguments, b.typeArguments); return
+        }
         // Project A onto B's classifier (A's instantiation of the supertype B). Found → decompose those args.
         val proj = service.receiverSupertypeArgs(a.qualifiedName, a.typeArguments, b.qualifiedName)
         if (proj != null) {
@@ -136,6 +186,10 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
         if (service.isKnownType(a.qualifiedName) && service.isKnownType(b.qualifiedName)) hasContradiction =
             true
     }
+
+    /** The collection built-ins a Java type maps to in its MUTABLE form (`java.util.List` -> `MutableList`): a
+     *  read-only target is not that mutable type, which the classifier walk below decides instead. */
+    private val MUTABILITY_FLEXIBLE = Builtins.JAVA_TO_KOTLIN.values.filter { it.startsWith("kotlin.collections.Mutable") }.toSet()
 
     /** Pairwise decomposition of type arguments by their EFFECTIVE variance: the target argument's USE-SITE
      *  projection (`Array<out Number>`, `Comparator<in T>`, `List<*>`) if present, else the classifier [fqn]'s
@@ -212,13 +266,18 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
                 val nLo = v.lower.size
                 val nHi = v.upper.size
                 // Every pair an earlier round didn't cover: new floors × all ceilings, then old floors × new ones.
-                for (i in loDone until nLo) for (j in 0 until nHi) if (!checkPair(v.lower[i], v.upper[j])) return
-                for (i in 0 until loDone) for (j in hiDone until nHi) if (!checkPair(v.lower[i], v.upper[j])) return
+                for (i in loDone until nLo) for (j in 0 until nHi) if (!checkPair(v.lower[i], v.upper[j])) { declaredViolated(v, j); return }
+                for (i in 0 until loDone) for (j in hiDone until nHi) if (!checkPair(v.lower[i], v.upper[j])) { declaredViolated(v, j); return }
                 loDone = nLo; hiDone = nHi
             }
         } finally {
             v.checking = false
         }
+    }
+
+    /** Note a contradiction against [v]'s declared bound (its upper bound [j] is the one registered). */
+    private fun declaredViolated(v: Var, j: Int) {
+        if (v.declared != null && v.upper.getOrNull(j) === v.declared) { variableLeftWithoutType = true; variablesLeftWithoutType += v.name }
     }
 
     /** One floor-vs-ceiling pair; false once it recorded the FIRST contradiction, which ends the walk. */
@@ -272,7 +331,7 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
             val fixed: TypeRef? = when {
                 v.exact != null -> v.exact
                 v.lower.isNotEmpty() -> commonSupertype(v.lower)
-                v.upper.isNotEmpty() -> mostSpecificUpperBound(v.upper)
+                v.upper.isNotEmpty() -> mostSpecificUpperBound(v.upper, v.declared)
                 else -> fallback[name]
             }
             if (fixed != null) out[name] = fixed
@@ -287,11 +346,27 @@ internal class KotlinConstraintSystem(private val service: KotlinSymbolService) 
      * `T <: View` and `T <: Button`); the compiler fixes `T` to the expected `Button` (`Button <: View`), not
      * the declared bound — so the initializer types as `Button`, not `View`. Picking the FIRST upper bound
      * (the declared bound, registered before the constraint) mis-fixed it to the bound and false-flagged the
-     * assignment. Falls back to the first when the bounds are incomparable (unrelated types — no single
-     * greatest lower bound is modeled), matching the prior behavior in that case.
+     * assignment.
+     *
+     * When the bounds are incomparable the compiler fixes the variable to their INTERSECTION, which the model
+     * cannot spell: `fun <T : Foo> foo(): T?` assigned to a `Bar?` is `Foo & Bar`, and `val l: List<Int> =
+     * emptyNullableListOfA()!!` (`T : A`) is a `List<A & Int>`. The contextual bound stands in for it then,
+     * not the [declared] one: the intersection is a subtype of what the context asked for, so reading it as
+     * that type never reports a mismatch the compiler does not. Only where that intersection can have a value,
+     * though: an interface on either side, or a nullable contextual bound (`null` is in both). Two unrelated
+     * classes (`<T : View> findViewById(): T` assigned to a `String`) intersect in nothing, which the compiler
+     * rejects, so the declared bound stays and the mismatch is reported. Otherwise the first bound.
      */
-    private fun mostSpecificUpperBound(uppers: List<KotlinType>): KotlinType =
-        uppers.firstOrNull { cand -> uppers.all { it === cand || it.isAssignableFrom(cand) } } ?: uppers.first()
+    private fun mostSpecificUpperBound(uppers: List<KotlinType>, declared: KotlinType?): KotlinType {
+        uppers.firstOrNull { cand -> uppers.all { it === cand || it.isAssignableFrom(cand) } }?.let { return it }
+        val contextual = uppers.filter { it !== declared }
+        val pick = contextual.firstOrNull { cand -> contextual.all { it === cand || it.isAssignableFrom(cand) } }
+            ?: contextual.firstOrNull() ?: return uppers.first()
+        if (declared == null) return pick
+        val inhabited = pick.nullable || service.isInterfaceType(declared.qualifiedName) == true ||
+            service.isInterfaceType(pick.qualifiedName) == true
+        return if (inhabited) pick else uppers.first()
+    }
 
     /** The nearest common supertype of [types] — the fixation of a variable's lower bounds. Agreement is the
      *  common case; otherwise walk the first type's supertype chain for one every other is assignable to

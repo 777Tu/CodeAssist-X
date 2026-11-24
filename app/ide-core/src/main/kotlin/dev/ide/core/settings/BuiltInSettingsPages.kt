@@ -35,6 +35,7 @@ object BuiltInSettingsPages {
     const val APP_ICON_KEY = "settings.$APPEARANCE.$APP_ICON"
     const val APP_ICON_DEFAULT = "default"
     const val APP_ICON_PUMPKIN = "pumpkin"
+    const val APP_ICON_SNOWFLAKE = "snowflake"
 
     /** Full preference key of [REOPEN_LAST_PROJECT]. */
     const val REOPEN_LAST_PROJECT_KEY = "settings.$APPEARANCE.$REOPEN_LAST_PROJECT"
@@ -155,6 +156,10 @@ object BuiltInSettingsPages {
     // Keys the backend special-cases (routed to a non-generic-store effect).
     const val CONFLICT_POLICY = "conflictPolicy"
     const val ANALYTICS = "analytics"
+
+    /** Toggle key on the [PRIVACY] page: whether the app may remind someone who stopped using it of a project
+     *  they left (default on). Read by the launcher that shows them (`ReturnReminders`, :ide-android). */
+    const val RETURN_REMINDERS = "returnReminders"
     const val CLEAR_CACHES = "clearCaches"
     const val VIEW_LOGS = "viewLogs"
     const val BACKUP = "backup"
@@ -166,10 +171,11 @@ object BuiltInSettingsPages {
 
     private val d = IdeSettings()
 
-    /** All built-in pages in display order. [analyticsAvailable] gates the analytics toggle on the Privacy page.
+    /** All built-in pages in display order. [analyticsAvailable] gates the analytics toggle on the Privacy page,
+     *  and [returnReminders] the reminders switch there (only a host that can show them lists it).
      *  Code Style is not here: it has its own dedicated screen (the formatting profiles are per-language). */
-    fun all(analyticsAvailable: Boolean): List<SettingsPage> = listOf(
-        appearance, editor, completion, analysis, preview, build, buildRuntime, privacy(analyticsAvailable),
+    fun all(analyticsAvailable: Boolean, returnReminders: Boolean = false): List<SettingsPage> = listOf(
+        appearance, editor, completion, analysis, preview, build, buildRuntime, privacy(analyticsAvailable, returnReminders),
     )
 
     private val appearance = page(APPEARANCE, "Appearance", "moon", 0) {
@@ -199,6 +205,7 @@ object BuiltInSettingsPages {
                     SettingControl.Choice.Option(IdeSettings.ACCENT_TEAL, "Teal"),
                     SettingControl.Choice.Option(IdeSettings.ACCENT_ORANGE, "Orange (Legacy)"),
                     SettingControl.Choice.Option(IdeSettings.ACCENT_PUMPKIN, "Pumpkin"),
+                    SettingControl.Choice.Option(IdeSettings.ACCENT_AURORA, "Aurora"),
                     SettingControl.Choice.Option(IdeSettings.ACCENT_CUSTOM, "Custom"),
                     // App themes plugins ship, after the IDE's own. Read per call, so a plugin's appear once its
                     // UI has loaded, and go when it is turned off.
@@ -219,6 +226,7 @@ object BuiltInSettingsPages {
                     options = listOf(
                         SettingControl.Choice.Option(APP_ICON_DEFAULT, "Default"),
                         SettingControl.Choice.Option(APP_ICON_PUMPKIN, "Pumpkin"),
+                        SettingControl.Choice.Option(APP_ICON_SNOWFLAKE, "Snowflake"),
                     ),
                 )
             },
@@ -239,7 +247,7 @@ object BuiltInSettingsPages {
             ),
             SettingControl.Toggle(
                 "seasonal", "Seasonal touches",
-                "Small decorations around holidays, like bats after a successful build at Halloween. Your theme and editor only change if you choose to dress up",
+                "Small decorations around holidays, like bats after a successful build at Halloween or snow in winter. Your theme and editor only change if you choose to dress up",
                 default = d.seasonalTouches,
             ),
             SettingControl.Toggle(
@@ -448,8 +456,11 @@ object BuiltInSettingsPages {
         )
     }
 
-    private fun privacy(analyticsAvailable: Boolean) = page(PRIVACY, "Privacy & Data", "info", 50) {
+    private fun privacy(analyticsAvailable: Boolean, returnReminders: Boolean) = page(PRIVACY, "Privacy & Data", "info", 50) {
         buildList {
+            if (returnReminders) {
+                add(SettingControl.Toggle(RETURN_REMINDERS, "Reminders", "An occasional notification about a project you left unfinished. At most one a week.", default = true, group = "Privacy"))
+            }
             if (analyticsAvailable) {
                 add(SettingControl.Toggle(ANALYTICS, "Share performance analytics", "Anonymous performance metrics only — never your code or file names", default = false, group = "Privacy"))
             }

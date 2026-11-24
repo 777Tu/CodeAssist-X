@@ -2,7 +2,9 @@ package dev.ide.lang.kotlin.resolve
 
 import dev.ide.kotlin.syntax.psi.KtAnnotatedExpression
 import dev.ide.kotlin.syntax.psi.KtCallExpression
+import dev.ide.kotlin.syntax.psi.KtCallableReferenceExpression
 import dev.ide.kotlin.syntax.psi.KtDotQualifiedExpression
+import dev.ide.kotlin.syntax.psi.KtElement
 import dev.ide.kotlin.syntax.psi.KtExpression
 import dev.ide.kotlin.syntax.psi.KtLabeledExpression
 import dev.ide.kotlin.syntax.psi.KtLambdaArgument
@@ -17,6 +19,7 @@ import dev.ide.kotlin.syntax.psi.KtReturnExpression
 import dev.ide.kotlin.syntax.psi.KtValueArgument
 import dev.ide.kotlin.syntax.psi.KtValueArgumentList
 import dev.ide.kotlin.syntax.psi.ValueArgument
+import dev.ide.kotlin.syntax.psi.collectDescendantsOfType
 import dev.ide.kotlin.syntax.psi.getStrictParentOfType
 import dev.ide.lang.kotlin.symbols.KotlinSymbol
 import dev.ide.lang.kotlin.symbols.KotlinSymbolService
@@ -34,14 +37,29 @@ internal fun KotlinResolver.bindLambdaReturn(
     bindings: MutableMap<String, TypeRef>
 ) {
     val r = service.functionalShape(pt)?.returnType as? KotlinType ?: return
-    if (r.isTypeParameter) inferLambdaResult(lambda)?.let { result ->
-        // A NULLABLE functional return `R?` (the `mapNotNull` `transform: (T) -> R?` shape, `R : Any`) absorbs
-        // one level of the lambda result's nullability: `{ … : Note? }` binds R = Note, so the call's `List<R>`
-        // is `List<Note>`, not `List<Note?>` (which would make the elements spuriously nullable). A bare `R`
-        // (`map { … }`, `let { … }`) keeps the result's nullability unchanged.
-        val bound = if (r.nullable && result is KotlinType) result.withNullable(false) else result
-        bindings.getOrPut(r.qualifiedName) { bound }
-    }
+    if (r.isTypeParameter) inferLambdaResult(lambda)?.let { bindFunctionalResult(r, it, bindings) }
+}
+
+/** A callable reference fills a functional parameter as a lambda does: its target's result binds the
+ *  parameter's result type parameter (`let(regex::find)` ⇒ `R = MatchResult?`, `map(P::age)` ⇒ `R = Int`).
+ *  False when [pt] is not functional, so the caller types the reference as an ordinary value instead. */
+internal fun KotlinResolver.bindCallableReferenceReturn(
+    pt: KotlinType,
+    ref: KtCallableReferenceExpression,
+    bindings: MutableMap<String, TypeRef>
+): Boolean {
+    val r = service.functionalShape(pt)?.returnType as? KotlinType ?: return false
+    if (r.isTypeParameter) callableReferenceResultType(ref)?.let { bindFunctionalResult(r, it, bindings) }
+    return true
+}
+
+private fun bindFunctionalResult(r: KotlinType, result: TypeRef, bindings: MutableMap<String, TypeRef>) {
+    // A NULLABLE functional return `R?` (the `mapNotNull` `transform: (T) -> R?` shape, `R : Any`) absorbs
+    // one level of the result's nullability: `{ … : Note? }` binds R = Note, so the call's `List<R>` is
+    // `List<Note>`, not `List<Note?>` (which would make the elements spuriously nullable). A bare `R`
+    // (`map { … }`, `let { … }`) keeps the result's nullability unchanged.
+    val bound = if (r.nullable && result is KotlinType) result.withNullable(false) else result
+    bindings.getOrPut(r.qualifiedName) { bound }
 }
 
 /**
@@ -63,7 +81,27 @@ internal fun KotlinResolver.inferLambdaResult(lambda: KtLambdaExpression): TypeR
     // in turn makes a `by`-delegate on it invalid (Unit has no getValue/setValue). A non-empty body's result is
     // its last statement's type.
     if (statements.isEmpty()) return service.typeByFqn("kotlin.Unit")
+    // A bare `return@label` aimed at this lambda returns Unit from it, which makes the whole lambda's result
+    // Unit and coerces the last statement away: `run { if (p) return@run; completed() }` is a `Unit`, not the
+    // `String` its last line computes.
+    if (hasBareReturnToItself(lambda)) return service.typeByFqn("kotlin.Unit")
     return inferType(statements.last())
+}
+
+private fun hasBareReturnToItself(lambda: KtLambdaExpression): Boolean {
+    val body = lambda.bodyExpression ?: return false
+    if (!body.text.contains("return@")) return false
+    val labels = HashSet<String>()
+    (lambda.parent as? KtLabeledExpression)?.getLabelName()?.let { labels += it }
+    // The implicit label is the name of the call the lambda is passed to (`run`, `forEach`).
+    val arg = lambda.parent as? KtValueArgument ?: lambda.parent?.parent as? KtValueArgument
+    val call = (arg?.parent as? KtValueArgumentList)?.parent as? KtCallExpression ?: arg?.parent as? KtCallExpression
+    (call?.calleeExpression as? KtNameReferenceExpression)?.getReferencedName()?.let { labels += it }
+    if (labels.isEmpty()) return false
+    return body.collectDescendantsOfType<KtReturnExpression>().any { r ->
+        r.returnedExpression == null && r.getLabelName() in labels &&
+            r.getStrictParentOfType<KtLambdaExpression>() === lambda
+    }
 }
 
 /** The `(P…) -> R` type a lambda is expected to be (from the parameter it fills), receiver-bound — used
@@ -116,6 +154,7 @@ internal fun KotlinResolver.expectedFunctionTypeFor(lambda: KtLambdaExpression):
     // A lambda declared with an explicit functional type (a `val`/param/return annotation) is typed by that
     // type, not by an enclosing call — so `val f: Scope.() -> Unit = { }` establishes its receiver.
     contextualFunctionType(lambda)?.let { return it }
+    infixLambdaFunctionType(lambda)?.let { return it }
     val (call, argIndex) = enclosingCallAndParamIndex(lambda) ?: return null
     // A CONSTRUCTOR is not a function callee, so it falls to [constructorCallee] — a lambda argument of
     // `EditorPainter(paint = { … })` carries a receiver exactly as a function's does.
@@ -128,13 +167,31 @@ internal fun KotlinResolver.expectedFunctionTypeFor(lambda: KtLambdaExpression):
     // receiver's type param from the actual receiver (T = typeof(x)), so the block's receiver `this` is the
     // concrete type (`MutableList<Int>`), not an unbound `T`. Without it a member call in the block
     // (`apply { add(x) }`) can't resolve its receiver. (Skip lambdas to avoid recursing into this lambda.)
-    val bindings = HashMap<String, TypeRef>(bindingsFromValueArgs(sym, call))
+    // The call's EXPLICIT type arguments fix their parameters outright (`buildMap<String, Int> { }` makes the
+    // block's receiver a `MutableMap<String, Int>`); value arguments bind the rest.
+    val bindings = HashMap<String, TypeRef>(bindingsFromValueArgs(sym, call) + bindingsFromTypeArgs(sym, call))
     sym.receiverTypeParam?.let { tp ->
         val recv =
             (call.parent as? KtDotQualifiedExpression)?.takeIf { it.selectorExpression === call }?.receiverExpression
         recv?.let { inferType(it) }?.let { bindings.getOrPut(tp) { it } }
     }
+    bindFromExpectedType(sym, call, raw, bindings)
     return service.substitute(raw, bindings) as? KotlinType
+}
+
+/**
+ * A type variable the arguments leave open and the lambda's type [raw] needs is fixed from the call's EXPECTED
+ * type when one reaches it: `val d: DIV = jsObject { tabIndex }` makes `T` a `DIV`, so the builder's receiver is
+ * one. Only a concrete, known expected type binds, and only variables still unbound.
+ */
+private fun KotlinResolver.bindFromExpectedType(sym: KotlinSymbol, call: KtCallExpression, raw: KotlinType, bindings: MutableMap<String, TypeRef>) {
+    if (sym.typeParameters.none { it !in bindings && mentionsTypeParam(raw, it) }) return
+    val ret = sym.type as? KotlinType ?: return
+    val expected = expectedTypeAt(call.textRange.startOffset)
+        ?.takeIf { !it.isTypeParameter && it.qualifiedName != "kotlin.Any" && service.isKnownType(it.qualifiedName) } ?: return
+    val fromExpected = HashMap<String, TypeRef>()
+    unify(ret, if (ret.nullable) expected else expected.withNullable(false), fromExpected)
+    for ((k, v) in fromExpected) if (k in sym.typeParameters && (v as? KotlinType)?.isTypeParameter == false) bindings.getOrPut(k) { v }
 }
 
 /** The value-parameter types a lambda receives (in order), from the functional parameter it fills — for
@@ -158,10 +215,11 @@ internal fun KotlinResolver.expectedLambdaShape(lambda: KtLambdaExpression): Kot
     // typed parameter default, a function expression body) is typed by that declaration — its `it`/named params
     // come from the declared `(P…) -> R`, not from an enclosing call (there is none).
     contextualFunctionType(lambda)?.let { ft -> service.functionalShape(ft)?.let { return it } }
+    infixLambdaFunctionType(lambda)?.let { ft -> service.functionalShape(ft)?.let { return it } }
     val (call, argIndex) = enclosingCallAndParamIndex(lambda) ?: return null
     // A SAM constructor (`Comparator<String> { a, b -> … }`, a project `fun interface`) has no callee FUNCTION —
     // the lambda IS the interface's single-abstract-method body. Fall back to that method's shape.
-    val sym = resolveCalleeFunction(call) ?: constructorCallee(call)
+    val sym = resolveCalleeFunction(call) ?: constructorCallee(call) ?: valueInvokeCallee(call)
         ?: return arrayInitShape(call) ?: samConstructorShape(call)
     val raw = sym.paramTypes.getOrNull(lambdaParamIndex(call, argIndex, sym)) as? KotlinType
         ?: return arrayInitShape(call) ?: samConstructorShape(call)
@@ -174,8 +232,20 @@ internal fun KotlinResolver.expectedLambdaShape(lambda: KtLambdaExpression): Kot
     // with `T : S`, so the receiver binding `T = Int` makes `S ≥ Int` — the block's `acc` is `Int`, not a bare
     // `S`. Only extensions with a sibling upper bound (`reduce`, `getOrElse`) carry these, so it's a no-op elsewhere.
     for ((p, lb) in sym.typeParamLowerBounds) bindings.getOrPut(p) { lb }
+    bindFromExpectedType(sym, call, raw, bindings)
     val bound = service.substitute(raw, bindings) as? KotlinType ?: return null
     return service.functionalShape(bound)
+}
+
+/** The `invoke` a call on a VALUE runs (`x { … }`, `(impl) { … }` with an `operator fun ABuilder<…>.invoke(block: B.() -> Unit)`):
+ *  a member or an in-scope extension of the callee's type, bound to that type, that takes the call's arguments. */
+private fun KotlinResolver.valueInvokeCallee(call: KtCallExpression): KotlinSymbol? {
+    val type = inferType(call.calleeExpression)?.takeIf { !it.isTypeParameter } ?: return null
+    if (dev.ide.lang.kotlin.symbols.TypeRendering.isFunctionType(type.qualifiedName)) return null
+    val n = call.valueArguments.size
+    return service.membersNamed(type.qualifiedName, type.typeArguments, "invoke")
+        .filter { it.kind == dev.ide.lang.resolve.SymbolKind.METHOD && (!it.isExtension || extensionInScope(it)) }
+        .let { all -> all.firstOrNull { it.paramTypes.size == n } ?: all.singleOrNull() }
 }
 
 /** Bind a callee's type parameters from the call's EXPLICIT type arguments (`Comparator<String> { … }` →
@@ -189,7 +259,7 @@ internal fun KotlinResolver.bindingsFromTypeArgs(
     val args = call.typeArgumentList?.arguments ?: return emptyMap()
     val bindings = HashMap<String, TypeRef>()
     sym.typeParameters.forEachIndexed { i, tp ->
-        args.getOrNull(i)?.typeReference?.text?.let { service.typeFromText(it, fileContext) }
+        args.getOrNull(i)?.typeReference?.text?.let { service.typeFromText(it, fileContext, enclosingClassFqnOf(call)) }
             ?.let { bindings[tp] = it }
     }
     return bindings
@@ -231,9 +301,31 @@ internal fun KotlinResolver.samConstructorShape(call: KtCallExpression): KotlinS
 
 /** The call a lambda argument belongs to + its parameter index. `KtCallExpression.valueArguments`
  *  ALREADY includes the trailing lambda, so the index is its position in that list. */
+/** The function type a lambda written as the RIGHT operand of an infix call fills (`x checkType { … }`,
+ *  `x shouldSatisfy { … }`): the infix function's single parameter, its receiver type parameter bound from the
+ *  left operand. Null for any other position or an unresolved infix function. */
+internal fun KotlinResolver.infixLambdaFunctionType(lambda: KtLambdaExpression): KotlinType? {
+    var e: KtElement = lambda
+    while (e.parent is KtLabeledExpression || e.parent is KtAnnotatedExpression || e.parent is KtParenthesizedExpression) {
+        e = e.parent as KtElement
+    }
+    val bin = e.parent as? dev.ide.kotlin.syntax.psi.KtBinaryExpression ?: return null
+    if (bin.right !== e || bin.operationToken != dev.ide.kotlin.syntax.psi.KtTokens.IDENTIFIER) return null
+    val sym = resolveInfixFunction(bin) ?: return null
+    val raw = sym.paramTypes.firstOrNull() as? KotlinType ?: return null
+    if (!TypeRendering.isFunctionType(raw.qualifiedName) && !raw.isExtensionFunctionType) return null
+    val bindings = HashMap<String, TypeRef>()
+    sym.receiverTypeParam?.let { tp -> bin.left?.let { inferType(it) }?.let { bindings[tp] = it } }
+    return service.substitute(raw, bindings) as? KotlinType
+}
+
 internal fun KotlinResolver.enclosingCallAndParamIndex(lambda: KtLambdaExpression): Pair<KtCallExpression, Int>? {
-    val valueArg = lambda.parent as? ValueArgument ?: return null
-    val call = when (val p = lambda.parent) {
+    // A labeled or annotated lambda (`build l1@{ emit(1) }`, `run @Ann { }`) sits one node down from its argument:
+    // it fills the same parameter and gets the same receiver.
+    var arg: KtElement = lambda
+    while (arg.parent is KtLabeledExpression || arg.parent is KtAnnotatedExpression) arg = arg.parent as KtElement
+    val valueArg = arg.parent as? ValueArgument ?: return null
+    val call = when (val p = arg.parent) {
         is KtLambdaArgument -> p.parent as? KtCallExpression
         is KtValueArgument -> (p.parent as? KtValueArgumentList)?.parent as? KtCallExpression
         else -> null

@@ -46,6 +46,8 @@ import java.nio.file.Path
 internal class LearnBackend(
     private val ctx: BackendContext,
     private val remote: dev.ide.store.LearnRemoteService = dev.ide.store.LearnRemoteService.Unsupported,
+    /** Today's local date, for seasonal tracks ([LearnTrackDef.visibleIn]). Injectable so tests can pick the day. */
+    private val today: () -> java.time.LocalDate = { java.time.LocalDate.now() },
 ) : LearnService {
 
     private val log = dev.ide.platform.log.Log.logger("learn.compose")
@@ -97,8 +99,11 @@ internal class LearnBackend(
 
     override suspend fun catalog(): UiLearnCatalog {
         val c = catalogStore.catalog()
+        val date = today()
         return UiLearnCatalog(
-            tracks = c.tracks.map { it.toUiTrack() },
+            // A seasonal track is listed only in its window. Its lessons stay loadable and its badge stays
+            // earned; it just leaves the catalog until next season.
+            tracks = c.tracks.filter { it.visibleOn(date) }.map { it.toUiTrack() },
             paths = c.paths.map { p ->
                 UiLearnPath(p.id, p.title, p.subtitle, p.iconId, p.accentColor, p.trackIds)
             },
@@ -246,7 +251,7 @@ internal class LearnBackend(
     private fun shareSolutionLater(lessonId: String, stepId: String, code: String) {
         val step = findStep(lessonId, stepId) as? LearnStepDef.Interactive ?: return
         if (step.check.ide.isNotEmpty()) return // a tour step's "solution" is what the learner did, not code
-        if (!community.available() || remote.accountId() == null || !shareSolutions()) return
+        if (!community.available() || !remote.accountKnown() || !shareSolutions()) return
         backgroundScope.launch { community.submitSolution(lessonId, stepId, code, step.language) }
     }
 
@@ -653,6 +658,8 @@ internal class LearnBackend(
     override fun resume(): UiResumePoint? {
         val lessonId = pref(KEY_RESUME_LESSON) ?: return null
         val (track, lesson) = findLesson(lessonId) ?: return null
+        // Out of season the track is not listed, so offering to continue it would lead nowhere.
+        if (!track.visibleOn(today())) return null
         val lastIndex = (lesson.steps.size - 1).coerceAtLeast(0)
         val step = (pref(KEY_RESUME_STEP)?.toIntOrNull() ?: 0).coerceIn(0, lastIndex)
         val done = completedSteps(lessonId).count { id -> lesson.steps.any { it.id == id } }
@@ -780,7 +787,9 @@ internal class LearnBackend(
     override suspend fun syncProgress(): Boolean = runCatching { progressSync.sync() }.getOrDefault(false)
 
     override fun account(): UiLearnAccount {
-        val signedIn = remote.learnRemoteAvailable() && remote.accountId() != null
+        // Read while the Learn tab composes, on the UI thread: `accountId` would exchange the remembered sign-in
+        // for a session right here, and on a connection that hangs the tab froze until the request timed out.
+        val signedIn = remote.learnRemoteAvailable() && remote.accountKnown()
         if (!signedIn) return UiLearnAccount(signedIn = false, available = remote.learnRemoteAvailable())
         val state = progressSync.account
         val streak = state?.streak ?: progressSync.cachedStreak() ?: dev.ide.store.LearnStreak()

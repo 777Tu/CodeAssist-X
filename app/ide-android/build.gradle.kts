@@ -24,6 +24,8 @@ plugins {
     // ALL — see buildSrc dev.ide.build.kotlinc). No-op until the device spike (KotlinCompilerArtSpikeTest)
     // discovers the first breakage and a pass is added to ArtPatchPasses.
     id("dev.ide.kotlinc-art")
+    // Takes the bundled toolchain out of R8's input for minified builds (see the toolchainSplit block).
+    id("dev.ide.toolchain-split")
     // Firebase, for push notifications. Declared but NOT applied here: the plugin fails the build when
     // google-services.json is missing, and a contributor cloning this repo has no reason to hold our
     // Firebase config. It is applied below only when that file exists; with it absent FirebaseApp never
@@ -245,6 +247,8 @@ val bundleTestRunSpikeAsset = tasks.register<Copy>("bundleTestRunSpikeAsset") {
     }
     from(project(":jvm-interp").layout.buildDirectory.dir("classes/java/test")) {
         include("dev/ide/jvm/fixtures/ReflectMethods*.class", "dev/ide/jvm/fixtures/ReflectMembers*.class")
+        include("dev/ide/jvm/fixtures/ReflectNesting*.class", "dev/ide/jvm/fixtures/Handles*.class")
+        include("dev/ide/jvm/fixtures/VarHandles*.class", "dev/ide/jvm/fixtures/Updaters*.class")
         into("classes")
     }
     from(testRunSpikeJars) { into("jars") }
@@ -327,6 +331,21 @@ val moshiArtLibs: Configuration by configurations.creating {
     isCanBeConsumed = false; isCanBeResolved = true; isTransitive = true
 }
 dependencies { moshiArtLibs("com.squareup.moshi:moshi:1.15.2") }
+// The runtimes the other bundled processors read their annotations from, for the interpreted runs in the same
+// test: each resolves to plain JVM jars (Room's and Room 3's are multiplatform, with a JVM variant).
+val kspArtLibs = mapOf(
+    "room" to libs.room.runtime, "room3" to libs.room3.runtime, "hilt" to libs.hilt.core, "glide" to libs.glide.annotations,
+).mapValues { (id, dep) ->
+    configurations.create("kspArtLibs_$id") { isCanBeConsumed = false; isCanBeResolved = true }
+        .also { dependencies.add(it.name, dep) }
+}
+val bundleKspLibsAsset = tasks.register<Copy>("bundleKspLibsAsset") {
+    description = "Stage the Room/Room 3/Hilt/Glide runtime jars as an androidTest asset for the KSP-on-ART spike."
+    into(layout.buildDirectory.dir("moshi-libs-asset/ksp-libs"))
+    for ((id, cfg) in kspArtLibs) {
+        from(provider { cfg.filter { it.name.endsWith(".jar") && !it.name.startsWith("kotlin-stdlib") } }) { into(id) }
+    }
+}
 val bundleMoshiLibsAsset = tasks.register<Copy>("bundleMoshiLibsAsset") {
     description = "Stage the Moshi runtime jars (moshi + okio) as an androidTest asset for the KSP-on-ART spike."
     from(provider { moshiArtLibs.filter { it.name.endsWith(".jar") } })
@@ -617,6 +636,36 @@ gradle.taskGraph.whenReady {
     )
 }
 
+// --- Toolchain outside R8 ------------------------------------------------------------------------------
+// The minified builds keep the bundled toolchain out of R8: R8 only sees it on its classpath, and it is
+// dexed on its own. These packages are kept by name anyway (proguard-rules.pro), so R8 had little to do to
+// them, but reading and tracing them was about half of R8's time and more heap than a 3 GB daemon has.
+// Generated keep rules protect what the toolchain uses in the rest of the app.
+// OFF since 3.48.2: D8 desugared the toolchain against the core-library config, but the app's `j$` library
+// is shrunk (L8) to what R8 saw, so `j$.util.stream.Stream`, `DesugarCollectors`, `DesugarDuration` and
+// `Collection$-EL` were referenced and never shipped. StreamEx failed to load, IntelliJ's class-file stubs
+// with it, and no JDK class resolved in a Java file (3.48.0/3.48.1). Before turning this back on, the
+// toolchain's desugared-library keep rules (D8 --desugared-lib-pg-conf-output) must reach L8, and every
+// `Lj$/` type the APK references must be defined in it.
+toolchainSplit {
+    // buildTypes.addAll("release", "profile")
+    d8Version.set("9.5.29") // = the root build script's R8 pin, which AGP shrinks the rest of the app with
+    desugarConfigVersion.set(libs.versions.desugarJdkLibs)
+    packages.addAll(
+        "org/jetbrains/kotlin/",      // the unshaded K2 compiler, Analysis API and compiler plugins
+        "com/intellij/",              // the IntelliJ platform it runs on
+        "org/intellij/",
+        "org/jetbrains/org/",         // IntelliJ's relocated ASM
+        "org/jetbrains/concurrency/",
+        "one/util/streamex/",
+        "it/unimi/dsi/fastutil/",
+        "org/eclipse/",               // JDT/ecj, Eclipse core, OSGi, JGit
+        "com/android/tools/r8/",      // the in-process D8/R8
+        "org/benf/cfr/",              // the decompiler
+        "com/sun/jna/",
+    )
+}
+
 android {
     namespace = "dev.ide.android"
     compileSdk = 36
@@ -631,8 +680,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // versionCode must exceed the last published release (the previous-codebase app reached ~29).
-        versionCode = 135
-        versionName = "3.47.0"
+        versionCode = 138
+        versionName = "3.48.2"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -992,7 +1041,7 @@ val fetchAndroidBuildTools = tasks.register("fetchAndroidBuildTools") {
 // Run before anything AGP does, so the freshly-fetched lib*.so are on disk when the native-lib merge runs,
 // and the staged kotlin-stdlib.jar asset is present when the asset merge runs.
 tasks.named("preBuild").configure {
-    dependsOn(fetchAndroidBuildTools, stripAndroidJarAsset, generatePrebuiltIndexAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleLayoutEditorComposeAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, predexKotlinStdlib, predexAppLogRuntime, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleAwtFixtureAsset)
+    dependsOn(fetchAndroidBuildTools, stripAndroidJarAsset, generatePrebuiltIndexAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleLayoutEditorComposeAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, predexKotlinStdlib, predexAppLogRuntime, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleKspLibsAsset, bundleAwtFixtureAsset)
 }
 
 // Same Android packaging gap as the fonts above, for the i18n string resources. :ide-ui-resources'
@@ -1306,9 +1355,13 @@ dependencies {
     // it never bids.
     implementation(libs.admob.mediation.unity)
     implementation(libs.unity.ads)
+    // AppLovin: interstitial + rewarded demand only (no native since its adapter 9.14.4.0). It does nothing
+    // until AppLovin is added as a bidding source in AdMob and mapped to those units with the account's SDK key.
+    implementation(libs.admob.mediation.applovin)
     // FileProvider (androidx.core.content.FileProvider) — hands other apps content:// URIs to our
     // app-private project files for Share / "Open with", and grants read access on inbound intents.
     implementation(libs.androidx.core)
+    implementation(libs.androidx.work.runtime)
     implementation(libs.kotlinx.coroutines.core)
 
     // The on-device Kotlin interpreter (:interp-core) + its Compose bridge/render surface (:interp-compose,

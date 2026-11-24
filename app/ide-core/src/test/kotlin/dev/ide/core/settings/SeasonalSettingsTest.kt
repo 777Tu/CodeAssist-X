@@ -5,8 +5,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The Halloween settings: the Pumpkin accent, the caret style and the seasonal-touches switch all survive a
- * save and load, and a value the store does not know falls back instead of reaching the UI.
+ * The seasonal settings: the Pumpkin and Aurora accents, the caret style and the seasonal-touches switch all
+ * survive a save and load, and a value the store does not know falls back instead of reaching the UI.
  */
 class SeasonalSettingsTest {
 
@@ -20,6 +20,15 @@ class SeasonalSettingsTest {
         assertEquals(IdeSettings.ACCENT_PUMPKIN, back.accent)
         assertEquals(IdeSettings.CARET_CANDLE, back.caretStyle)
         assertEquals(false, back.seasonalTouches)
+    }
+
+    @Test
+    fun theWinterChoicesRoundTrip() {
+        store.save(IdeSettings(accent = IdeSettings.ACCENT_AURORA, caretStyle = IdeSettings.CARET_CANDLE))
+        assertEquals(IdeSettings.ACCENT_AURORA, store.load().accent)
+        // The Home card's dress-up writes the generic key; the store must accept the new accent there too.
+        prefs["settings.appearance.accent"] = "aurora"
+        assertEquals(IdeSettings.ACCENT_AURORA, store.load().accent)
     }
 
     @Test

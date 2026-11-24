@@ -147,6 +147,19 @@ class IosBackend(
 
     private var active: ProjectInfo? = null
 
+    /** The backend running in the app's embedded JVM, once the app has started one; see [EmbeddedBackend]. */
+    private var embedded: EmbeddedBackend? = null
+
+    /** Called by the app before the UI is created, with the JVM it started. */
+    fun attachEmbeddedJvm(jvm: EmbeddedJvm) {
+        embedded = EmbeddedBackend(jvm) { followedRoot ?: active?.rootPath?.takeIf { it.isNotEmpty() } }
+    }
+
+    override fun uiPlugins(): List<dev.ide.ui.ext.UiPlugin> = embedded?.uiPlugins ?: emptyList()
+
+    /** Build and run are the embedded backend's when there is one; without it this host cannot build. */
+    override val build: dev.ide.ui.backend.BuildService get() = embedded?.build ?: this
+
     /**
      * Project creation and the project model behind it: the built-in templates, and what a created project
      * records about itself. See [IosProjects] for why the store is opened per operation rather than held.
@@ -171,6 +184,7 @@ class IosBackend(
         appBuild = IosBundle.buildNumber(),
         projectsRoot = { projectsRoot },
         mediaBaseUrl = StoreConfig.STORE_MEDIA_URL,
+        aiProxyUrl = StoreConfig.AI_PROXY_URL,
         cacheRoot = IosFiles.supportDir(),
         preferences = preferences,
         adopt = { dir ->
@@ -178,8 +192,10 @@ class IosBackend(
                 "That download isn't a project CodeAssist can open"
             } else {
                 // Nothing else to do: [projects] lists the directories under the root, so an unpacked
-                // archive is a project the moment it lands. The picker just has to be told to look again.
-                bumpProjects()
+                // archive is a project the moment it lands. The picker is told to look again by the screen
+                // that asked for the install; the project epoch stays put, because advancing it says a
+                // project was opened and the app would walk into the editor on whichever one was open before.
+                bumpFs()
                 null
             }
         },
@@ -215,6 +231,10 @@ class IosBackend(
         if (root == null || !IosFiles.isDirectory(root)) {
             return TreeNode(id = "root", name = "No project", kind = NodeKind.Workspace, filePath = null)
         }
+        // With an embedded backend the tree is the engine's own, the one the other hosts show. Until it has
+        // opened the project the folder is shown as it is, and the tree is asked for again when it has.
+        embedded?.fileTree(root, mode, starter = { work -> analysisScope.launch(ioDispatcher) { work() } }, onReady = ::bumpFs)
+            ?.let { return it }
         return TreeNode(
             id = root,
             name = IosFiles.nameOf(root),
@@ -483,6 +503,19 @@ class IosBackend(
     /** The declarations the preview libraries were last resolved for, and the jars they resolved to. */
     private var previewLibraries: Pair<List<Coordinate>, List<String>>? = null
 
+    /**
+     * The project an engine has open (see [EngineBackend]), which this backend opens for itself only when a
+     * preview is first asked for: its own index and its own copy of the libraries serve nothing else there,
+     * and most projects are opened and closed without a preview being drawn.
+     */
+    @kotlin.concurrent.Volatile
+    internal var followedRoot: String? = null
+
+    private suspend fun follow() {
+        val root = followedRoot ?: return
+        if (active?.rootPath != root) previewStage("Preparing the preview") { openProject(root) }
+    }
+
     override suspend fun composePreviews(path: String, text: String): List<UiComposePreview> =
         if (!path.endsWith(".kt", ignoreCase = true)) emptyList()
         else withAnalysis(emptyList()) { analysis -> analysis.previews(path, text).map(::toUiPreview) }
@@ -505,6 +538,7 @@ class IosBackend(
     ): IosPreviewFrame {
         val runtime = previewRuntimeJars()
         if (runtime.isEmpty()) return IosPreviewFrame(null, listOf("This build of the app does not carry the preview runtime."))
+        follow()
         val blob = withAnalysis(null) { it.lowerPreview(path, text, functionName) }
             ?: return IosPreviewFrame(null, listOf("`$functionName` could not be lowered for preview."))
         val classpath = runtime + previewLibraryJars()
@@ -535,12 +569,16 @@ class IosBackend(
         val runtime = previewRuntimeJars()
         if (runtime.isEmpty()) return IosPreviewSession(null, IosPreviewFrame(null, listOf("This build of the app does not carry the preview runtime.")))
         try {
+            follow()
             val blob = previewStage("Lowering $functionName") {
                 withAnalysis(null) { it.lowerPreview(path, text, functionName) }
             } ?: return IosPreviewSession(null, IosPreviewFrame(null, listOf("`$functionName` could not be lowered for preview.")))
             val libraries = previewStage("Resolving preview libraries") { previewLibraryJars() }
             if (libraries.isEmpty()) {
-                previewLog.warn("no preview libraries resolved; the preview runs on the runtime alone and will likely fail")
+                previewLog.warn("no preview libraries resolved")
+                return IosPreviewSession(null, IosPreviewFrame(null, listOf(
+                    "The libraries this preview runs on could not be downloaded. Check the connection and open the preview again.",
+                )))
             }
             val classpath = runtime + libraries
             val warm = previewRenderer?.let { previewRendererClasspath == classpath } == true
@@ -627,6 +665,24 @@ class IosBackend(
             ?: IosPreviewRenderer(classpath).also { previewRenderer = it; previewRendererClasspath = classpath }
 
     /** The project's libraries as the preview runs them, re-resolved only when the declarations change. */
+    /**
+     * Resolves what a Compose preview runs on as the project opens, with the project's other downloads, where
+     * the first preview would otherwise wait for it (and, on a slow connection, time out in front of the user).
+     * Only for a project that uses Compose, and only once the build carries the preview runtime.
+     */
+    private fun prefetchPreviewLibraries(root: String) {
+        if (previewRuntimeJars().isEmpty()) return
+        analysisScope.launch(ioDispatcher) {
+            runCatching {
+                val store = projectModel.storeFor(root) ?: return@launch
+                val bridge = DependencyModelBridge(store)
+                val compose = store.workspace.projects.flatMap { it.modules }.flatMap { bridge.declared(it) }
+                    .any { it.coordinate.group.startsWith("androidx.compose") || it.coordinate.group.startsWith("org.jetbrains.compose") }
+                if (compose && active?.rootPath == root) previewLibraryJars()
+            }.onFailure { previewLog.warn("preview libraries were not fetched at open: ${it.message}") }
+        }
+    }
+
     private suspend fun previewLibraryJars(): List<String> = withContext(ioDispatcher) {
         val root = active?.rootPath?.takeIf { it.isNotEmpty() } ?: return@withContext emptyList()
         val store = projectModel.storeFor(root) ?: return@withContext emptyList()
@@ -636,7 +692,9 @@ class IosBackend(
         previewLibraries?.takeIf { it.first == declared }?.second
             ?: resolving(message = "Resolving preview libraries", showUntilReported = true) { progress ->
                 IosPreviewDependencies(root).classpath(declared, progress)
-            }.also { previewLibraries = declared to it }
+            // An empty answer is a resolve that failed (a download timed out, the preview was closed while it
+            // ran). Kept, it would be the answer from then on, and every preview would fail on its first class.
+            }.also { if (it.isNotEmpty()) previewLibraries = declared to it }
     }
 
     private fun toUiPreview(p: PreviewInfo): UiComposePreview {
@@ -749,6 +807,13 @@ class IosBackend(
      */
     override suspend fun complete(path: String, text: String, offset: Int): UiCompletionResult {
         val empty = UiCompletionResult(emptyList(), offset, offset)
+        // The engine answers every language when it is compiled, as the app carries it when it can. Only
+        // interpreted (the embedded JVM's), its Kotlin completion measured half a second to four and a half
+        // on a phone: Kotlin is then this host's own analysis's, and the engine has the languages that
+        // analysis does not know (Java, XML), where a slow answer beats none.
+        val engine = embedded?.takeIf { !path.isKotlin() || it.answersKotlin }
+            ?.let { withContext(ioDispatcher) { it.complete(path, text, offset) } }
+        if (engine != null && (engine.items.isNotEmpty() || !path.isKotlin())) return engine
         if (!path.isKotlin()) return empty
         return withAnalysis(empty) { it.complete(path, text, offset)?.toUi() ?: empty }
     }
@@ -765,6 +830,8 @@ class IosBackend(
      * false errors — but it is also why project-only code is where it earns its keep today.
      */
     override suspend fun analyze(path: String, text: String): List<UiDiagnostic> {
+        embedded?.takeIf { !path.isKotlin() || it.answersKotlin }
+            ?.let { withContext(ioDispatcher) { it.analyze(path, text) } }?.let { return it }
         if (!path.isKotlin()) return emptyList()
         val diagnostics = withAnalysis(emptyList()) { it.analyze(path, text).orEmpty() }
         return diagnostics.map { d ->
@@ -798,6 +865,7 @@ class IosBackend(
 
     override fun saveFile(path: String, text: String) {
         IosFiles.writeText(path, text)
+        embedded?.let { engine -> analysisScope.launch(ioDispatcher) { engine.documentChanged(path, text) } }
     }
 
     /**
@@ -1078,6 +1146,7 @@ class IosBackend(
         withContext(ioDispatcher) { projectModel.reopen(rootPath) }
         ensureClasspath(rootPath)
         bumpProjects()
+        prefetchPreviewLibraries(rootPath)
         return true
     }
 
@@ -1102,7 +1171,9 @@ class IosBackend(
         if (projectModel.storeFor(rootPath) != null) projectModel.close()
         if (!IosFiles.delete(rootPath)) return false
         if (active?.rootPath == rootPath) { resetAnalysis(); active = null }
-        bumpProjects()
+        // Not the project epoch: that advancing means a project was opened, and the app follows it into the
+        // editor, which after a delete was an editor on nothing.
+        bumpFs()
         return true
     }
 
