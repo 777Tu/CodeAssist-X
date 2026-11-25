@@ -388,7 +388,12 @@ fun ProjectsHomeScreen(
             }
 
             if (seasonalCard != null) {
-                item("seasonal") { seasonalCard(Modifier.padding(horizontal = PhoneListInset).padding(top = 16.dp)) }
+                item("seasonal") {
+                    // A full-bleed announcement reaches past the slot's margin to the screen edges.
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        dev.ide.ui.components.LocalAnnouncementHost provides dev.ide.ui.components.AnnouncementHost(bleed = PhoneListInset, wide = false),
+                    ) { seasonalCard(Modifier.padding(horizontal = PhoneListInset).padding(top = 16.dp)) }
+                }
             }
 
             if (showLegacyRecovery) {
@@ -975,6 +980,17 @@ private fun UpdateRow(update: UiStoreUpdate, onOpen: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = c.onSurfaceVariant,
                 )
+                // What the new version says it changes, so a fix can be told from a rewrite before opening it.
+                changelogPreview(update.item.changelog)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = c.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
             Text(stringResource(Res.string.home_update_review), style = MaterialTheme.typography.labelLarge, color = c.primary)
         }
@@ -1435,7 +1451,11 @@ private fun WideProjectsHome(
                 SortChooser(sort) { sort = it }
             }
             // Every gap down the wide column is 16dp: the search row already leaves 8 below itself.
-            seasonalCard?.invoke(Modifier.padding(top = 8.dp, bottom = 8.dp))
+            if (seasonalCard != null) {
+                androidx.compose.runtime.CompositionLocalProvider(
+                    dev.ide.ui.components.LocalAnnouncementHost provides dev.ide.ui.components.AnnouncementHost(wide = true),
+                ) { seasonalCard(Modifier.padding(top = 8.dp, bottom = 8.dp)) }
+            }
             if (showLegacyRecovery) LegacyRecoveryNotice(onDismissLegacyRecovery, inset = 0.dp, top = 8.dp)
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),

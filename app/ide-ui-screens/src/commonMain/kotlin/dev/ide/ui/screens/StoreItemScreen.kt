@@ -99,6 +99,8 @@ import dev.ide.ui.generated.resources.store_create
 import dev.ide.ui.generated.resources.store_hero_download
 import dev.ide.ui.generated.resources.store_hero_installs
 import dev.ide.ui.generated.resources.store_install_project
+import dev.ide.ui.generated.resources.store_get_plugin
+import dev.ide.ui.generated.resources.store_needs_plugin_hint
 import dev.ide.ui.generated.resources.store_open_in_editor
 import dev.ide.ui.generated.resources.store_installing
 import dev.ide.ui.generated.resources.store_item_about
@@ -208,6 +210,8 @@ fun StoreItemScreen(
     onOpenPublisher: ((String) -> Unit)? = null,
     /** Opens an already-installed project by its root path. Null on a host that cannot open projects. */
     onOpenInstalled: ((String) -> Unit)? = null,
+    /** Opens the Plugins screen's Get tab on this plugin id. Null where the host has no Plugins screen. */
+    onGetPlugin: ((String) -> Unit)? = null,
 ) {
     if (item == null) { onBack(); return }
     val scope = rememberCoroutineScope()
@@ -242,8 +246,31 @@ fun StoreItemScreen(
     // A merge that left files with both sides in them: listed so the user knows where to look.
     var merged by remember(item.id) { mutableStateOf<UiStoreMergeResult?>(null) }
     val shots = rememberResolvedScreenshots(backend, item)
+    // The plugins this project needs that this device does not have. Read from what loaded at startup: a
+    // plugin installed since only counts after the restart that loads it, which is what the hint says.
+    val missingPlugins = remember(item.id, item.requiredPlugins) {
+        if (item.requiredPlugins.isEmpty()) emptyList()
+        else {
+            val present = runCatching { backend.settings.pluginCatalog() }.getOrDefault(emptyList()).mapTo(HashSet()) { it.id }
+            item.requiredPlugins.filterNot { it in present }
+        }
+    }
+    // Named as the Get tab names them, once there is a missing one to name.
+    val needsPlugin by produceState<String?>(missingPlugins.firstOrNull(), missingPlugins) {
+        val id = missingPlugins.firstOrNull() ?: return@produceState
+        value = runCatching { backend.settings.pluginDownloads().plugins.firstOrNull { it.id == id }?.name }.getOrNull() ?: id
+    }
 
-    val tabs = remember(item) { availableTabs(item) }
+    // Every published version's notes, for "What's new since" and the Changelog tab. A bundled item has no
+    // versions; a failed fetch leaves the live version's own notes to stand in.
+    val history by produceState(emptyList<dev.ide.ui.backend.UiVersionNote>(), item.id) {
+        if (item.version != null && item.templateId == null) {
+            value = runCatching { backend.store.versionHistory(item.id) }.getOrDefault(emptyList())
+        }
+    }
+    val whatsNew = remember(item, history, update) { whatsNew(item, history, update?.installedVersion) }
+    val now = remember { dev.ide.ui.platform.nowMillis() }
+    val tabs = remember(item, history) { availableTabs(item, history) }
 
     // Neutral, like every other surface: the hero used to hash the item id to pick one of three tints.
     val pair = tonalPair(item.id.hashCode())
@@ -284,9 +311,13 @@ fun StoreItemScreen(
                                 onOpenInstalled?.let { open -> { open(path) } }
                             },
                             onRate = onRate,
+                            needsPlugin = needsPlugin.takeIf { missingPlugins.isNotEmpty() && install !is InstallState.Installed },
                             onPrimary = {
                                 when {
                                     item.templateId != null -> onCreateFromTemplate(item.templateId!!)
+                                    // The plugin first: without it the download is a project this IDE cannot open.
+                                    missingPlugins.isNotEmpty() && install !is InstallState.Installed ->
+                                        onGetPlugin?.invoke(missingPlugins.first())
                                     // An update: in place when nothing the user did would be lost, otherwise the
                                     // choice. The check is the project on disk now, not what the page last saw.
                                     update != null && install is InstallState.Installed -> scope.launch {
@@ -317,7 +348,9 @@ fun StoreItemScreen(
                         val versions = update?.let {
                             stringResource(Res.string.store_update_versions, it.installedVersion ?: "?", it.availableVersion ?: "?")
                         }
-                        val shown = message ?: progress?.message ?: versions
+                        val pluginHint = needsPlugin?.takeIf { missingPlugins.isNotEmpty() && install !is InstallState.Installed }
+                            ?.let { stringResource(Res.string.store_needs_plugin_hint, it) }
+                        val shown = message ?: progress?.message ?: pluginHint ?: versions
                         InstallHint(item, shown, versionSaid = shown != null && shown == versions)
                     }
 
@@ -326,9 +359,11 @@ fun StoreItemScreen(
                     }
 
                     when (tab) {
-                        StoreTab.Overview -> overview(backend, item, shots) { lightbox = it }
+                        StoreTab.Overview -> overview(backend, item, shots, whatsNew, now) { lightbox = it }
                         StoreTab.Readme -> item("readme") { ProseCard(item.readme.orEmpty()) }
-                        StoreTab.Changelog -> item("changelog") { ChangelogCard(item) }
+                        StoreTab.Changelog -> item("changelog") {
+                            if (history.any { !it.changelog.isNullOrBlank() }) VersionHistoryList(history, now) else ChangelogCard(item)
+                        }
                         StoreTab.Reviews -> item("reviews") {
                             ReviewsPanel(
                                 backend = backend,
@@ -413,13 +448,13 @@ fun StoreItemScreen(
 /** Which tabs the detail screen offers, given what this item actually carries. */
 private enum class StoreTab { Overview, Readme, Reviews, Changelog }
 
-private fun availableTabs(item: UiStoreItem): List<StoreTab> = buildList {
+private fun availableTabs(item: UiStoreItem, history: List<dev.ide.ui.backend.UiVersionNote> = emptyList()): List<StoreTab> = buildList {
     add(StoreTab.Overview)
     if (!item.readme.isNullOrBlank()) add(StoreTab.Readme)
     // Always offered, not only when reviews exist: an item with none needs somewhere for the first one to
     // be written, and the panel draws its own empty state.
     add(StoreTab.Reviews)
-    if (!item.changelog.isNullOrBlank()) add(StoreTab.Changelog)
+    if (!item.changelog.isNullOrBlank() || history.any { !it.changelog.isNullOrBlank() }) add(StoreTab.Changelog)
 }
 
 @Composable
@@ -799,11 +834,14 @@ private fun InstallRow(
     update: UiStoreUpdate? = null,
     /** Opens the installed project. Shown beside the button only while the button is the update. */
     onOpen: (() -> Unit)? = null,
+    /** The name of a plugin the project needs and this device lacks: the button gets that plugin instead. */
+    needsPlugin: String? = null,
 ) {
     val c = MaterialTheme.colorScheme
     val busy = state is InstallState.Downloading
     val label = when {
         item.templateId != null -> stringResource(Res.string.store_create)
+        needsPlugin != null -> stringResource(Res.string.store_get_plugin, needsPlugin)
         !item.available -> stringResource(Res.string.store_coming_soon)
         busy -> stringResource(Res.string.store_installing)
         state is InstallState.Installed && update != null ->
@@ -813,6 +851,7 @@ private fun InstallRow(
     }
     val glyph = when {
         item.templateId != null -> CaSymbols.add
+        needsPlugin != null -> CaSymbols.extension
         busy -> CaSymbols.progressActivity
         state is InstallState.Installed && update != null -> CaSymbols.update
         state is InstallState.Installed -> CaSymbols.playArrow
@@ -954,8 +993,13 @@ private fun LazyListScope.overview(
     backend: IdeBackend,
     item: UiStoreItem,
     shots: List<String>,
+    whatsNew: WhatsNew?,
+    now: Long,
     onOpenShot: (Int) -> Unit,
 ) {
+    // Above the screenshots: for a project someone already has, what changed is the news; for one they do
+    // not, it says the project is looked after.
+    whatsNew?.let { item("whats-new") { WhatsNewCard(it, now) } }
     // Only offered when the item actually has artwork; see ScreenshotCarousel.
     if (item.screenshots.isNotEmpty() || item.previewKey != null) {
         item("shots") { ScreenshotCarousel(backend, item, onOpenShot, shots) }
@@ -1611,6 +1655,10 @@ private fun ReviewsPanel(
         )
     }
 }
+
+/** [relativeAge], for the release notes in WhatsNew.kt. */
+@Composable
+internal fun releaseAge(publishedAtMs: Long, now: Long): String? = relativeAge(publishedAtMs, now)
 
 /** "3 d ago" style age, or null when the backend sent no usable timestamp. */
 @Composable

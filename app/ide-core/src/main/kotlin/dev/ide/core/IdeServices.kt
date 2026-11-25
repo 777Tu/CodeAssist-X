@@ -117,6 +117,7 @@ import dev.ide.core.sync.ExternalRepositories
 import dev.ide.core.sync.NoSyncProgress
 import dev.ide.core.sync.ProjectSyncOutcome
 import dev.ide.core.sync.ProjectSyncService
+import dev.ide.core.sync.SyncSnapshot
 import dev.ide.core.sync.SyncStamp
 import dev.ide.core.sync.UnrecognizedProjectMarker
 import dev.ide.core.templates.CalculatorSampleTemplate
@@ -2321,6 +2322,31 @@ class IdeServices private constructor(
     internal suspend fun syncFromBuildFiles(): ProjectSyncOutcome = projectSync.sync(SyncReason.MANUAL)
 
     /**
+     * True when this project's importer syncs before builds ([dev.ide.model.sync.ProjectImporter.syncBeforeBuild]),
+     * so a build should go through [syncBeforeBuildIfNeeded] first. Asks the importers to detect the folder,
+     * which stats a few files; whether a sync is actually due is [syncBeforeBuildIfNeeded]'s, off the main thread.
+     */
+    fun syncsBeforeBuild(): Boolean = runCatching { projectSync.importer()?.syncBeforeBuild == true }.getOrDefault(false)
+
+    /**
+     * Sync the project before a build when its importer asks for that and is out of date
+     * ([dev.ide.model.sync.ProjectImporter.syncBeforeBuild]), then re-resolve dependencies and re-index when the
+     * model changed, as a manual Sync does, so the build sees new modules with their libraries in place.
+     * Returns the sync's outcome, or null when no sync was due. Must run in the IDE's process: the `:build`
+     * daemon reads the model from disk and would not see a sync of its own copy.
+     */
+    internal suspend fun syncBeforeBuildIfNeeded(): ProjectSyncOutcome? {
+        val importer = projectSync.importerToSyncBeforeBuild() ?: return null
+        val outcome = projectSync.sync(SyncReason.BUILD_FILE_CHANGED)
+        if (outcome.ok && outcome.modelChanged) {
+            dependencies.retryDependencyResolution()
+            reindex()
+        }
+        if (!outcome.ok) Log.logger("ide.sync").warn("sync before build (${importer.displayName}) failed: ${outcome.message}")
+        return outcome
+    }
+
+    /**
      * The target this compatibility-mode project's Kotlin Multiplatform modules are imported for, or null
      * when no module could be imported as either Android or the JVM. Reads the build scripts.
      */
@@ -2413,9 +2439,32 @@ class IdeServices private constructor(
      * so the tree can pick a distinct icon (Java sources vs `res/` vs `assets/`) and know which roots are
      * package contexts (compactable + new-class targets).
      */
-    fun treeRootsDetailed(module: Module): List<TreeRootInfo> = module.sourceSets.flatMap { ss ->
-        ss.contentRoots.filter { cr -> cr.roles.any(::surfacedInTree) }
-            .map { TreeRootInfo(Paths.get(it.dir.path), ss.name, it.roles) }
+    fun treeRootsDetailed(module: Module): List<TreeRootInfo> {
+        val declared = module.sourceSets.flatMap { ss ->
+            ss.contentRoots.filter { cr -> cr.roles.any(::shownInTree) }
+                .map { TreeRootInfo(Paths.get(it.dir.path), ss.name, it.roles) }
+        }
+        return declared + conventionJniLibRoots(module, declared)
+    }
+
+    /**
+     * `src/<set>/jniLibs` folders an Android module never declared. A project made before 3.3 has no `jniLibs`
+     * root in its model (the default source sets are only written when a module is added), yet the build
+     * packages the folder by convention (`AndroidBuildSystem.jniLibRoots`), as AGP does. Showing it here keeps
+     * the tree in step with the build: without it the folder was reachable only from the All Files view.
+     * Android-ness is read from the model (a module with an Android `res` root), since ide-core does not
+     * depend on the Android support module.
+     */
+    private fun conventionJniLibRoots(module: Module, declared: List<TreeRootInfo>): List<TreeRootInfo> {
+        val android = module.sourceSets.any { ss -> ss.contentRoots.any { ContentRole.ANDROID_RES in it.roles } }
+        if (!android) return emptyList()
+        val moduleDir = moduleRoot(module) ?: return emptyList()
+        val known = declared.mapTo(HashSet()) { it.path.toAbsolutePath().normalize() }
+        return module.sourceSets.map { it.name }.distinct().mapNotNull { set ->
+            val dir = moduleDir.resolve("src").resolve(set).resolve("jniLibs").toAbsolutePath().normalize()
+            if (dir in known || !Files.isDirectory(dir)) null
+            else TreeRootInfo(dir, set, setOf(ContentRole.JNI_LIBS))
+        }
     }
 
     /**
@@ -6730,6 +6779,8 @@ class IdeServices private constructor(
                 )
             }
             SyncStamp.write(root, importer.id.value, SyncStamp.match(root, importer.syncFiles()))
+            // What this import declared, so the first sync replaces only that (see SyncSnapshot).
+            SyncSnapshot.write(root, importer.id.value, model)
             return true
         }
 
@@ -6852,6 +6903,13 @@ internal class ActiveEngineXmlResourceHost(private val env: ApplicationEnvironme
  * Project view. The built-ins left out (`jni-libs`, `excluded`) stay out.
  */
 private fun surfacedInTree(role: ContentRole): Boolean = role in TREE_ROOT_ROLES || role !in ContentRole.entries
+
+/**
+ * The roles the project tree draws as roots: [surfacedInTree] plus `jniLibs`. Prebuilt native libraries are
+ * part of a module the way `assets/` is, and Android Studio's Android view lists them, but they are binaries:
+ * they stay out of [IdeServices.treeRoots], which search and rename walk for text.
+ */
+private fun shownInTree(role: ContentRole): Boolean = surfacedInTree(role) || role == ContentRole.JNI_LIBS
 
 /** The built-in content roles surfaced in the project tree (code + resources + assets + AIDL); see [IdeServices.treeRoots]. */
 private val TREE_ROOT_ROLES = setOf(

@@ -420,8 +420,29 @@ const val PLUGIN_API_VERSION: Int = 4
  * entry point chosen on a module's Run card in Module Settings, which is shown for a plugin's module types
  * but was readable only from the project's settings file. Additive; on an older host the key resolves to
  * nothing, and the gutter id is a constant the plugin carries.
+ *
+ * `3.8.0` adds `dev.ide.build.BuildConfiguration.addAssets` and `assets`, the assets counterpart of
+ * `addNativeLibraries`: a directory under the module's build directory, laid out as an `assets` folder, that
+ * the Android build packages into the APK or bundle after the task that writes it. The Dart plugin builds a
+ * Flutter app's APK through it (the compiled program and its `flutter_assets`). Additive; on an older host the
+ * call throws a `NoSuchMethodError` the plugin can catch.
+ *
+ * It also adds `dev.ide.model.sync.ProjectImporter.syncBeforeBuild`: an importer whose model follows files a
+ * tool rewrites (a pub package's Flutter plugins, which `pub get` decides) is synced before a build when its
+ * watched files changed, in the IDE's process, with dependencies re-resolved, so the build sees the new modules.
+ * An IDE-owned project's sync now removes only the modules and dependencies the previous sync produced, so what
+ * the user added in the IDE survives it. Defaulted to false; an older host never asks.
+ *
+ * And `dev.ide.build.AndroidRunParticipant` on `ANDROID_RUN_PARTICIPANT_EP` (`platform.androidRunParticipant`): a
+ * plugin joins the host's Run of an Android app module, with extras on its launch intent and a session in the Run
+ * console once it launched. The Dart plugin makes a Flutter app's Run Debug `flutter run` with it: the app's own
+ * APK, attached for hot reload. An older host never consults it.
+ *
+ * And `PluginManifest.optionalDependsOn` (TOML `optionalDependsOn = [...]`): plugins this one works with but
+ * does not need. A present one loads first; a missing one blocks nothing, and the Plugins screen offers to get
+ * it, as it now also does for a missing [PluginManifest.dependsOn]. An older host ignores the key.
  */
-const val PLUGIN_SPI_VERSION: String = "3.7.0"
+const val PLUGIN_SPI_VERSION: String = "3.8.0"
 
 /**
  * A plugin's identity and load-order metadata. Built-ins construct this as a Kotlin literal on their entry
@@ -468,6 +489,16 @@ data class PluginManifest(
     val capabilities: List<String> = emptyList(),
     val minHostVersion: String? = null,
     val trusted: Boolean = true,
+    /**
+     * Ids of plugins this one works with but does not need (SPI 3.8.0). One that is installed and enabled
+     * loads first, as if it were in [dependsOn], so this plugin can look up what it contributes; one that is
+     * missing or turned off blocks nothing. The Plugins screen names the missing ones on this plugin's page and
+     * offers to get them, so a feature that needs another plugin is one tap from working.
+     *
+     * The Dart plugin names the NDK plugin here: Flutter apps build without it, and only the plugins that ship
+     * C code through `dart:ffi` need it.
+     */
+    val optionalDependsOn: List<String> = emptyList(),
 ) {
     /** The attribution id every contribution this plugin makes is tagged with. */
     val pluginId: PluginId get() = PluginId(id)

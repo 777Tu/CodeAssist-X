@@ -164,6 +164,13 @@ class RemoteBuildRunner(context: Context, private val services: IdeServices) : B
             noteActivity()
             _buildState.update { it.copy(log = it.log + line(msg)) }
         },
+        onLogLine = { msg, level, task, timeLabel, timestampMs ->
+            noteActivity()
+            val row = BuildLogLine(
+                msg, UiLogLevel.entries.getOrElse(level) { UiLogLevel.Info }, task.ifEmpty { null }, timeLabel, timestampMs,
+            )
+            _buildState.update { it.copy(log = it.log + row) }
+        },
         onDiagnostic = { severity, message, kind, source, file, lineNo, column, detail, task ->
             noteActivity()
             _buildState.update {
@@ -199,12 +206,12 @@ class RemoteBuildRunner(context: Context, private val services: IdeServices) : B
         onPermission = { reqId, category, detail ->
             _permissionRequest.value = if (reqId < 0) null else UiPermissionRequest(reqId, category, detail)
         },
-        onLaunchPackage = { pkg ->
+        onLaunchPackage = { pkg, extras ->
             // The daemon installed the APK in :build; launch it here in the UI process (it has a foreground
             // activity, so the activity launch isn't blocked) and surface the outcome in the build console.
             // Held while a full-screen ad is up, so the app doesn't open under it.
             if (pkg.isNotEmpty()) dev.ide.android.FullScreenAdGate.runWhenClear {
-                dev.ide.android.ApkLauncher.launch(appContext, pkg) { msg -> _buildState.update { it.copy(log = it.log + line(msg)) } }
+                dev.ide.android.ApkLauncher.launch(appContext, pkg, extras) { msg -> _buildState.update { it.copy(log = it.log + line(msg)) } }
             }
         },
         onLaunchPluginSandbox = { path ->

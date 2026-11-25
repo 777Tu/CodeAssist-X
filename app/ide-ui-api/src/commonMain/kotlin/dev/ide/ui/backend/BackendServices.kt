@@ -1125,6 +1125,24 @@ interface StoreService {
     suspend fun feed(seedItemId: String? = null, refresh: Boolean = false): UiStoreFeed? = null
 
     /**
+     * Home's server-driven announcements for a UI showing [localeTag] (`en`, `pt-BR`), highest priority
+     * first, with their text resolved for that language and the expired ones already left out. Dismissals are
+     * the UI's to apply (see [UiAnnouncement.dismissKey]).
+     *
+     * With [allowNetwork] false this answers from what is kept on disk and never makes a request, so Home can
+     * draw it on its first frame. With it true the backend asks the server, but only when the kept answer is
+     * older than a few hours or was asked for a different language or sign-in state; otherwise it is the
+     * same answer. Empty when nothing is live, nothing is kept, or this build has no store.
+     */
+    suspend fun homeAnnouncements(localeTag: String, allowNetwork: Boolean = false): List<UiAnnouncement> = emptyList()
+
+    /**
+     * A local file holding an announcement image, fetched once and kept: [src] is a path in the store's
+     * public media bucket (served from the mirror first) or an `https` URL. Null when it cannot be had.
+     */
+    suspend fun announcementImage(src: String): String? = null
+
+    /**
      * Live install progress, keyed by item id.
      *
      * Keyed rather than singular so concurrent installs each report their own progress; the UI must not
@@ -1350,6 +1368,13 @@ interface StoreService {
      * when it is not installed, is current, or the store cannot be reached.
      */
     suspend fun updateFor(itemId: String): UiStoreUpdate? = null
+
+    /**
+     * [itemId]'s published versions with their release notes, newest first. Empty when the store cannot be
+     * reached or the item is a bundled one with no versions, which the page answers with the live version's
+     * notes alone.
+     */
+    suspend fun versionHistory(itemId: String): List<UiVersionNote> = emptyList()
 
     /** Every installed store project the store has a newer version of: Home's Updates segment. */
     suspend fun availableUpdates(): List<UiStoreUpdate> = emptyList()
@@ -1813,6 +1838,12 @@ data class UiPluginInfo(
     val apiVersion: Int? = null,
     /** What the package manager says about the installed plugin app, or null for a built-in (or no host support). */
     val app: UiPluginApp? = null,
+    /** Plugins this one works with but does not need (its manifest's `optionalDependsOn`). */
+    val optionalDependsOn: List<String> = emptyList(),
+    /** The [dependsOn] ids not installed on this device: this plugin cannot load until they are. */
+    val missingRequired: List<String> = emptyList(),
+    /** The [optionalDependsOn] ids not installed on this device: what it does with them is unavailable. */
+    val missingOptional: List<String> = emptyList(),
 )
 
 /** An installed plugin app's facts, read from the package manager rather than from anything it declares. */
@@ -2429,6 +2460,14 @@ interface AgentService {
 
     /** Replace the link with a new one. The old address stops working at once, wherever it was pasted. */
     fun resetMcpRelayLink() {}
+
+    companion object {
+        /**
+         * The screen the agent UI contributes for connecting Claude to the IDE ([mcpHost] and [mcpRelay]), so
+         * the shell's entry points (the editor menu, Settings, Home) and the plugin agree on the route.
+         */
+        const val SCREEN_USE_WITH_CLAUDE: String = "agent.claude"
+    }
 
     /** A no-op agent for backends that wire none. */
     object Unsupported : AgentService {

@@ -74,6 +74,9 @@ fun packFlutter(taskName: String, dir: String, archive: String) = tasks.register
 }
 val packFlutterRoot = packFlutter("packFlutterRoot", "root", "flutter-root.zip")
 val packFlutterBaseAssets = packFlutter("packFlutterBaseAssets", "base-assets", "flutter-base-assets.zip")
+// Release builds' product platform, from fetch-flutter-release.sh, which also stages the release engine and
+// gen_snapshot into the jniLibs below. Without them the plugin still builds debug APKs; a release build says why not.
+val packFlutterProduct = packFlutter("packFlutterProduct", "product", "flutter-product.zip")
 
 android {
     namespace = "dev.codeassist.dart"
@@ -84,8 +87,8 @@ android {
         // The IDE's own floor: this code runs inside the IDE's process.
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     // Signed with the IDE's upload key when one is configured (a gitignored keystore.properties at the repo
@@ -156,7 +159,7 @@ android {
     }
 }
 
-tasks.named("preBuild") { dependsOn(packSdkAssets, packFlutterRoot, packFlutterBaseAssets) }
+tasks.named("preBuild") { dependsOn(packSdkAssets, packFlutterRoot, packFlutterBaseAssets, packFlutterProduct) }
 
 // JUnit 5, like the rest of this build. AGP defaults a unit test task to JUnit 4.
 tasks.withType<Test>().configureEach { useJUnitPlatform() }

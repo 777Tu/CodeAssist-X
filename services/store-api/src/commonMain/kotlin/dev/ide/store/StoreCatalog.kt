@@ -86,9 +86,21 @@ data class RemoteStoreItem(
      * when there is one and falls back to the glyph when there is not.
      */
     val iconPath: String? = null,
+    /** Ids of the plugins the project needs to open, from its latest version. Empty for nearly every item. */
+    val requiredPlugins: List<String> = emptyList(),
 )
 
 /** A filter tile on the Explore screen. */
+/** One approved version of a listing and what its publisher said about it. */
+data class RemoteVersionNote(
+    val version: String,
+    val versionCode: Int,
+    /** Null when the version shipped without notes. */
+    val changelog: String? = null,
+    /** ISO 8601, when the version went live. */
+    val publishedAt: String? = null,
+)
+
 data class RemoteCategory(
     val id: String,
     val title: String,
@@ -161,6 +173,12 @@ interface StoreCatalogSource {
     val appBuild: Int? get() = null
 
     /**
+     * Which app this source belongs to (`android`, `ios`, `desktop`), for content targeted at one platform.
+     * Null means unknown, which targeted content does not match.
+     */
+    val platform: String? get() = null
+
+    /**
      * The catalog for an IDE at [appBuild]. The build number filters out items that need a newer IDE, so
      * an old install never shows a card whose payload it cannot open.
      */
@@ -179,6 +197,16 @@ interface StoreCatalogSource {
      * anonymous personalization model the server holds install ids, not "this user's" installs.
      */
     fun feedDocument(seedSlug: String? = null): StoreResult<String> =
+        StoreResult.Unavailable("No store endpoint")
+
+    /**
+     * Home's announcements from `home_announcements(...)`, as the **raw JSON document**, for the same reason
+     * [feedDocument] is raw: the caller caches these exact bytes.
+     *
+     * The server picks what is live for this [appBuild], [platform], the language of [locale] and whether the
+     * user is [signedIn]; the client only draws it.
+     */
+    fun homeAnnouncementsDocument(locale: String, signedIn: Boolean): StoreResult<String> =
         StoreResult.Unavailable("No store endpoint")
 
     /**
@@ -216,6 +244,10 @@ interface StoreCatalogSource {
      * the form has to have it and cannot infer it from a display title.
      */
     fun categories(): StoreResult<List<Pair<String, String>>> =
+        StoreResult.Unavailable("No store endpoint")
+
+    /** The approved versions of [slug], newest first, with their release notes (`store_version_history`). */
+    fun versionHistory(slug: String): StoreResult<List<RemoteVersionNote>> =
         StoreResult.Unavailable("No store endpoint")
 
     /**

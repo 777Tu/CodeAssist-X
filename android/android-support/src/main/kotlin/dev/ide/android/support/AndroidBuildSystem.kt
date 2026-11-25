@@ -626,11 +626,18 @@ class AndroidBuildSystem(
         }
         // Merge dependency-library + AAR manifests into the app manifest (so their components/permissions
         // land in the APK), substituting ${applicationId} etc. The linked manifest is the merged one.
+        // The variant's own manifests overlay the main one, as AGP merges them: `src/debug/AndroidManifest.xml`
+        // (a Flutter app's INTERNET permission is there), a flavor's, the variant's, highest priority first.
+        val mainManifest = layout.manifest(facet).toAbsolutePath().normalize()
+        val overlayManifests = sourceSetNames(app, variant).filter { it != "main" }.reversed()
+            .map { moduleDir(app).resolve("src").resolve(it).resolve("AndroidManifest.xml") }
+            .filter { it.toAbsolutePath().normalize() != mainManifest }
         tasks.task(processManifest, listOf(checkAarMeta)) {
             ManifestMergeTask(
                 processManifest, layout.manifest(facet), libraryManifests, manifestPlaceholders,
                 facet.minSdk, facet.targetSdk, layout.mergedManifest, facet.namespace,
                 stripVersionCode = versionCodeAuthoritative, stripVersionName = versionNameAuthoritative,
+                overlayManifests = overlayManifests,
             )
         }
         // On a debug build, splice the log-bridge <provider> into the merged manifest before linking; aapt2
@@ -819,6 +826,10 @@ class AndroidBuildSystem(
         // realized rather than now: the plugins that declare them are applied after every task is registered.
         val nativeModules = (listOf(app) + closure).distinctBy { it.id }
         fun contributedNative() = nativeModules.flatMap { config.nativeLibraries(it) }
+        // Assets a plugin produces for the app or a module it packages (a compiled Flutter program and its
+        // bundle), after the declared roots. Read at realize time for the same reason as the native ones.
+        fun packagedAssets() = (assetsDirs + nativeModules.flatMap { config.assets(it) }.map { it.dir }).distinct()
+        fun assetProducers() = nativeModules.flatMap { config.assets(it) }.map { it.producedBy }.distinct()
         tasks.task(mergeNativeLibs) {
             MergeNativeLibsTask(
                 mergeNativeLibs, jniDirs + contributedNative().map { it.dir }.distinct(), externalJars,
@@ -1085,8 +1096,9 @@ class AndroidBuildSystem(
             val bundleResAp = if (shrinkResources) layout.shrunkProtoAp else layout.protoAp
             val packageBundle = step("packageBundle")
             tasks.task(packageBundle, pkgDeps) {
-                BundleTask(packageBundle, bundleResAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedAab, layout.baseModuleZip, bundler, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile, packaging = facet.packaging)
+                BundleTask(packageBundle, bundleResAp, dexDirs, packagedAssets(), listOf(layout.mergedNativeLibs), layout.unsignedAab, layout.baseModuleZip, bundler, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile, packaging = facet.packaging)
             }
+            tasks.named(packageBundle).configure { assetProducers().forEach { dependsOn(it) } }
             val signBundle = step("signBundle")
             tasks.task(signBundle, listOf(packageBundle)) {
                 SignBundleTask(signBundle, layout.unsignedAab, layout.signedAab, variantSigning, facet.minSdk, bundleSigner)
@@ -1096,7 +1108,8 @@ class AndroidBuildSystem(
             return
         }
 
-        tasks.task(pkg, pkgDeps) { PackageApkTask(pkg, layout.resourcesAp, dexDirs, assetsDirs, listOf(layout.mergedNativeLibs), layout.unsignedApk, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile, packaging = facet.packaging, compressionLevel = if (release) java.util.zip.Deflater.BEST_COMPRESSION else java.util.zip.Deflater.BEST_SPEED) }
+        tasks.task(pkg, pkgDeps) { PackageApkTask(pkg, layout.resourcesAp, dexDirs, packagedAssets(), listOf(layout.mergedNativeLibs), layout.unsignedApk, javaResJars = listOf(layout.mergedJavaRes), artProfile = artProfile, packaging = facet.packaging, compressionLevel = if (release) java.util.zip.Deflater.BEST_COMPRESSION else java.util.zip.Deflater.BEST_SPEED) }
+        tasks.named(pkg).configure { assetProducers().forEach { dependsOn(it) } }
         // `dexApi`: the minSdk, or this device's level for a Run, whose APK goes nowhere else (see dexApiFor).
         tasks.task(sign, listOf(pkg)) { SignApkTask(sign, layout.unsignedApk, layout.signedApk, variantSigning, signer, minSdk = dexApi) }
         // Top-level lifecycle aggregate (AGP's `assemble<Variant>`): fronts the signed APK.
